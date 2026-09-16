@@ -76,7 +76,11 @@ def test_sse_replays_history(client: TestClient) -> None:
 def test_ws_replay_and_live(client: TestClient) -> None:
     _emit(client, 2)
     latest = client.get("/api/v1/events/latest-sequence").json()["sequence"]
-    with client.websocket_connect(f"/api/v1/ws/events?after_sequence={latest - 2}") as ws:
+    ws_url = (
+        f"/api/v1/ws/events?token={client.app.state.authenticator.bootstrap_token}"
+        f"&after_sequence={latest - 2}"
+    )
+    with client.websocket_connect(ws_url) as ws:
         got: list[dict] = []
         for _ in range(2):
             msg = ws.receive_json()

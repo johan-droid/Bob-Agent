@@ -11,9 +11,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from redis import Redis
 
-from agent_system.config import get_settings
 from agent_system.domain.events import utcnow
 from agent_system.infra.db import make_engine, make_session_factory, session_scope
 from agent_system.infra.event_bus import EventBus
@@ -21,18 +19,8 @@ from agent_system.infra.models import AgentLease, Base, Task
 from agent_system.services.orchestrator import Orchestrator
 from agent_system.worker import LEASE_TTL_SECONDS, execute_task
 
-redis_url = get_settings().redis_url
-
-
-def _redis_available() -> bool:
-    try:
-        Redis.from_url(redis_url).ping()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _redis_available(), reason="redis not running")
+# NOTE: these tests drive `execute_task` directly with an injected session
+# factory — no Redis connection is exercised (only enqueue/main touch Redis).
 
 
 @pytest.fixture()

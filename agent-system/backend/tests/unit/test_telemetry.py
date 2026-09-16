@@ -51,12 +51,9 @@ class TestDisabledByDefault:
         assert "opentelemetry" not in sys.modules
 
     def test_missing_sdk_warns_instead_of_raising(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        try:
-            import opentelemetry  # noqa: F401
-
-            pytest.skip("opentelemetry installed; missing-dep path N/A")
-        except ImportError:
-            pass
+        """Simulate a bare install (no telemetry extra): endpoint set but the
+        SDK import fails ⇒ disabled with a warning, never a raise."""
+        monkeypatch.setitem(sys.modules, "opentelemetry", None)
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
         handle = setup_telemetry()
         assert handle.enabled is False
@@ -139,7 +136,6 @@ class TestElapsedSeconds:
 
 class TestOtelSmoke:
     def test_enabled_flow_with_collector_packages(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("opentelemetry.sdk", reason="telemetry extra not installed")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
         handle = setup_telemetry()
         assert handle.enabled is True

@@ -133,15 +133,22 @@ function ChatPageContent() {
         }
 
         if (t.state === "SUCCEEDED" || t.state === "FAILED" || t.state === "CANCELLED") {
+          const output = (t as { output?: string | null }).output;
           msgs.push({
             id: `task-${t.id}-result`,
             role: "agent",
-            content: t.last_error ? `⚠️ **Task failed:** ${t.last_error}` : `✓ **Task finished:** ${t.state}`,
+            content:
+              t.state === "FAILED"
+                ? `⚠️ **Task failed:** ${t.last_error || "unknown error"}`
+                : output || `✓ **Task finished:** ${t.state}`,
             taskId: t.id,
           });
         }
       }
-      setMessages(msgs);
+      // Merge, don't wipe: handleSend adds the optimistic user message (and
+      // streaming bubble) before the session id is set — a blind replace
+      // here would delete the just-sent first message of a new chat.
+      setMessages((prev) => (prev.length > 0 ? prev : msgs));
     });
 
     // Start polling events for live interaction
@@ -209,8 +216,16 @@ function ChatPageContent() {
                 next[lastIdx] = { ...next[lastIdx], streaming: false };
               }
             } else if (e.type === "tool.started") {
-              const toolName = String(payload.tool_name ?? payload.name ?? "tool");
-              const toolId = String(payload.call_id ?? `tool-${Date.now()}-${Math.random()}`);
+              // Backend emits {tool, capability_risk, protocol} (agent_loop);
+              // older/alternate shapes carry tool_name/name + call_id/input.
+              const toolName = String(
+                payload.tool ?? payload.tool_name ?? payload.name ?? "tool",
+              );
+              const toolId = String(
+                payload.call_id ??
+                  payload.approval_id ??
+                  `tool-${toolName}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              );
               const toolArgs = (payload.input ?? payload.args ?? {}) as Record<string, unknown>;
 
               const item: ToolCallItem = {
@@ -227,19 +242,42 @@ function ChatPageContent() {
                 next[lastIdx] = { ...next[lastIdx], toolCalls: tools };
               }
             } else if (e.type === "tool.completed" || e.type === "tool.failed") {
+              // Backend emits {tool, ok} — match by call_id when present,
+              // else by tool name, else mark the newest running tool.
               const toolId = String(payload.call_id ?? "");
-              const result = String(payload.output ?? payload.result ?? payload.error ?? "");
+              const toolName = String(payload.tool ?? payload.tool_name ?? "");
+              const result = String(
+                payload.output ?? payload.result ?? payload.error ?? payload.reason ?? "",
+              );
               const duration = Number(payload.duration_ms ?? 0);
               const status: "completed" | "failed" =
                 e.type === "tool.completed" ? "completed" : "failed";
 
               const lastIdx = next.length - 1;
               if (lastIdx >= 0 && next[lastIdx].toolCalls) {
-                const updatedTools: ToolCallItem[] = next[lastIdx].toolCalls!.map((t) =>
-                  t.id === toolId || t.name === String(payload.tool_name ?? "")
-                    ? { ...t, result, durationMs: duration, status }
-                    : t,
-                );
+                const tools = next[lastIdx].toolCalls!;
+                let matched = false;
+                const updatedTools: ToolCallItem[] = tools.map((t) => {
+                  const hit =
+                    (toolId && t.id === toolId) ||
+                    (toolName && t.name === toolName);
+                  if (hit) matched = true;
+                  return hit ? { ...t, result, durationMs: duration, status } : t;
+                });
+                if (!matched) {
+                  // Fall back to the newest still-running tool call.
+                  for (let i = updatedTools.length - 1; i >= 0; i--) {
+                    if (updatedTools[i].status === "running") {
+                      updatedTools[i] = {
+                        ...updatedTools[i],
+                        result,
+                        durationMs: duration,
+                        status,
+                      };
+                      break;
+                    }
+                  }
+                }
                 next[lastIdx] = { ...next[lastIdx], toolCalls: updatedTools };
               }
             } else if (e.type === "approval.requested") {
@@ -256,8 +294,23 @@ function ChatPageContent() {
                   decided: false,
                 },
               });
-            } else if (e.type === "approval.decided") {
-              const approvalId = String(payload.approval_id ?? "");
+            } else if (
+              e.type === "approval.approved" ||
+              e.type === "approval.denied" ||
+              e.type === "approval.expired"
+            ) {
+              // Canonical backend names (see domain/events.py) — there is no
+              // "approval.decided" event. approval_id may live top-level or
+              // in the payload.
+              const approvalId = String(
+                payload.approval_id ?? (e as { approval_id?: unknown }).approval_id ?? "",
+              );
+              const decision =
+                e.type === "approval.approved"
+                  ? "ALLOW_ONCE"
+                  : e.type === "approval.denied"
+                    ? "DENIED"
+                    : "DENIED";
               next = next.map((m) =>
                 m.approval?.approval_id === approvalId
                   ? {
@@ -265,11 +318,49 @@ function ChatPageContent() {
                       approval: {
                         ...m.approval,
                         decided: true,
-                        decision: String(payload.decision) as "ALLOW_ONCE" | "ALLOW_ALWAYS" | "DENIED",
+                        decision:
+                          String(payload.decision ?? decision) as
+                            | "ALLOW_ONCE"
+                            | "ALLOW_ALWAYS"
+                            | "DENIED",
                       },
                     }
                   : m,
               );
+            } else if (
+              e.type === "task.completed" ||
+              e.type === "task.failed" ||
+              e.type === "task.cancelled"
+            ) {
+              // Terminal task events close any open streaming bubble. Without
+              // this, a task that fails before its first token leaves the
+              // optimistic bubble hanging (spinner forever).
+              const lastIdx = next.length - 1;
+              if (e.type === "task.failed") {
+                const errText = String(payload.error ?? "Task failed");
+                if (lastIdx >= 0 && next[lastIdx].streaming) {
+                  next[lastIdx] = {
+                    ...next[lastIdx],
+                    streaming: false,
+                    content: next[lastIdx].content || `⚠️ **Task failed:** ${errText}`,
+                  };
+                } else {
+                  next.push({
+                    id: `taskfail-${Date.now()}`,
+                    role: "agent",
+                    content: `⚠️ **Task failed:** ${errText}`,
+                  });
+                }
+              } else if (lastIdx >= 0 && next[lastIdx].streaming) {
+                const output = String(payload.output ?? "");
+                next[lastIdx] = {
+                  ...next[lastIdx],
+                  streaming: false,
+                  content: next[lastIdx].content || output,
+                };
+              }
+              setIsStreaming(false);
+              setActiveTaskId(null);
             }
           }
           return next;
@@ -473,10 +564,16 @@ function ChatPageContent() {
         }
       }
 
-      // Create Task on backend to trigger ReAct agent loop
+      // Create the task (stays PENDING by contract) then explicitly run
+      // it — the backend executes in-process, no Redis/RQ worker needed.
       try {
         const createdTask = await api.createTask(sessionId, promptText);
         setActiveTaskId(createdTask.id);
+        try {
+          await api.runTask(createdTask.id);
+        } catch (runErr) {
+          toast(`Task created but run failed: ${(runErr as Error).message}`, "error");
+        }
       } catch (err) {
         toast(`Failed to start task: ${(err as Error).message}`, "error");
       }

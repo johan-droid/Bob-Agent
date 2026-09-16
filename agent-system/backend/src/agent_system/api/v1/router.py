@@ -6,6 +6,7 @@ errors, auth. Sessions/tasks/approvals/events run on real services + SQLite.
 
 from __future__ import annotations
 
+import logging
 import threading as _threading
 import time as _time
 from datetime import UTC, datetime
@@ -81,6 +82,9 @@ def _check_token_rate_limit(request: Request) -> None:
     client_ip = request.client.host if request.client else "unknown"
     now = _time.monotonic()
     with _TOKEN_LOCK:
+        for ip, history in list(_TOKEN_ATTEMPTS.items()):
+            if not history or now - history[-1] >= _TOKEN_WINDOW_SECONDS:
+                del _TOKEN_ATTEMPTS[ip]
         attempts = [
             t for t in _TOKEN_ATTEMPTS.get(client_ip, []) if now - t < _TOKEN_WINDOW_SECONDS
         ]
@@ -290,9 +294,19 @@ class TaskOut(BaseModel):
     depends_on: list[str]
     attempt: int
     last_error: str | None
+    output: str | None = None
 
 
 def _task_out(row: Task) -> TaskOut:
+    output: str | None = None
+    try:
+        result = row.result_json or {}
+        if isinstance(result, dict):
+            raw = result.get("output")
+            if isinstance(raw, str) and raw.strip():
+                output = raw[:2000]
+    except Exception:
+        output = None
     return TaskOut(
         id=row.id,
         session_id=row.session_id,
@@ -303,7 +317,15 @@ def _task_out(row: Task) -> TaskOut:
         depends_on=row.depends_on_json,
         attempt=row.attempt,
         last_error=row.last_error,
+        output=output,
     )
+
+
+def _fresh_task_out(factory: Any, task_id: str) -> TaskOut | None:
+    """Re-read a task row for responses kicked off in-process (no detached state)."""
+    with session_scope(factory) as db:
+        row = db.get(Task, task_id)
+        return _task_out(row) if row is not None else None
 
 
 @authenticated.post("/tasks", status_code=201)
@@ -320,12 +342,18 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
     with session_scope(factory) as db:
         if db.get(Session, body.session_id) is None:
             raise HTTPException(status_code=404, detail="session not found")
+        # Chat-created tasks carry the user's prompt as the goal. The ReAct
+        # handler derives its objective from input.goal; without this the
+        # task would run with an empty objective.
+        task_input = dict(body.input)
+        if "goal" not in task_input:
+            task_input["goal"] = body.title
         task = Task(
             id=task_id,
             session_id=body.session_id,
             task_type=body.task_type,
             title=body.title,
-            input_json=body.input,
+            input_json=task_input,
             depends_on_json=body.depends_on,
             agent_type=body.agent_type,
             idempotency_key=body.idempotency_key,
@@ -336,6 +364,9 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
             Event(type="task.created", session_id=body.session_id, task_id=task_id, actor="user"),
             db,
         )
+    # Pure create: the task stays PENDING until something explicitly queues it
+    # (plan, POST /tasks/{id}/run, or a manual transition). Auto-kicking here
+    # would race the explicit lifecycle the contract tests walk.
     return _task_out(task)
 
 
@@ -410,7 +441,9 @@ def transition_task(task_id: str, body: TaskTransition, request: Request) -> Tas
             ),
             db,
         )
-        return _task_out(row)
+    # Pure transition: no implicit execution. Runs are opt-in via
+    # POST /tasks/{id}/run (or /retry) so manual lifecycle walks stay exact.
+    return _task_out(row)
 
 
 @authenticated.post("/tasks/{task_id}/retry", status_code=202)
@@ -432,13 +465,75 @@ def retry_task(task_id: str, request: Request) -> TaskOut:
         bus.emit(
             Event(
                 type="task.queued",
+                session_id=row.session_id,
                 task_id=row.id,
                 actor="user",
                 payload={"retry": True, "attempt": row.attempt},
             ),
             db,
         )
-        return _task_out(row)
+    # Retry is explicit operator intent to run: kick in-process execution.
+    # The response is a fresh read; failures land on the task row + events,
+    # never on this HTTP call.
+    try:
+        from agent_system.services.task_runner import kick_task
+
+        kick_task(factory, bus, task_id)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Retry kickoff failed for %s", task_id)
+        raise HTTPException(status_code=503, detail="execution kickoff failed") from exc
+    fresh = _fresh_task_out(factory, task_id)
+    return fresh if fresh is not None else _task_out(row)
+
+
+@authenticated.post("/tasks/{task_id}/run", status_code=202)
+def run_task(task_id: str, request: Request) -> TaskOut:
+    """Explicit execution trigger: queue (if needed) + run in-process.
+
+    This is what the chat UIs call after creating a task. Unlike the bare
+    ``transition`` endpoint (pure, no side effects), this one owns the
+    PENDING/FAILED -> QUEUED move and then kicks the in-process runner, so a
+    local setup with no Redis/RQ worker still executes. Never blocks: the
+    run happens on a background thread; progress streams via events.
+    """
+    factory = request.app.state.session_factory
+    bus: EventBus = request.app.state.event_bus
+    with session_scope(factory) as db:
+        row = db.get(Task, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        current = TaskState(row.state)
+        if current in (TaskState.PENDING, TaskState.FAILED):
+            try:
+                validate_transition(current, TaskState.QUEUED)
+            except InvalidTransitionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            row.state = TaskState.QUEUED.value
+            bus.emit(
+                Event(
+                    type="task.queued",
+                    session_id=row.session_id,
+                    task_id=row.id,
+                    actor="user",
+                    payload={"run": True, "from": current.value},
+                ),
+                db,
+            )
+        elif current != TaskState.QUEUED:
+            raise HTTPException(
+                status_code=409, detail=f"cannot run task in state {current.value}"
+            )
+    try:
+        from agent_system.services.task_runner import kick_task
+
+        kick_task(factory, bus, task_id)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Run kickoff failed for %s", task_id)
+        raise HTTPException(status_code=503, detail="execution kickoff failed") from exc
+    fresh = _fresh_task_out(factory, task_id)
+    if fresh is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    return fresh
 
 
 # ---------------------------------------------------------------------------

@@ -16,9 +16,17 @@ const BACKEND =
 let cachedToken: string | null = null;
 let lastTokenFetch = 0;
 
-function getBootstrapSecret(): string {
-  if (process.env.AGENT_BOOTSTRAP_SECRET) {
-    return process.env.AGENT_BOOTSTRAP_SECRET;
+function usableSecret(value: string | undefined): string | null {
+  const secret = value?.trim().replace(/^(["'])(.*)\1$/, "$2");
+  if (!secret || ["dev-only-secret-change-me", "change-me-to-a-long-random-string"].includes(secret)) {
+    return null;
+  }
+  return secret;
+}
+
+function getBootstrapSecret(): string | null {
+  if (process.env.AGENT_BOOTSTRAP_SECRET !== undefined) {
+    return usableSecret(process.env.AGENT_BOOTSTRAP_SECRET);
   }
   const candidatePaths = [
     path.resolve(process.cwd(), "../backend/.env.local"),
@@ -32,13 +40,13 @@ function getBootstrapSecret(): string {
         for (const line of content.split("\n")) {
           const trimmed = line.trim();
           if (trimmed.startsWith("AGENT_BOOTSTRAP_SECRET=")) {
-            return trimmed.split("=")[1].trim();
+            return usableSecret(trimmed.slice("AGENT_BOOTSTRAP_SECRET=".length));
           }
         }
       } catch (_) {}
     }
   }
-  return "dev-only-secret-change-me";
+  return null;
 }
 
 async function getAuthToken(forceRefresh = false): Promise<string | null> {
@@ -47,6 +55,7 @@ async function getAuthToken(forceRefresh = false): Promise<string | null> {
     return cachedToken;
   }
   const secret = getBootstrapSecret();
+  if (!secret) return null;
   try {
     const res = await fetch(`${BACKEND}/api/v1/auth/token`, {
       method: "POST",
@@ -81,9 +90,13 @@ async function proxy(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
     headers.set("authorization", userAuth);
   } else {
     const token = await getAuthToken();
-    if (token) {
-      headers.set("authorization", `Bearer ${token}`);
+    if (!token) {
+      return NextResponse.json(
+        { detail: "Backend authentication unavailable; configure AGENT_BOOTSTRAP_SECRET." },
+        { status: 503 },
+      );
     }
+    headers.set("authorization", `Bearer ${token}`);
   }
 
   let bodyBuffer: ArrayBuffer | undefined = undefined;

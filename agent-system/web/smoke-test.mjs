@@ -58,11 +58,11 @@ const check = (name, cond, detail = "") => {
 
 let backend, frontend;
 try {
-  backend = spawn("uv", ["run", "uvicorn", "agent_system.api.main:app", "--port", "8123"], {
+  backend = spawn(".venv/bin/python", ["-m", "uvicorn", "agent_system.api.main:app", "--port", "8123"], {
     cwd: "../backend",
     stdio: "pipe",
   });
-  frontend = spawn("npx", ["next", "start", "-p", "3100"], {
+  frontend = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-p", "3100"], {
     stdio: "pipe",
     env: { ...process.env, AGENT_SYSTEM_API_URL: "http://127.0.0.1:8123" },
   });
@@ -72,7 +72,7 @@ try {
 
   // 1. UI shell renders
   const shell = await get(3100, "/");
-  check("dashboard shell renders", shell.status === 200 && shell.body.includes("Agent System"));
+  check("dashboard shell renders", shell.status === 200 && /Agent System|Bob Agent/.test(shell.body));
 
   // 2. Real API through proxy: health
   const health = await get(3100, "/api/v1/health");
@@ -82,12 +82,15 @@ try {
     `status=${health.status} body=${health.body.slice(0, 100)}`,
   );
 
-  // 3. Auth: unauthenticated write is rejected, then mint a token via the
-  // bootstrap-secret contract and use it for authenticated calls.
-  const anon = await post(3100, "/api/v1/sessions", { goal: "should be rejected" });
-  check("unauthenticated write rejected (401)", anon.status === 401, `status=${anon.status}`);
-  const tokenRes = await post(3100, "/api/v1/auth/token", {
-    session_secret: "dev-only-secret-change-me",
+  // Backend rejects anonymous callers; the local dashboard proxy injects auth.
+  const anon = await post(8123, "/api/v1/sessions", { goal: "should be rejected" });
+  check("backend unauthenticated write rejected (401)", anon.status === 401, `status=${anon.status}`);
+  const proxied = await post(3100, "/api/v1/sessions", { goal: "proxy auth smoke" });
+  check("proxy authenticates local dashboard writes", proxied.status === 201);
+  const invalid = await get(3100, "/api/v1/sessions", { Authorization: "Bearer invalid" });
+  check("proxy does not replace invalid explicit credentials", invalid.status === 401);
+  const tokenRes = await post(8123, "/api/v1/auth/token", {
+    session_secret: process.env.AGENT_BOOTSTRAP_SECRET,
   });
   check("auth token minted via bootstrap secret", tokenRes.status === 200 && !!JSON.parse(tokenRes.body).token, `status=${tokenRes.status}`);
   const token = JSON.parse(tokenRes.body).token;
@@ -101,6 +104,29 @@ try {
     `status=${created.status} body=${created.body.slice(0, 100)}`,
   );
   const sessionId = JSON.parse(created.body).id;
+
+  // Exercise retry through real HTTP, then poll its durable terminal state.
+  const taskRes = await post(8123, "/api/v1/tasks", {
+    session_id: sessionId, task_type: "general", title: "retry smoke",
+    input: { goal: "Reply with a short greeting" },
+  }, authHeaders);
+  const taskId = JSON.parse(taskRes.body).id;
+  check("retry task created", taskRes.status === 201 && !!taskId);
+  for (const target of ["QUEUED", "RUNNING", "FAILED"]) {
+    const transition = await post(8123, `/api/v1/tasks/${taskId}/transition`, { target }, authHeaders);
+    check(`retry setup ${target}`, transition.status === 200);
+  }
+  const retry = await post(8123, `/api/v1/tasks/${taskId}/retry`, {}, authHeaders);
+  check("live retry accepted", retry.status === 202);
+  let task;
+  for (let i = 0; i < 100; i++) {
+    task = JSON.parse((await get(8123, `/api/v1/tasks/${taskId}`, authHeaders)).body);
+    if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(task.state)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check("live retry succeeds with one new attempt", task.state === "SUCCEEDED" && task.attempt === 2, JSON.stringify(task));
+  check("realtime rejects anonymous HTTP", (await get(8123, "/api/v1/events/latest-sequence")).status === 401);
+  check("realtime permits authenticated HTTP", (await get(8123, "/api/v1/events/latest-sequence", authHeaders)).status === 200);
 
   // 4. Read-back: sessions list contains the new session
   const sessions = await get(3100, "/api/v1/sessions", authHeaders);
@@ -189,9 +215,11 @@ try {
     if (frontend) frontend.kill("SIGKILL");
     if (backend) backend.kill("SIGKILL");
   } catch {}
-  // give children a moment to die, then force-exit (spawned shells may linger)
-  await new Promise((r) => setTimeout(r, 300));
-  process.exit(failures.length ? 1 : 0);
+  await Promise.all([frontend, backend].filter(Boolean).map((child) =>
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise((resolve) => child.once("exit", resolve))
+  ));
 }
 
 if (failures.length) {

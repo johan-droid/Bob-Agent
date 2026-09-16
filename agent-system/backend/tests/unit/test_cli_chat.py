@@ -61,6 +61,10 @@ class TestHandleLine:
             "goal": "hi",
             "status": "ACTIVE",
         }
+        api["responses"][("POST", "/api/v1/sessions/ses_abc123/plan")] = {
+            "session_id": "ses_abc123",
+            "tasks": [],
+        }
         api["responses"][("GET", "/api/v1/events")] = []
         api["responses"][("GET", "/api/v1/tasks")] = []
         state = chat_mod.ChatState()
@@ -86,13 +90,13 @@ class TestTail:
             },
         ]
         api["responses"][("GET", "/api/v1/tasks")] = [
-            {"id": "t1", "title": "Do thing", "state": "COMPLETED"}
+            {"id": "t1", "title": "Do thing", "state": "SUCCEEDED"}
         ]
         state = chat_mod.ChatState(session_id="ses_x", cursor=0)
         chat_mod.tail_session(state, timeout=5)
         out = capsys.readouterr().out
         assert "task.created" in out
-        assert "1 completed, 0 failed" in out
+        assert "1 succeeded, 0 failed" in out
         assert state.cursor == 2
 
     def test_tail_stops_when_quiet(self, api: dict[str, Any]) -> None:

@@ -19,6 +19,7 @@ export type Task = {
   depends_on: string[];
   attempt: number;
   last_error: string | null;
+  output?: string | null;
 };
 export type Approval = {
   approval_id: string;
@@ -199,11 +200,12 @@ export const api = {
   // tasks
   listTasks: (sessionId?: string) =>
     request<Task[]>(`/tasks${sessionId ? `?session_id=${sessionId}` : ""}`),
-  createTask: (sessionId: string, title: string, taskType = "general", input: Record<string, unknown> = {}) =>
+  createTask: (sessionId: string, title: string, taskType = "llm", input: Record<string, unknown> = {}) =>
     request<Task>("/tasks", {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId, title, task_type: taskType, input }),
     }),
+  runTask: (id: string) => request<Task>(`/tasks/${id}/run`, { method: "POST" }),
   retryTask: (id: string) => request<Task>(`/tasks/${id}/retry`, { method: "POST" }),
   cancelTask: (id: string, reason = "user cancelled") =>
     request<Task>(`/tasks/${id}/transition`, {

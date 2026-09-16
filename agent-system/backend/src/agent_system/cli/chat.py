@@ -150,7 +150,7 @@ def _print_tasks(tasks: list[dict[str, Any]]) -> None:
         return
     for task in tasks:
         state = str(task.get("state", "?"))
-        color = {"COMPLETED": "green", "FAILED": "red", "RUNNING": "cyan"}.get(state, "dim")
+        color = {"SUCCEEDED": "green", "FAILED": "red", "RUNNING": "cyan"}.get(state, "dim")
         console.print(
             f"  [{color}]•[/{color}] {task.get('title', task.get('id'))}  [dim]{state}[/dim]"
         )
@@ -162,7 +162,12 @@ def _print_tasks(tasks: list[dict[str, Any]]) -> None:
 
 
 def send_goal(state: ChatState, text: str, watch: bool = True) -> None:
-    """Submit a goal as a new session and optionally tail its progress."""
+    """Submit a goal as a new session, plan it, run it, tail its progress.
+
+    Creating a session alone schedules nothing — the goal must be planned
+    into a task DAG (POST /sessions/{id}/plan) and the ready tasks explicitly
+    run (POST /tasks/{id}/run, in-process when no RQ worker exists).
+    """
     try:
         created = api_request("POST", "/api/v1/sessions", json={"goal": text})
     except ApiError as exc:
@@ -172,6 +177,32 @@ def send_goal(state: ChatState, text: str, watch: bool = True) -> None:
     state.session_goal = text
     state.cursor = 0
     console.print(f"[dim]session {_short_session(created['id'])} started.[/dim]")
+    try:
+        planned = api_request("POST", f"/api/v1/sessions/{state.session_id}/plan")
+        task_count = len(planned.get("tasks", [])) if isinstance(planned, dict) else 0
+        console.print(f"[dim]planned {task_count} task(s).[/dim]")
+    except ApiError as exc:
+        console.print(f"[red]planning failed: {exc}[/red]")
+        if watch:
+            tail_session(state)
+        return
+    try:
+        tasks = api_request("GET", "/api/v1/tasks", params={"session_id": state.session_id})
+    except ApiError as exc:
+        console.print(f"[red]could not fetch tasks: {exc}[/red]")
+        if watch:
+            tail_session(state)
+        return
+    kicked = 0
+    for task in tasks or []:
+        if task.get("state") in ("PENDING", "QUEUED", "FAILED"):
+            try:
+                api_request("POST", f"/api/v1/tasks/{task['id']}/run")
+                kicked += 1
+            except ApiError as exc:
+                console.print(f"[yellow]could not run task {task['id']}: {exc}[/yellow]")
+    if kicked:
+        console.print(f"[dim]running {kicked} task(s)…[/dim]")
     if watch:
         tail_session(state)
 
@@ -234,9 +265,9 @@ def summarize_session(state: ChatState) -> None:
     except ApiError as exc:
         console.print(f"[red]could not fetch tasks: {exc}[/red]")
         return
-    done = sum(1 for t in tasks if t.get("state") == "COMPLETED")
+    done = sum(1 for t in tasks if t.get("state") == "SUCCEEDED")
     failed = sum(1 for t in tasks if t.get("state") == "FAILED")
-    console.print(f"[bold]done:[/bold] {done} completed, {failed} failed, {len(tasks)} total")
+    console.print(f"[bold]done:[/bold] {done} succeeded, {failed} failed, {len(tasks)} total")
     _print_tasks(tasks)
 
 
@@ -739,6 +770,19 @@ def _one_shot(goal: str, watch: bool = False) -> None:
     created = api_request("POST", "/api/v1/sessions", json={"goal": goal})
     if watch:
         state = ChatState(session_id=created["id"], session_goal=goal, cursor=0, running=True)
+        try:
+            api_request("POST", f"/api/v1/sessions/{created['id']}/plan")
+            tasks = api_request(
+                "GET", "/api/v1/tasks", params={"session_id": created["id"]}
+            )
+            for task in tasks or []:
+                if task.get("state") in ("PENDING", "QUEUED", "FAILED"):
+                    try:
+                        api_request("POST", f"/api/v1/tasks/{task['id']}/run")
+                    except ApiError:
+                        pass
+        except ApiError:
+            pass
         tail_session(state)
     else:
         output(created)

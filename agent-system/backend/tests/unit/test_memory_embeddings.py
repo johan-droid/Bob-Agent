@@ -8,6 +8,7 @@ paraphrase fixture.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,26 +70,23 @@ class TestDefaultUnchanged:
 
 
 class TestLocalProvider:
-    def test_missing_dependency_raises_with_install_hint(self) -> None:
-        pytest.importorskip("sentence_transformers", reason="memory extra not installed")
-        # If the import above passes, the provider must construct.
+    def test_local_provider_model_name(self) -> None:
         assert LocalEmbeddingProvider.MODEL_NAME == "all-MiniLM-L6-v2"
 
-    def test_local_missing_dep_error_mentions_extra(self) -> None:
-        try:
-            import sentence_transformers  # noqa: F401
-        except ImportError:
-            from agent_system.services.memory import MemoryError
+    def test_local_missing_dep_error_mentions_extra(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Simulate a bare install: hide sentence_transformers and require the
+        explicit MemoryError (fail closed, never a silent hash fallback)."""
+        monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+        from agent_system.services.memory import MemoryError
 
-            with pytest.raises(MemoryError, match="memory.*extra|pip install"):
-                embedding_provider_from_settings(SimpleNamespace(memory_embedding_provider="local"))
-        else:
-            pytest.skip("sentence-transformers installed; missing-dep path N/A")
+        with pytest.raises(MemoryError, match="memory.*extra|pip install"):
+            embedding_provider_from_settings(SimpleNamespace(memory_embedding_provider="local"))
 
     def test_local_beats_hash_on_paraphrase_fixture(
         self, vault: ObsidianVaultWriter, tmp_path: Path
     ) -> None:
-        pytest.importorskip("sentence_transformers", reason="memory extra not installed")
         hash_store = MemoryStore(vault, HashEmbedding())
         local_store = MemoryStore(
             ObsidianVaultWriter(tmp_path / "vault2"), LocalEmbeddingProvider()

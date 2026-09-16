@@ -15,7 +15,7 @@ from typing import Any
 from agent_system.domain import ids
 from agent_system.domain.events import Event, utcnow
 from agent_system.domain.lifecycles import AgentState
-from agent_system.domain.tasks import TaskState, validate_transition
+from agent_system.domain.tasks import TERMINAL_STATES, TaskState, validate_transition
 from agent_system.infra.db import session_scope
 from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import AgentLease, AgentRun, Session, Task
@@ -403,18 +403,26 @@ class Orchestrator:
             )
             return True
 
-        handler = self._handlers.get(agent_type_snapshot)
-        if handler is None:
-            # Strict by design (pinned by
-            # tests/integration/test_orchestrator.py): unregistered types
-            # fail cleanly with LookupError. The goal-aware LLM fallback
-            # lives in the RQ worker (registry) and in cloud drive
-            # (services/cloud.py registers "llm" explicitly) — never as an
-            # implicit orchestrator default.
-            from agent_system.agents.react_agent import fallback_handler
-
-            handler = fallback_handler(input_snapshot)
+        stop = threading.Event()
+        hb = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(factory, run_id, stop),
+            daemon=True,
+            name=f"lease-hb-{task_id[-8:]}",
+        )
+        hb.start()
         try:
+            handler = self._handlers.get(agent_type_snapshot)
+            if handler is None:
+                # Strict by design (pinned by
+                # tests/integration/test_orchestrator.py): unregistered types
+                # fail cleanly with LookupError. The goal-aware LLM fallback
+                # lives in the RQ worker (registry) and in cloud drive
+                # (services/cloud.py registers "llm" explicitly) — never as an
+                # implicit orchestrator default.
+                from agent_system.agents.react_agent import fallback_handler
+
+                handler = fallback_handler(input_snapshot)
             if handler is None:
                 raise LookupError(f"no handler registered for agent type '{agent_type_snapshot}'")
             context = {
@@ -447,6 +455,22 @@ class Orchestrator:
                 {"error_class": type(exc).__name__, "error": str(exc)[:500]},
             )
             return False
+        finally:
+            stop.set()
+            hb.join(timeout=2)
+
+    def _heartbeat_loop(self, factory: Any, run_id: str, stop: threading.Event) -> None:
+        """Refresh the lease heartbeat while the run is executing (mirrors worker.py)."""
+        while not stop.wait(self._heartbeat_interval):
+            try:
+                with session_scope(factory) as db:
+                    lease = db.get(AgentLease, run_id)
+                    if lease is None:
+                        return
+                    lease.heartbeat_at = utcnow()
+                    lease.lease_expires_at = utcnow() + timedelta(seconds=LEASE_TTL_SECONDS)
+            except Exception:
+                return  # DB gone — recover_orphans handles orphan detection
 
     def _finish(
         self,
@@ -464,19 +488,29 @@ class Orchestrator:
             lease = db.get(AgentLease, run_id)
             if task is not None:
                 current = TaskState(task.state)
-                validate_transition(current, state)
-                task.state = state.value
+                if current in TERMINAL_STATES:
+                    # Idempotent: the task already ended (e.g. cancelled while
+                    # this handler was finishing). Reconcile the run/lease and
+                    # surface the already-recorded terminal state — never raise
+                    # a stale-transition error from a completion race.
+                    effective = current
+                else:
+                    validate_transition(current, state)
+                    effective = state
+                task.state = effective.value
                 task.completed_at = utcnow()
-                if state == TaskState.FAILED:
+                if effective == TaskState.FAILED:
                     task.last_error = str(result.get("error", ""))[:500]
-                if state == TaskState.SUCCEEDED:
+                if effective == TaskState.SUCCEEDED:
                     task.result_json = result
+            else:
+                effective = state
             if run is not None:
                 run.state = (
                     AgentState.COMPLETED.value
-                    if state == TaskState.SUCCEEDED
+                    if effective == TaskState.SUCCEEDED
                     else AgentState.FAILED.value
-                    if state == TaskState.FAILED
+                    if effective == TaskState.FAILED
                     else AgentState.TERMINATED.value
                 )
                 run.ended_at = utcnow()
@@ -487,7 +521,7 @@ class Orchestrator:
                 TaskState.SUCCEEDED: "task.completed",
                 TaskState.FAILED: "task.failed",
                 TaskState.CANCELLED: "task.cancelled",
-            }[state]
+            }[effective]
             self._bus.emit(
                 Event(
                     type=event_type,
@@ -502,8 +536,8 @@ class Orchestrator:
             self._bus.emit(
                 Event(
                     type="agent.completed"
-                    if state == TaskState.SUCCEEDED
-                    else ("agent.failed" if state == TaskState.FAILED else "agent.terminated"),
+                    if effective == TaskState.SUCCEEDED
+                    else ("agent.failed" if effective == TaskState.FAILED else "agent.terminated"),
                     session_id=session_id,
                     task_id=task_id,
                     agent_run_id=run_id,
@@ -511,6 +545,7 @@ class Orchestrator:
                 ),
                 db,
             )
+        self._cancel_requested.discard(task_id)
 
     # -- cancellation -------------------------------------------------------
 

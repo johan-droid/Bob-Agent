@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     # Cloud inline execution (no Redis/RQ worker): Telegram goals are driven
     # in-process via services/cloud.drive_session in a background thread.
     # Local dev keeps this off (make start runs the real RQ worker).
+    task_runner_recovery_enabled: bool = True
     cloud_inline_run: bool = False
     # Cloud vault: persist memory notes to the database (memory_notes table)
     # instead of the Obsidian file vault (ephemeral on dynos). Local dev
@@ -199,9 +200,9 @@ class Settings(BaseSettings):
 
     @_model_validator(mode="after")
     def _guard_default_secrets(self) -> Settings:
-        using_default = (
-            self.api_session_secret == DEFAULT_SECRET
-            or self.agent_bootstrap_secret == DEFAULT_SECRET
+        using_default = any(
+            secret.strip() in {"", DEFAULT_SECRET, "change-me-to-a-long-random-string"}
+            for secret in (self.api_session_secret, self.agent_bootstrap_secret)
         )
         if using_default:
             _warnings.warn(

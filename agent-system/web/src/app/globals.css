@@ -13,6 +13,14 @@
 :root {
   color-scheme: light;
   --background: #ffffff;
+  /* Aliases used by the v3.1 chat/vault styles — keep in sync with tokens below. */
+  --bg: var(--background);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --duration-fast: 0.15s;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --text-muted: var(--text-secondary);
   --surface: #f8fafc;
   --surface-raised: #ffffff;
   --border: #e2e8f0;
@@ -36,6 +44,7 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --background: #0f172a;
+    --surface-hover: rgba(255, 255, 255, 0.06);
     --surface: #1e293b;
     --surface-raised: #1e293b;
     --border: #334155;
@@ -59,6 +68,7 @@
 [data-theme="dark"] {
   color-scheme: dark;
   --background: #0f172a;
+  --surface-hover: rgba(255, 255, 255, 0.06);
   --surface: #1e293b;
   --surface-raised: #1e293b;
   --border: #334155;

@@ -182,7 +182,6 @@ class TestNoCapabilityBypassesTheGate:
             ("file_patch", {"path": "out/x.txt", "patch": "@@ -1,1 +1,1 @@\n-a\n+b"}),
             ("memory_remember", {"fact": "something"}),
             ("document_create", {"kind": "txt", "content": {"body": "hi"}}),
-            ("task_status", {"task_id": "task_missing"}),
         ],
     )
     def test_mutating_capability_requires_a_grant(
@@ -191,10 +190,39 @@ class TestNoCapabilityBypassesTheGate:
         ctx = _ctx(factory, tmp_path, PermissionGate(factory=factory))
         tool = build_registry(ctx.settings).get(tool_name)
         assert tool is not None, tool_name
-        if not tool.permission_required(ctx.settings):
-            pytest.skip(f"{tool_name} is read-tier by design")
+        assert tool.permission_required(ctx.settings), tool_name
         with pytest.raises(NeedsApprovalError):
             execute_tool(tool, args, ctx)
+
+    def test_read_tier_capability_runs_without_a_grant(
+        self, factory: Any, tmp_path: Path
+    ) -> None:
+        """Read-tier tools are never gated — ``task_status`` reads real state
+        without any approval record, where a mutating tool would be refused."""
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import Session as SessionRow
+        from agent_system.infra.models import Task as TaskRow
+
+        with session_scope(factory) as db:
+            db.add(SessionRow(id="ses_perm", goal="g", status="ACTIVE"))
+            db.add(
+                TaskRow(
+                    id="task_perm_read",
+                    session_id="ses_perm",
+                    task_type="demo",
+                    title="readable",
+                    state="QUEUED",
+                )
+            )
+        gate = PermissionGate(factory=factory)
+        ctx = _ctx(factory, tmp_path, gate)
+        tool = build_registry(ctx.settings).get("task_status")
+        assert tool is not None
+        assert tool.permission_required(ctx.settings) is False
+        assert gate.list_pending() == []  # no approval was ever requested
+        outcome = execute_tool(tool, {"task_id": "task_perm_read"}, ctx)
+        assert outcome["task_id"] == "task_perm_read"
+        assert outcome["state"] == "QUEUED"
 
     def test_destructive_capabilities_are_default_deny(self, factory: Any, tmp_path: Path) -> None:
         ctx = _ctx(factory, tmp_path, PermissionGate(factory=factory))

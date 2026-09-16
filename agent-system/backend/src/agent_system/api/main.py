@@ -126,6 +126,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             # A broken scheduler config must never take down the API server.
             app.state.scheduler = None
+    # Startup recovery: tasks left QUEUED by a previous process (restart/
+    # crash) are re-kicked in-process — without Redis/RQ the API process is
+    # the executor, so this is what keeps a restart from orphaning work.
+    # Order matters: recover_orphans requeues tasks whose lease expired, then
+    # sweep_backlog kicks everything QUEUED.
+    app.state.runner_scheduler = None
+    try:
+        from agent_system.services.orchestrator import Orchestrator
+        from agent_system.services.task_runner import reset_runner, sweep_backlog
+
+        reset_runner()
+        if settings.task_runner_recovery_enabled:
+            from apscheduler.schedulers.background import BackgroundScheduler
+
+            recovery_factory = _session_factory
+            recovery_bus = app.state.event_bus
+            recovery_orchestrator = Orchestrator(recovery_bus)
+
+            def recover_tasks() -> None:
+                recovery_orchestrator.recover_orphans(recovery_factory)
+                sweep_backlog(recovery_factory, recovery_bus)
+
+            recover_tasks()
+            app.state.runner_scheduler = BackgroundScheduler()
+            app.state.runner_scheduler.add_job(
+                recover_tasks, "interval", seconds=10, max_instances=1, coalesce=True
+            )
+            app.state.runner_scheduler.start()
+    except Exception:
+        raise  # never serve requests with an unsafe runner lifecycle
     yield
     try:
         if app.state.scheduler is not None:
@@ -136,6 +166,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.telegram.stop()
     except Exception:
         pass
+    if app.state.runner_scheduler is not None:
+        app.state.runner_scheduler.shutdown(wait=True)
+    from agent_system.services.task_runner import shutdown_runner
+
+    shutdown_runner()  # do not dispose the DB beneath surviving runner threads
     if _engine is not None:
         _engine.dispose()
 
