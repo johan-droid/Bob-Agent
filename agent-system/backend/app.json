@@ -1,0 +1,40 @@
+{
+  "name": "Bob Agent",
+  "description": "Autonomous multi-agent AI system — Heroku cloud runtime (single web dyno, Postgres, Telegram webhook)",
+  "stack": "heroku-24",
+  "formation": {
+    "web": { "quantity": 1, "size": "basic" }
+  },
+  "addons": [
+    "heroku-postgresql:essential-0"
+  ],
+  "buildpacks": [
+    { "url": "heroku/python" }
+  ],
+  "env": {
+    "AGENT_BOOTSTRAP_SECRET": { "generator": "secret" },
+    "API_SESSION_SECRET": { "generator": "secret" },
+    "TELEGRAM_WEBHOOK_SECRET": { "generator": "secret" },
+    "TELEGRAM_BOT_TOKEN": { "required": true },
+    "TELEGRAM_ALLOWED_CHAT_IDS": { "required": true },
+    "DEFAULT_PROVIDER": { "value": "groq" },
+    "GROQ_API_KEY": { "required": true },
+    "DATABASE_URL": { "required": true },
+    "TOOLS_SHELL_MODE": { "value": "local" },
+    "HEROKU_JAIL": { "value": "true" },
+    "TOOLS_REQUIRE_APPROVAL": { "value": "true" },
+    "CLOUD_INLINE_RUN": { "value": "true" },
+    "CLOUD_VAULT_DB": { "value": "true" },
+    "MCP_SERVERS": { "value": "[]" },
+    "SCHEDULER_ENABLED": { "value": "false" },
+    "MEMORY_EMBEDDING_PROVIDER": { "value": "hash" },
+    "MEMORY_RECALL_TOP_K": { "value": "3" },
+    "TOOLS_MAX_ITERS": { "value": "6" },
+    "MAX_TASK_TOKENS": { "value": "50000" },
+    "MAX_OUTPUT_SIZE_MB": { "value": "5" },
+    "MAX_FILE_SIZE_MB": { "value": "2" },
+    "MAX_WORKSPACE_SIZE_MB": { "value": "64" },
+    "MAX_EXECUTION_TIME_SECONDS": { "value": "120" },
+    "A2A_ENABLED": { "value": "false" }
+  }
+}

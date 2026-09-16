@@ -269,15 +269,15 @@ Glass effect: backdrop-blur-md, bg-white/80, border border-white/20
 │ ├ 2026-09-06        │ **Date:** 2026-09-05            │
 │ ├ 2026-09-05        │ **Tags:** [auth, security]      │
 │ 📁 Decisions        │ **Related:**                     │
-│ ├ Auth Reconciliat  │ [[User Model]] [[JWT Strategy]] │
+│ ├ Auth Reconciliat  │ `User Model` `JWT Strategy` │
 │ ├ Memory Vault      │                                 │
 │ 📁 Projects         │ We decided to use Better Auth   │
 │ ├ GraftAI           │ because...                      │
 │ ├ VibeCoder         │                                 │
 │ 📁 Agents           │ ---                             │
 │ └ Research          │ [Backlinks to this note]        │
-│                     │ - [[Project Dashboard]]         │
-│                     │ - [[LLM Decision]]              │
+│                     │ - `Project Dashboard`         │
+│                     │ - `LLM Decision`              │
 └─────────────────────┴────────────────────────────────┘
 ```
 

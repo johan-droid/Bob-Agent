@@ -3,8 +3,8 @@ title: Local Autonomous AI Agent System — Index
 type: moc
 project: Agent System
 spec_version: "3.1"
-status: planning
-updated: 2026-09-06
+status: implemented (Phases 0-21)
+updated: 2026-09-16
 ---
 
 # 🤖 Local Autonomous AI Agent System — Index (MOC)
@@ -37,7 +37,7 @@ updated: 2026-09-06
 | [[16_Dashboard_UIUX]] | Full web dashboard spec — design tokens, all 11+ tabs |
 | [[17_CLI_Specification]] | `agentctl` commands, TUI outputs, scripting flags |
 | [[18_API_Reference]] | REST + WS endpoints grouped by domain |
-| [[19_Execution_Plan]] | Phase 0–19 build order with acceptance criteria (v3.1) |
+| [[19_Execution_Plan]] | Phase 0–21 build order with acceptance criteria (v3.1) |
 | [[20_Deployment]] | Install, services, env, service management |
 | [[21_Progress_Log]] | Living progress & decision log |
 | [[22_Decision_Log]] | Architecture decision records (ADRs) |
@@ -73,6 +73,6 @@ Multi-tenant, cloud, billing, mobile. Multi-device sync is a stretch goal.
 
 ## 🚦 Project Status
 
-- **Phase:** Documentation / pre-build (spec v3.1 baseline complete)
-- **Next action:** Execute [[19_Execution_Plan]] Phase 0 — Repository Forensics
+- **Phase:** Build implemented — Phases 0–21 (see `agent-system/docs/implementation/STATUS.md`)
+- **Next action:** E2E acceptance + remaining backlog in STATUS.md (`Next` section)
 - **Contract:** [[23_Engineering_Contract]] governs all implementation

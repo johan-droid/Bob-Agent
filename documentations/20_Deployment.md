@@ -15,7 +15,7 @@ up: "[[00_Index]]"
 
 ```bash
 # Full stack
-uv venv && uv pip install -r requirements.txt
+uv venv && uv sync   # deps from backend/pyproject.toml + uv.lock (no requirements.txt)
 playwright install --with-deps
 # pytesseract setup (macOS: brew install tesseract; Linux: apt-get install tesseract-ocr)
 cp .env.example .env
@@ -58,7 +58,7 @@ npm run build && npm start   # localhost:3000
 
 ## Health Checks
 
-- API: `GET http://localhost:8000/api/health`
+- API: `GET http://localhost:8000/api/v1/health`
 - Dashboard: `http://localhost:3000` loads
 - Redis: `redis-cli ping` → PONG
 - DB: `alembic current` matches head

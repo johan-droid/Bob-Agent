@@ -1,0 +1,32 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  # Optional: OpenConnector connector gateway (1,000+ SaaS providers via
+  # Actions + MCP). Set OPENCONNECTOR_BASE_URL=http://localhost:3000 in
+  # .env.local to expose it to the agent. Generate secrets first:
+  #   OOMOL_CONNECT_ENCRYPTION_KEY=$(openssl rand -base64 32)
+  #   OOMOL_CONNECT_ADMIN_TOKEN=$(openssl rand -base64 32)
+  openconnector:
+    image: ghcr.io/oomol-lab/open-connector:latest
+    ports:
+      - "3000:3000"
+    environment:
+      OOMOL_CONNECT_ORIGIN: "http://localhost:3000"
+      OOMOL_CONNECT_ENCRYPTION_KEY: "${OOMOL_CONNECT_ENCRYPTION_KEY:-}"
+      OOMOL_CONNECT_ADMIN_TOKEN: "${OOMOL_CONNECT_ADMIN_TOKEN:-}"
+    volumes:
+      - openconnector_data:/app/data
+
+volumes:
+  redis_data:
+  openconnector_data:

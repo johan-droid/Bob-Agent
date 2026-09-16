@@ -1,0 +1,26 @@
+{
+  "name": "agent-system-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "app": "electron .",
+    "desktop": "electron .",
+    "start:desktop": "npm run build && electron ."
+  },
+  "dependencies": {
+    "next": "^16.3.4",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "electron": "^44.4.1",
+    "typescript": "^5.5.0"
+  }
+}

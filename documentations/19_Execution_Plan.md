@@ -7,7 +7,7 @@ updated: 2026-09-06
 up: "[[00_Index]]"
 ---
 
-# Execution Plan — v3.1 (Phases 0–19)
+# Execution Plan — v3.1 (Phases 0–21)
 
 > **Source:** v3.1 §41 · Supersedes the v3.0 16-phase plan. Incremental; each phase has acceptance criteria.
 > Gate rule ([[23_Engineering_Contract]]): **do not advance** with failing critical tests, broken migrations, security violations, unresolved data corruption, fake production functionality, or undocumented divergence. After each phase: tests → build → integration tests → update status docs → descriptive Git commit.
@@ -97,3 +97,11 @@ Desktop automation only after permission system, audit, recording, resource limi
 ## Phase 19 — Production Hardening
 Full integration tests · security audit · chaos tests ([[29_Testing_Strategy]]) · migration tests · performance tests · UI smoke tests · CLI tests · restart tests · documentation audit ([[30_Implementation_Docs]]).
 **Accept:** E2E acceptance lifecycle passes after clean install/restart · FINAL_REPORT.md written with honest completion labels.
+
+## Phase 20 — Real LLM Task Execution (implemented)
+ReAct + tool loop (`agents/react_agent.py`): goal → ModelRouter + `run_tool_loop` over the full tool registry (shell/files/web/memory/MCP/OpenConnector); worker + orchestrator wiring; honest echo fallback offline.
+**Accept:** ReAct loop runs end-to-end (echo offline, real providers when configured) · tool.called/result events · outcome persisted — see `agent-system/docs/implementation/STATUS.md` Phase 20 row.
+
+## Phase 21 — OpenConnector + MCP over HTTP (implemented)
+Real OpenConnector Runtime API client (`services/openconnector.py`) + streamable-HTTP MCP transport (`services/mcp.py`, SSE/JSON, `Mcp-Session-Id`) + implicit `openconnector` MCP server + `openconnector_execute/list` + `mcp_list` tools.
+**Accept:** action discovery/execution + MCP `tools/call` against the real gateway container — see `agent-system/docs/implementation/STATUS.md` Phase 21 row.

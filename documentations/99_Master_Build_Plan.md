@@ -12,7 +12,7 @@ up: "[[00_Index]]"
 
 > **Purpose:** This is the single, self-contained execution document for building the Local Autonomous AI Agent System. It merges the **best of v3.0** (product vision: features, UI/UX, CLI, schema, APIs) with the **best of v3.1** (engineering contract: domain model, events, lifecycles, security, reliability, testing).
 >
-> **How to use:** Work top-to-bottom. Execute phases in order. Never skip the [[#Phase Gate — DoD Checklist]] between phases. Deep detail for any section lives in the linked vault note; this file always tells you exactly what to *do next*.
+> **How to use:** Work top-to-bottom. Execute phases in order. Never skip the [§11 Per-Phase DoD Template](#11-per-phase-dod-template-copy-into-statusmd-each-phase) between phases. Deep detail for any section lives in the linked vault note; this file always tells you exactly what to *do next*.
 
 ---
 
@@ -20,7 +20,7 @@ up: "[[00_Index]]"
 
 | If you need… | Look at | This file covers |
 | --- | --- | --- |
-| The job list in order | **This document §5** | Full Phase 0–19 plan with work items + acceptance |
+| The job list in order | **This document §5** | Full Phase 0–21 plan with work items + acceptance |
 | Product feature detail | [[01_Overview]] · [[05_Feature_Reasoning_Trace_Viewer]] … [[15_Feature_Insight_Generation]] | Summary + v3.1 deltas per feature |
 | Screen-by-screen UI | [[16_Dashboard_UIUX]] | Design tokens recap only |
 | CLI look & feel | [[17_CLI_Specification]] | Command list recap |
@@ -53,7 +53,7 @@ A locally-hosted, persistent, multi-agent AI system: a supervisor decomposes use
 | Personality | Tone/verbosity learning | + never touches security/permissions/limits; versioned | v3.1 |
 | Insights | Scheduled summaries | Derived **only from canonical events**, redacted, never fabricated | v3.1 |
 | Cost | Daily budget | Provider-aware tokens (cached/estimated/unknown), 4 budget scopes, 4 alert levels | v3.1 |
-| Phases | 16 phases | **20 phases**, gated | v3.1 (v3.0 work items folded in) |
+| Phases | 16 phases | **22 phases (0–21)**, gated | v3.1 (v3.0 work items folded in) |
 | UI/UX design system | Full spec | Unchanged | v3.0 |
 | CLI UX | Full spec | + shared API contracts, stable JSON/exit codes | both |
 | Rust CLI | v3 aspiration | Deferred | v3.0-late |
@@ -145,7 +145,7 @@ agent-system/
 
 ---
 
-## 5. The Plan — Phases 0–19 (Work Items + Acceptance)
+## 5. The Plan — Phases 0–21 (Work Items + Acceptance)
 
 > Legend per phase: **Build** = concrete work items (v3.0 detail ⊕ v3.1 rules) · **Accept** = gate criteria · **Docs** = update before commit · **Detail** = vault note.
 
@@ -307,6 +307,18 @@ agent-system/
 - Documentation audit: every doc matches behavior; write `FINAL_REPORT.md` with honest labels (IMPLEMENTED / PARTIALLY IMPLEMENTED / CONFIGURATION REQUIRED / KNOWN LIMITATION / BLOCKED).
 **Accept:** all checkboxes in §8 ticked.
 **Detail:** [[29_Testing_Strategy]], [[30_Implementation_Docs]].
+
+### Phase 20 — Real LLM Task Execution (implemented)
+
+**Build:** ReAct + tool loop (`agents/react_agent.py`): goal → ModelRouter + `run_tool_loop` over the full tool registry; worker + orchestrator wiring; honest echo fallback offline.
+**Accept:** ReAct loop runs end-to-end · tool.called/result events · outcome persisted.
+**Detail:** [[19_Execution_Plan]] Ph20, `agent-system/docs/implementation/STATUS.md`.
+
+### Phase 21 — OpenConnector + MCP over HTTP (implemented)
+
+**Build:** Real OpenConnector Runtime API client + streamable-HTTP MCP transport (SSE/JSON, `Mcp-Session-Id`) + implicit `openconnector` MCP server + `openconnector_execute/list` + `mcp_list` tools.
+**Accept:** action discovery/execution + MCP `tools/call` against the real gateway container.
+**Detail:** [[19_Execution_Plan]] Ph21, `agent-system/docs/implementation/STATUS.md`.
 
 ---
 

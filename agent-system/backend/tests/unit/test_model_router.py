@@ -1,0 +1,202 @@
+"""Unit/integration tests — model router + cost (v3.1 §19–§20)."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from agent_system.infra.db import make_engine, make_session_factory, session_scope
+from agent_system.infra.event_bus import EventBus
+from agent_system.infra.models import Base, ModelCall
+from agent_system.services.model_router import (
+    BudgetMonitor,
+    EchoProvider,
+    ModelInfo,
+    ModelRegistry,
+    ModelRouter,
+    PricingRegistry,
+    ProviderAdapter,
+    SelectionRule,
+    UnavailableProvider,
+)
+from agent_system.services.skills import SkillManager
+
+
+@pytest.fixture()
+def env(tmp_path: Path) -> Iterator[tuple[object, object, EventBus]]:
+    engine = make_engine(f"sqlite:///{tmp_path / 'router.db'}")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    bus = EventBus()
+    yield factory, bus, bus
+    engine.dispose()
+
+
+def _router_with_local_provider() -> tuple[PricingRegistry, ModelRegistry]:
+    pricing = PricingRegistry()
+    pricing.register(
+        ModelInfo(
+            model_id="local-small", provider="echo", input_cost_per_1m=0.5, output_cost_per_1m=1.5
+        )
+    )
+    pricing.register(
+        ModelInfo(
+            model_id="local-big", provider="echo", input_cost_per_1m=5.0, output_cost_per_1m=15.0
+        )
+    )
+    registry = ModelRegistry()
+    registry.set_rule(
+        SelectionRule(
+            task_type="summary",
+            primary="local-small",
+            fallback="local-big",
+            budget_tier="local-small",
+        )
+    )
+    registry.set_rule(SelectionRule(task_type="reasoning", primary="local-big"))
+    return pricing, registry
+
+
+def test_selection_uses_configured_rules() -> None:
+    _, registry = _router_with_local_provider()
+    rule = registry.rule_for("summary")
+    assert rule is not None and rule.primary == "local-small"
+    assert registry.rule_for("nonexistent") is None
+
+
+class _RecordingAdapter(ProviderAdapter):
+    """Test adapter capturing the exact prompt it received."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def invoke(self, model_id: str, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        self.prompts.append(prompt)
+        return {"output": "ok", "usage": {}}
+
+
+def _skill_manager(tmp_path: Path) -> SkillManager:
+    skill_dir = tmp_path / "skills" / "helper"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: helper\ndescription: Helps.\nagents: [research]\n---\n\nBe helpful.\n",
+        encoding="utf-8",
+    )
+    return SkillManager(tmp_path / "skills")
+
+
+def test_invoke_injects_matching_skills(
+    env: tuple[object, object, EventBus], tmp_path: Path
+) -> None:
+    factory, bus, _ = env
+    pricing, registry = _router_with_local_provider()
+    router = ModelRouter(bus, pricing, registry, skill_manager=_skill_manager(tmp_path))
+    adapter = _RecordingAdapter()
+    router.register_adapter("echo", adapter)
+
+    result = router.invoke(factory, "local-small", "do research", agent_type="research")
+    assert result.ok
+    assert "<skills>" in adapter.prompts[0]
+    assert 'name="helper"' in adapter.prompts[0]
+
+
+def test_invoke_without_manager_ignores_skills_kwarg(
+    env: tuple[object, object, EventBus],
+) -> None:
+    factory, bus, _ = env
+    pricing, registry = _router_with_local_provider()
+    router = ModelRouter(bus, pricing, registry)
+    router.register_adapter("echo", EchoProvider())
+
+    result = router.invoke(factory, "local-small", "hi", skills=["helper"])
+    assert result.ok
+
+
+def test_invoke_records_model_call_with_exact_cost(
+    env: tuple[object, object, EventBus],
+) -> None:
+    factory, bus, _ = env
+    pricing, registry = _router_with_local_provider()
+    router = ModelRouter(bus, pricing, registry)
+    router.register_adapter("echo", EchoProvider())
+
+    result = router.invoke(factory, "local-small", "hello world this is a prompt", task_id="task_1")
+    assert result.ok
+    assert result.cost_usd is not None and result.cost_usd > 0
+    assert not result.cost_is_estimated
+    assert not result.usage_is_estimated
+
+    with session_scope(factory) as db:  # type: ignore[arg-type]
+        row = db.get(ModelCall, result.model_call_id)
+        assert row is not None
+        assert row.model_id == "local-small"
+        assert row.status == "ok"
+        assert row.cost_usd == result.cost_usd
+
+
+def test_unknown_provider_fails_without_crash_and_marks_estimated(
+    env: tuple[object, object, EventBus],
+) -> None:
+    factory, bus, _ = env
+    pricing, registry = _router_with_local_provider()
+    router = ModelRouter(bus, pricing, registry)
+    # 'local-big' has provider 'echo' but we deliberately register nothing.
+
+    result = router.invoke(factory, "local-big", "prompt", task_id="task_2")
+    assert not result.ok
+    assert "no adapter" in (result.error or "")
+    with session_scope(factory) as db:  # type: ignore[arg-type]
+        row = db.get(ModelCall, result.model_call_id)
+        assert row.status == "failed"
+
+
+def test_unknown_model_pricing_marks_cost_estimated(
+    env: tuple[object, object, EventBus],
+) -> None:
+    factory, bus, _ = env
+    pricing, _ = _router_with_local_provider()
+    router = ModelRouter(bus, pricing)
+    router.register_adapter("echo", EchoProvider())
+    # Invoke a model id with no pricing entry but a working 'echo' adapter
+    # by registering pricing on the fly — instead, test via estimate=None path:
+    result = router.invoke(factory, "nonexistent-model", "prompt")
+    assert not result.ok  # no adapter for unknown provider
+    assert result.cost_usd is None
+    assert result.cost_is_estimated  # unknown cost never crashes, flagged
+
+
+def test_unavailable_provider_records_failure_event(
+    env: tuple[object, object, EventBus],
+) -> None:
+    factory, bus, _ = env
+    pricing, _ = _router_with_local_provider()
+    router = ModelRouter(bus, pricing)
+    router.register_adapter("echo", UnavailableProvider())
+    result = router.invoke(factory, "local-small", "prompt")
+    assert not result.ok
+    assert "provider unreachable" in (result.error or "")
+    events = bus.replay_after(session_scope(factory).__enter__(), 0)  # type: ignore[attr-defined]
+    assert any(e.type == "model.failed" for e in events)
+
+
+def test_budget_alerts_fire_once_per_level() -> None:
+    monitor = BudgetMonitor()
+    monitor.set_budget("daily", 10.0)
+    assert monitor.record("daily", 5.0) == [50.0]
+    assert monitor.record("daily", 2.5) == [75.0]
+    assert monitor.record("daily", 1.5) == [90.0]
+    assert monitor.record("daily", 1.0) == [100.0]
+    assert monitor.record("daily", 5.0) == []  # no repeats
+    assert monitor.spent("daily") == 15.0
+    assert monitor.remaining("daily") == -5.0
+
+
+def test_budget_scopes_are_independent() -> None:
+    monitor = BudgetMonitor()
+    monitor.set_budget("task:task_1", 1.0)
+    monitor.set_budget("daily", 100.0)
+    assert monitor.record("task:task_1", 0.5) == [50.0]
+    assert monitor.record("daily", 0.5) == []  # 0.5% — nothing fired

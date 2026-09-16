@@ -1,0 +1,12 @@
+{
+  "description": "Count characters, words, and lines in a text snippet (read-only sample plugin).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {"type": "string", "description": "Text to measure"}
+    },
+    "required": ["text"]
+  },
+  "risk": "read",
+  "handler": "handler.py:handle"
+}

@@ -10,92 +10,156 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.pyo
+*.pyd
 
 # =============================================
-# Node / Next.js
+# Node / Next.js / Electron
 # =============================================
 node_modules/
 .next/
 web/.next/
 web/out/
 out/
+dist/
+build/
+release/
+*.deb
+*.rpm
+*.AppImage
+*.dmg
+*.exe
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.turbo/
 
 # =============================================
-# Runtime data
+# Runtime Databases & State
 # =============================================
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+agent-system/data/*.db
+agent-system/backend/data/*.db
 
 # =============================================
-# Secrets
+# Bob Agent Dynamic Directories
+# =============================================
+agent-system/workspaces/*
+!agent-system/workspaces/.gitkeep
+!agent-system/workspaces/README.md
+agent-system/backend/workspaces/*
+!agent-system/backend/workspaces/.gitkeep
+
+agent-system/templates/*
+!agent-system/templates/.gitkeep
+!agent-system/templates/README.md
+agent-system/backend/templates/*
+!agent-system/backend/templates/.gitkeep
+
+agent-system/recordings/*
+!agent-system/recordings/.gitkeep
+!agent-system/recordings/README.md
+
+agent-system/outputs/*
+!agent-system/outputs/.gitkeep
+!agent-system/outputs/README.md
+
+agent-system/vault/*
+!agent-system/vault/.gitkeep
+!agent-system/vault/README.md
+
+agent-system/backups/*
+!agent-system/backups/.gitkeep
+!agent-system/backups/README.md
+
+workspaces/*
+!workspaces/.gitkeep
+!workspaces/README.md
+
+templates/*
+!templates/.gitkeep
+!templates/README.md
+
+recordings/*
+!recordings/.gitkeep
+!recordings/README.md
+
+outputs/*
+!outputs/.gitkeep
+!outputs/README.md
+
+vault/*
+!vault/.gitkeep
+!vault/README.md
+
+# =============================================
+# Secrets & Environment Configurations
 # =============================================
 .env
 .env.local
+.env.*.local
+.env.production
+.env.staging
+.env.test
+**/.env.local
+**/.env.*.local
 *.pem
 *.key
+*.crt
+id_rsa
+id_ed25519
+*.secret
 
 # =============================================
-# OS files
+# OS Files
 # =============================================
-# macOS
 .DS_Store
 .DS_Store?
 .AppleDouble
 .LSOverride
 .Spotlight-V100
 .Trashes
-
-# Windows
 Thumbs.db
 Desktop.ini
-
-# Linux
 *~
+.Trash-*
 
 # =============================================
-# Editor files
+# Editor & IDE Files
 # =============================================
 .idea/
 .vscode/
 *.swp
 *.swo
 *.code-workspace
+*.sublime-workspace
+*.sublime-project
 
 # =============================================
-# Build output
-# =============================================
-/dist/
-/build/
-*.tmp
-*.temp
-
-# =============================================
-# Log files
+# Logs, Temp & Backups
 # =============================================
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# =============================================
-# Coverage
-# =============================================
-coverage/
-
-# =============================================
-# Test output
-# =============================================
+*.tmp
+*.temp
 /test-results/
-
-# =============================================
-# Configuration
-# =============================================
+.report.*
+*.test.html
+*.test.xml
+coverage/
+.coverage.*
+*.coverage
 config.json
-
-# =============================================
-# Bootstrap temp files
-# =============================================
+config.local.json
+tsconfig.tsbuildinfo
 *.bak
 *.orig
