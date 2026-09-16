@@ -702,6 +702,7 @@ def build_model_router(
             getattr(settings, "circuit_breaker_cooldown_seconds", 60) or 60
         ),
         daily_budget_usd=float(getattr(settings, "daily_budget_usd", 10.0) or 10.0),
+        settings=settings,
     )
     if provider_names is None:
         provider_names = [

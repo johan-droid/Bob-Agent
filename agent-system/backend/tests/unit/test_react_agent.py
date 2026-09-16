@@ -31,12 +31,9 @@ def factory(tmp_path: Path) -> Any:
 @pytest.fixture()
 def clean_registry() -> Any:
     """Snapshot/restore the global agent registry around each test."""
-    saved = dict(registry._REGISTRY)
-    saved_default = registry.handler_for("__probe_missing__")
+    saved = registry.snapshot()
     yield
-    registry._REGISTRY.clear()
-    registry._REGISTRY.update(saved)
-    registry.register_default(saved_default)
+    registry.restore(saved)
 
 
 @pytest.fixture()
@@ -149,8 +146,10 @@ def test_llm_handler_runs_react_loop_with_tool(
     # Tool + outcome events recorded in SQLite.
     with session_scope(factory) as db:
         types = {row.type for row in db.query(EventRow).all()}
-    assert "tool.called" in types
-    assert "tool.result" in types
+    # Canonical event taxonomy: tool.started / tool.completed (the former
+    # tool.called / tool.result names were never part of the catalog).
+    assert "tool.started" in types
+    assert "tool.completed" in types
 
 
 def test_llm_handler_survives_model_failure(

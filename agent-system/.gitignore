@@ -14,13 +14,13 @@ htmlcov/
 *.pyd
 .Python
 develop-eggs/
-downloads/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
+/downloads/
+/eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
 *.egg
 .installed.cfg
 pip-log.txt
@@ -170,9 +170,9 @@ coverage/
 # =============================================
 # Configuration & Backups
 # =============================================
-config.json
-config.local.json
-tsconfig.tsbuildinfo
+/config.json
+/config.local.json
+*.tsbuildinfo
 *.bak
 *.orig
 

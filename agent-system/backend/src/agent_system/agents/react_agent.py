@@ -83,7 +83,12 @@ def install() -> None:
 
     registry.register("llm", llm_react_handler)
     if fallback_enabled(get_settings()):
-        registry.register_default(dispatch_default)
+        # Explicit, recorded fallback: routing an unsupported agent type to the
+        # generic agent emits `agent.fallback_applied` instead of happening
+        # silently (v3.1 §4).
+        registry.set_fallback(dispatch_default, reason="unsupported_agent_type")
+    else:
+        registry.set_fallback(None)
     _installed = True
 
 
@@ -245,6 +250,11 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
         return {"output": result.output or "", "usage": usage}
 
     tool_registry = build_registry(settings)
+    # Capabilities resolve permissions through the shared gate: same durable
+    # store the API serves, so a user approval unblocks the waiting call.
+    from agent_system.services.permissions import PermissionGate
+
+    gate = context.get("gate") or PermissionGate(factory=factory)
     tool_ctx = ToolContext(
         settings=settings,
         factory=factory,
@@ -252,6 +262,8 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
         task_id=task_id,
         agent_run_id=run_id,
         agent_type=agent_type,
+        workspace_id=context.get("workspace_id"),
+        gate=gate,
         emit=emit,
     )
     loop = run_tool_loop(

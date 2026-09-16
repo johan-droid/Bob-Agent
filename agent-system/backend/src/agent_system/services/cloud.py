@@ -27,9 +27,18 @@ from agent_system.infra.models import Session, Task
 MAX_DRIVE_ROUNDS = 25
 
 
-def ensure_session_tasks(factory: Any, bus: Any, session_id: str) -> list[str]:
-    """Create a single goal task for empty sessions; return task ids present."""
+def ensure_session_tasks(
+    factory: Any, bus: Any, session_id: str, settings: Any = None
+) -> list[str]:
+    """Plan and create tasks for empty sessions; return the task ids present.
+
+    Planning is the Planner's job (``services/planner.py``); the Supervisor
+    validates and persists the resulting DAG. A goal that cannot be planned
+    still produces one honest ``llm`` task so the session never stalls with
+    zero work — the failure is recorded on the session, not hidden.
+    """
     from agent_system.services.orchestrator import Supervisor
+    from agent_system.services.planner import PlannedTask, Planner, PlanningError, TaskPlan
 
     supervisor = Supervisor(bus)
     with session_scope(factory) as db:
@@ -40,16 +49,39 @@ def ensure_session_tasks(factory: Any, bus: Any, session_id: str) -> list[str]:
         if existing:
             return [t.id for t in existing]
         goal = session.goal or ""
-    task_id = supervisor.add_task(
+    if settings is None:
+        from agent_system.config import get_settings
+
+        settings = get_settings()
+    try:
+        plan = Planner(settings).plan(goal)
+    except PlanningError:
+        plan = TaskPlan(
+            goal=goal,
+            intent="generic",
+            risk="LOW",
+            tasks=(
+                PlannedTask(
+                    key="task_1",
+                    title=(goal[:80] or "cloud goal"),
+                    task_type="llm",
+                    agent_type="llm",
+                    input={"goal": goal},
+                    expected_outputs=("result",),
+                ),
+            ),
+            notes=("goal was not plannable by the deterministic planner; single generic task",),
+        )
+    from agent_system.services.tools.registry import build_registry
+
+    task_ids = supervisor.apply_plan(
         factory,
         session_id,
-        task_type="llm",
-        title=(goal[:80] or "cloud goal"),
-        input_json={"goal": goal},
-        agent_type="llm",
+        plan,
+        available_capabilities=set(build_registry(settings).names()),
     )
     supervisor.plan(factory, session_id)
-    return [task_id]
+    return task_ids
 
 
 def drive_session(

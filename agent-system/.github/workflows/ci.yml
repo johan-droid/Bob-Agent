@@ -1,18 +1,20 @@
 name: ci
 
+# The repository's default branch is `main`. The previous `[master]` filter
+# meant no workflow ever ran for a real push or pull request.
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
 
 # Offline-first suite by design: no secrets required for any gate.
 env:
   UV_CACHE_DIR: /tmp/uv-cache
 
 jobs:
-  backend:
-    name: backend (ruff + mypy --strict + pytest)
+  backend-static:
+    name: backend static (ruff + mypy --strict)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +32,114 @@ jobs:
         working-directory: backend
         run: uv sync --group dev
 
-      - name: make check
-        run: make check
+      - name: ruff (lint + format)
+        working-directory: backend
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+
+      - name: mypy --strict
+        working-directory: backend
+        run: uv run mypy src
+
+  backend-tests:
+    name: backend tests (unit + contract + integration + recovery)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --group dev
+
+      # ubuntu-latest ships a Docker daemon. The QA sandbox image is a build
+      # artifact of this repository — it exists on no registry — so build it
+      # here. Without this the Docker-gated QA test can only ever skip on a
+      # fresh machine, which is why the image build is part of the gate.
+      - name: Build QA sandbox image
+        run: |
+          docker build \
+            -t agent-system/qa-sandbox:latest \
+            -f backend/docker/qa-sandbox.Dockerfile \
+            backend/docker
+
+      # Redis-backed tests self-skip when no broker is present; the QA sandbox
+      # test runs for real now that its image was built above.
+      - name: pytest
+        working-directory: backend
+        run: uv run pytest -q
+
+  backend-security:
+    name: backend security (jail / permissions / sandbox bypass)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: security suite
+        working-directory: backend
+        run: uv run pytest -q tests/security
+
+  migrations:
+    name: migrations (upgrade head + model diff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: upgrade a fresh database to head
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:////tmp/ci_migration.db
+        run: uv run alembic upgrade head
+
+      - name: migrations agree with ORM models (alembic check)
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:////tmp/ci_migration.db
+        run: uv run alembic check
+
+      - name: upgrade is idempotent
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:////tmp/ci_migration.db
+        run: uv run alembic upgrade head
 
   web:
-    name: web smoke (headless browser)
+    name: web (typecheck + build + smoke)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,13 +167,21 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: TypeScript typecheck
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: Build dashboard
+        working-directory: web
+        run: npm run build
+
       - name: Install headless Chromium (Playwright)
         working-directory: web
         run: |
           npm install --no-save playwright-core
           npx playwright-core install --with-deps chromium || npx playwright-core install chromium
 
-      - name: Web smoke test
+      - name: Web smoke test (backend + built UI proxy)
         working-directory: web
         run: node smoke-test.mjs
         env:

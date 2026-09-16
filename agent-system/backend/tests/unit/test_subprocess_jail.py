@@ -92,38 +92,47 @@ class TestAllowlist:
 
 class TestCloudShellRouting:
     def test_shell_uses_jail_when_flag_set(self, tmp_path: Path) -> None:
-        from agent_system.services.tools import ToolContext, _shell
+        from agent_system.services.tools import ToolContext
+        from agent_system.services.tools.builtin.shell import _shell
 
-        settings = _settings()
+        # The working directory must be an allowed root: shell is jailed to the
+        # same workspace roots as every other capability.
+        settings = _settings(tools_fs_roots=str(tmp_path))
         ctx = ToolContext(settings=settings)
         out = _shell({"command": "echo cloud-shell", "cwd": str(tmp_path)}, ctx)
         assert out["exit_code"] == 0
         assert "cloud-shell" in out["output"]
 
     def test_shell_allowlist_enforced(self, tmp_path: Path) -> None:
-        from agent_system.services.tools import ToolContext, ToolError, _shell
+        from agent_system.services.tools import ToolContext, ToolError
+        from agent_system.services.tools.builtin.shell import _shell
 
-        settings = _settings(heroku_shell_allowlist="echo")
+        settings = _settings(heroku_shell_allowlist="echo", tools_fs_roots=str(tmp_path))
         ctx = ToolContext(settings=settings)
         with pytest.raises(ToolError, match="allowlist"):
             _shell({"command": "uname -a", "cwd": str(tmp_path)}, ctx)
 
     def test_shell_approval_still_required(self, tmp_path: Path) -> None:
+        """Approval is enforced by the capability execution path, not the handler."""
         from agent_system.services.tools import (
             NeedsApprovalError,
             ToolContext,
-            _shell,
+            build_registry,
         )
+        from agent_system.services.tools.execution import execute_tool
 
-        settings = _settings(tools_require_approval=True)
+        settings = _settings(tools_require_approval=True, tools_fs_roots=str(tmp_path))
         ctx = ToolContext(settings=settings, factory=None)
+        tool = build_registry(settings, plugin_dir=tmp_path / "plugins").get("shell")
+        assert tool is not None
         with pytest.raises(NeedsApprovalError):
-            _shell({"command": "echo gated", "cwd": str(tmp_path)}, ctx)
+            execute_tool(tool, {"command": "echo gated", "cwd": str(tmp_path)}, ctx)
 
     def test_mode_off_still_disables(self, tmp_path: Path) -> None:
-        from agent_system.services.tools import ToolContext, ToolError, _shell
+        from agent_system.services.tools import ToolContext, ToolError
+        from agent_system.services.tools.builtin.shell import _shell
 
-        settings = _settings(tools_shell_mode="off")
+        settings = _settings(tools_shell_mode="off", tools_fs_roots=str(tmp_path))
         ctx = ToolContext(settings=settings)
         with pytest.raises(ToolError, match="disabled"):
             _shell({"command": "echo no", "cwd": str(tmp_path)}, ctx)

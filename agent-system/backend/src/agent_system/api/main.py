@@ -38,7 +38,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.session_factory = _session_factory
     app.state.event_bus = EventBus()
-    app.state.gate = PermissionGate()
+    # One authoritative permission gate, backed by the durable approvals table:
+    # an approval granted through /api/v1/approvals is therefore visible to the
+    # capability that requested it (and survives a restart).
+    app.state.gate = PermissionGate(factory=_session_factory)
     app.state.authenticator = Authenticator(settings.api_session_secret)
     # Phase 18: autopilot exists but is OFF unless explicitly enabled.
     from agent_system.services.autopilot import AutopilotService

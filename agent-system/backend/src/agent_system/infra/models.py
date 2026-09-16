@@ -34,8 +34,8 @@ def _pk() -> Mapped[str]:
     return mapped_column(String(40), primary_key=True)
 
 
-def _ts() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+def _ts(index: bool = False) -> Mapped[datetime]:
+    return mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=index)
 
 
 # ---------------------------------------------------------------------------
@@ -109,16 +109,31 @@ class AgentLease(Base):
 
 
 class Approval(Base):
+    """The single durable permission-decision store (v3.1 §12–§13).
+
+    Both the tool execution path and the ``/api/v1/approvals`` endpoints read
+    and write these rows through one :class:`~agent_system.services.permissions.PermissionGate`,
+    so an approval granted by a user is always visible to the capability that
+    requested it — including across a process restart. The ``policy`` column
+    records the grant breadth (ALLOW_ONCE consumes on first use) and the scope
+    identifiers let ALLOW_SESSION / ALLOW_WORKSPACE be evaluated.
+    """
+
     __tablename__ = "approvals"
 
     id: Mapped[str] = _pk()
     task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     agent_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     requested_action: Mapped[str] = mapped_column(Text, nullable=False)
     risk: Mapped[str] = mapped_column(String(12), nullable=False)  # LOW/MEDIUM/HIGH/CRITICAL
-    scope: Mapped[str] = mapped_column(String(60), nullable=False)
+    scope: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
     requester: Mapped[str] = mapped_column(String(60), nullable=False)
     decision: Mapped[str] = mapped_column(String(12), default="PENDING", nullable=False, index=True)
+    policy: Mapped[str] = mapped_column(String(20), default="ALLOW_ONCE", nullable=False)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     decided_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _ts()
@@ -181,12 +196,20 @@ class EventRow(Base):
 
 
 class ModelCall(Base):
+    """One model invocation — also the authoritative cost record (v3.1 §20).
+
+    Budget checks aggregate these rows instead of process-local counters, so
+    spend survives a restart. ``session_id`` scopes session budgets; task and
+    provider scopes use their own columns.
+    """
+
     __tablename__ = "model_calls"
 
     id: Mapped[str] = _pk()
     task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     agent_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
-    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     model_id: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)  # ok/failed
     tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -197,7 +220,7 @@ class ModelCall(Base):
     cost_is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = _ts()
+    created_at: Mapped[datetime] = _ts(index=True)
 
 
 class ToolCall(Base):

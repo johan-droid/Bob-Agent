@@ -5,6 +5,12 @@ Two backends, one envelope ``{"exit_code", "stdout", "timed_out"}``:
 - ``DockerSandbox`` — one container per workspace (local dev, preferred).
   Raises ``SandboxUnavailableError`` when Docker is unreachable — never
   fakes isolation.
+
+  The images this repository builds itself (``LOCAL_IMAGES``, currently only
+  the QA sandbox) exist on no registry, so they must be built before use:
+  ``make qa-sandbox-image``, or ``DockerSandbox.ensure_image(image)`` to build
+  on demand. A missing local image is reported as ``SandboxUnavailableError``
+  with the fix, not as a generic sandbox failure.
 - ``SubprocessJail`` — in-process fallback for platforms with no Docker
   daemon (Heroku dynos). Containment only: cwd confined to the workspace,
   secret env stripped, rlimits + timeout + output cap enforced. This is
@@ -24,11 +30,16 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from agent_system.config import get_settings
 
 MAX_OUTPUT_BYTES = 1_000_000
+
+#: Dockerfile for the QA sandbox image, resolved from the source tree. The
+#: image is a build artifact of this repository (it is not on any registry),
+#: so `docker build` is the only way to obtain it.
+QA_SANDBOX_DOCKERFILE = Path(__file__).resolve().parents[3] / "docker" / "qa-sandbox.Dockerfile"
 
 # Cloud jail budgets (Basic 512MB dyno): the jail lives inside the dyno, so
 # caps stay well under quota. Process count is NOT limited here on purpose:
@@ -60,6 +71,12 @@ class DockerSandbox:
     # Image with pytest preinstalled for untrusted QA runs (Phase 13).
     QA_IMAGE = "agent-system/qa-sandbox:latest"
 
+    #: Images this repository builds locally (image -> Dockerfile). Everything
+    #: else is expected to come from a registry, so a start failure for those
+    #: is a genuine sandbox error rather than a missing build. Only these get
+    #: the "run the build" hint.
+    LOCAL_IMAGES: ClassVar[dict[str, Path]] = {QA_IMAGE: QA_SANDBOX_DOCKERFILE}
+
     def __init__(self, docker_client: Any = None) -> None:
         if docker_client is None:
             try:
@@ -71,6 +88,47 @@ class DockerSandbox:
                 raise SandboxUnavailableError(f"docker unavailable: {exc}") from exc
         else:
             self._client = docker_client
+
+    def image_present(self, image: str) -> bool:
+        """Whether ``image`` is already available to this daemon."""
+        try:
+            self._client.images.get(image)
+        except Exception:
+            return False
+        return True
+
+    def ensure_image(self, image: str, dockerfile: Path | None = None) -> bool:
+        """Make ``image`` available, building it from the in-repo Dockerfile.
+
+        Images built by this repository are not published to a registry, so a
+        fresh checkout has no way to obtain them except building. Returns
+        ``True`` when the image is present afterwards; raises
+        ``SandboxUnavailableError`` with an actionable message otherwise.
+
+        Isolation is never faked: a missing image means the sandbox is
+        unavailable, and the caller decides how to proceed.
+        """
+        if self.image_present(image):
+            return True
+        context = dockerfile or self.LOCAL_IMAGES.get(image)
+        if context is None or not context.is_file():
+            raise SandboxUnavailableError(
+                f"sandbox image {image!r} is missing and no Dockerfile was found "
+                f"at {context}; run `make qa-sandbox-image` on a machine with "
+                "the source tree"
+            )
+        try:
+            self._client.images.build(
+                path=str(context.parent),
+                dockerfile=context.name,
+                tag=image,
+                rm=True,
+            )
+        except Exception as exc:
+            raise SandboxUnavailableError(
+                f"sandbox image {image!r} is missing and could not be built from {context}: {exc}"
+            ) from exc
+        return self.image_present(image)
 
     def _limits(self) -> dict[str, Any]:
         settings = get_settings()
@@ -101,9 +159,10 @@ class DockerSandbox:
         # host user (containers otherwise write root-owned files into /ws).
         uid = os.getuid()
         gid = os.getgid()
+        resolved_image = image or self.IMAGE
         try:
             result = self._client.containers.run(
-                image or self.IMAGE,
+                resolved_image,
                 command,
                 volumes={str(workspace_path): {"bind": "/ws", "mode": "rw"}},
                 working_dir="/ws",
@@ -113,6 +172,14 @@ class DockerSandbox:
                 **limits,
             )
         except Exception as exc:
+            # A missing *locally-built* image surfaces here as a 404 during the
+            # implicit pull. That is an environment gap (nobody ran the build),
+            # not a degraded sandbox — say so instead of leaking the raw error.
+            if resolved_image in self.LOCAL_IMAGES and not self.image_present(resolved_image):
+                raise SandboxUnavailableError(
+                    f"sandbox image {resolved_image!r} is not available: {exc}; "
+                    "build it with `make qa-sandbox-image`"
+                ) from exc
             raise SandboxError(f"container start failed: {exc}") from exc
         try:
             outcome = result.wait(timeout=timeout)

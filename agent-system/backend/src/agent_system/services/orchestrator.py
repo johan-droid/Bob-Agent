@@ -33,10 +33,151 @@ class CycleError(ValueError):
 
 
 class Supervisor:
-    """Goal decomposition into an explicit task DAG."""
+    """Validates and persists planned work; schedules ready tasks.
+
+    The Supervisor does *not* decide what work exists — the Planner does that
+    (``services/planner.py``). The Supervisor owns: DAG validation (cycles,
+    unknown dependencies, hard limits), task persistence, lifecycle accounting,
+    and scheduling of ready work.
+    """
 
     def __init__(self, event_bus: EventBus) -> None:
         self._bus = event_bus
+
+    # -- planning seam ------------------------------------------------------
+
+    def validate_plan(self, plan: Any, available_capabilities: Any = None) -> list[str]:
+        """Validate a planner's DAG; returns warnings, raises on violations.
+
+        Violations fail closed: a dependency cycle, an unknown dependency, an
+        over-limit plan, or a required capability that does not exist in the
+        capability library is a planning bug, not something to paper over at
+        execution time.
+        """
+        keys = [task.key for task in plan.tasks]
+        if len(keys) != len(set(keys)):
+            raise ValueError("plan has duplicate task keys")
+        if len(plan.tasks) > MAX_TASKS_PER_SESSION:
+            raise ValueError(f"plan exceeds the per-session task limit ({MAX_TASKS_PER_SESSION})")
+        graph = {task.key: list(task.depends_on) for task in plan.tasks}
+        for key, deps in graph.items():
+            for dep in deps:
+                if dep not in graph:
+                    raise ValueError(f"plan task '{key}' depends on unknown task '{dep}'")
+        self._assert_acyclic_keys(graph)
+        warnings: list[str] = []
+        if available_capabilities is not None:
+            known = set(available_capabilities)
+            for task in plan.tasks:
+                missing = [c for c in task.required_capabilities if c not in known]
+                if missing:
+                    raise ValueError(
+                        f"plan task '{task.key}' requires unavailable capabilities: "
+                        f"{', '.join(missing)}"
+                    )
+        if plan.risk in {"HIGH", "CRITICAL"}:
+            warnings.append(
+                f"plan classified {plan.risk} risk; expect approval requests during execution"
+            )
+        return warnings
+
+    def apply_plan(
+        self, factory: Any, session_id: str, plan: Any, **validate_kwargs: Any
+    ) -> list[str]:
+        """Persist a validated plan as tasks, mapping planned keys to task ids."""
+        self.validate_plan(plan, **validate_kwargs)
+        created: dict[str, str] = {}
+        ordered = self._topological_order(plan)
+        for task in ordered:
+            task_id = self.add_task(
+                factory,
+                session_id,
+                task_type=task.task_type,
+                title=task.title,
+                input_json=dict(task.input),
+                depends_on=[created[dep] for dep in task.depends_on if dep in created],
+                agent_type=task.agent_type,
+            )
+            created[task.key] = task_id
+        return [created[task.key] for task in ordered]
+
+    def create_planned_session(
+        self, factory: Any, goal: str, settings: Any = None, session_id: str | None = None
+    ) -> tuple[str, Any, list[str]]:
+        """Plan a goal and persist it: session -> planned DAG -> queued tasks.
+
+        When ``session_id`` is given the plan is applied to that existing
+        session; otherwise a new session is created for the goal. Applying to
+        the caller's session matters: planning must never silently target a
+        different session than the one the request named.
+        """
+        from agent_system.services.planner import Planner
+        from agent_system.services.tools.registry import build_registry
+
+        plan = Planner(settings).plan(goal)
+        target_session = session_id or self.create_session(factory, goal)
+        try:
+            known = set(build_registry(settings).names()) if settings is not None else None
+            task_ids = self.apply_plan(factory, target_session, plan, available_capabilities=known)
+        except ValueError:
+            self._fail_session(factory, target_session, plan)
+            raise
+        self.plan(factory, target_session)
+        return target_session, plan, task_ids
+
+    def _fail_session(self, factory: Any, session_id: str, plan: Any) -> None:
+        """Record the planning failure on the session rather than leaving it ACTIVE."""
+        from agent_system.infra.models import Session
+
+        with session_scope(factory) as db:
+            row = db.get(Session, session_id)
+            if row is not None:
+                row.status = "PLANNING_FAILED"
+            self._bus.emit(
+                Event(
+                    type="session.completed",
+                    session_id=session_id,
+                    actor="supervisor",
+                    payload={"outcome": "PLANNING_FAILED", "plan": plan.to_json()},
+                ),
+                db,
+            )
+
+    def _topological_order(self, plan: Any) -> list[Any]:
+        by_key = {task.key: task for task in plan.tasks}
+        ordered: list[Any] = []
+        visited: set[str] = set()
+
+        def visit(key: str) -> None:
+            if key in visited:
+                return
+            for dep in by_key[key].depends_on:
+                visit(dep)
+            visited.add(key)
+            ordered.append(by_key[key])
+
+        for key in by_key:
+            visit(key)
+        return ordered
+
+    @staticmethod
+    def _assert_acyclic_keys(graph: dict[str, list[str]]) -> None:
+        visiting: set[str] = set()
+        done: set[str] = set()
+
+        def visit(node: str) -> None:
+            if node in visiting:
+                raise CycleError(f"dependency cycle detected at {node}")
+            if node in done:
+                return
+            visiting.add(node)
+            for dep in graph.get(node, []):
+                visit(dep)
+            visiting.discard(node)
+            done.add(node)
+
+        for node in graph:
+            visit(node)
 
     def create_session(self, factory: Any, goal: str) -> str:
         session_id = ids.new_session_id()

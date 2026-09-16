@@ -272,6 +272,7 @@ class ModelRouter:
         circuit_breaker_cooldown_seconds: float = 60.0,
         daily_budget_usd: float = 10.0,
         budget_monitor: BudgetMonitor | None = None,
+        settings: Any | None = None,
     ) -> None:
         self._bus = event_bus
         self.pricing = pricing or PricingRegistry()
@@ -291,12 +292,38 @@ class ModelRouter:
         # Daily budget wiring (minimal but real): shared monitor tracks
         # cumulative spend against daily_budget_usd across all invocations.
         self.daily_budget_usd = daily_budget_usd
+        #: Deployment settings, used to read the configured budget limits when
+        #: enforcing against persisted spend (services/budget.py).
+        self.settings = settings
         self.budget: BudgetMonitor = budget_monitor or BudgetMonitor()
         if "daily" not in self.budget._limits:  # noqa: SLF001
             self.budget.set_budget("daily", daily_budget_usd)
 
-    def _budget_check(self) -> str | None:
-        """Return an error message when the daily budget is exhausted."""
+    def _budget_check(
+        self,
+        factory: Any = None,
+        *,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        provider: str | None = None,
+    ) -> str | None:
+        """Return an error message when a budget scope is exhausted.
+
+        With a session factory the check is derived from the persisted
+        ``model_calls`` records (:class:`~agent_system.services.budget.BudgetLedger`),
+        so it is authoritative and survives a restart. Without one it degrades
+        to the in-process monitor — documented behaviour, never used by the
+        worker or API, both of which always pass a factory.
+        """
+        if factory is not None:
+            from agent_system.services.budget import BudgetLedger
+
+            decision = BudgetLedger(factory, self.settings).check(
+                task_id=task_id, session_id=session_id, provider=provider
+            )
+            if not decision.allowed:
+                return f"BudgetExceededError: {decision.reason}"
+            return None
         remaining = self.budget.remaining("daily")
         if remaining is not None and remaining <= 0:
             return (
@@ -304,6 +331,39 @@ class ModelRouter:
                 f"exhausted (spent ${self.budget.spent('daily'):.4f})"
             )
         return None
+
+    def _budget_alerts(self, factory: Any, cost: float, call_id: str) -> list[dict[str, Any]]:
+        """Thresholds newly crossed by this call, derived from persisted spend.
+
+        The level fires when the total crosses it *because of* this call:
+        before = after - cost. Because `before`/`after` come from the database,
+        a restart cannot re-fire an alert that already fired.
+        """
+        from agent_system.services.budget import ALERT_LEVELS, BudgetLedger
+
+        try:
+            ledger = BudgetLedger(factory, self.settings)
+            after = ledger.daily_usage()
+        except Exception:
+            return []
+        if not after.limit_usd:
+            return []
+        before = after.spent_usd - cost
+        payloads: list[dict[str, Any]] = []
+        for level in ALERT_LEVELS:
+            threshold = after.limit_usd * (level / 100.0)
+            if before < threshold <= after.spent_usd:
+                payloads.append(
+                    {
+                        "scope": "daily",
+                        "level_pct": level,
+                        "spent_usd": round(after.spent_usd, 6),
+                        "limit_usd": after.limit_usd,
+                        "model_call_id": call_id,
+                        "source": "persisted_model_calls",
+                    }
+                )
+        return payloads
 
     def register_adapter(self, provider: str, adapter: ProviderAdapter) -> None:
         with self._lock:
@@ -378,7 +438,9 @@ class ModelRouter:
             response = adapter.invoke(model_id, prompt, **kwargs)
             return str(response.get("output", "")), dict(response.get("usage", {}))
 
-        budget_error = self._budget_check()
+        budget_error = self._budget_check(
+            factory, task_id=task_id, session_id=session_id, provider=provider
+        )
         if budget_error is not None:
             ok: bool = False
             output: str | None = None
@@ -455,7 +517,9 @@ class ModelRouter:
         adapter = self._adapter_for(model_id)
         started = time.monotonic()
         breaker = self._breaker_for(provider) if provider != "unknown" else None
-        budget_error = self._budget_check()
+        budget_error = self._budget_check(
+            factory, task_id=task_id, session_id=session_id, provider=provider
+        )
         if budget_error is not None:
             latency_ms = int((time.monotonic() - started) * 1000)
             return self._record(
@@ -717,6 +781,7 @@ class ModelRouter:
                     id=call_id,
                     task_id=task_id,
                     agent_run_id=agent_run_id,
+                    session_id=session_id,
                     provider=provider,
                     model_id=model_id,
                     status="ok" if ok else "failed",
@@ -761,26 +826,17 @@ class ModelRouter:
                     ),
                     db,
                 )
-                # Record spend against the daily budget (minimal wiring:
-                # check happens before the call, spend recorded here).
-                try:
-                    fired = self.budget.record("daily", cost)
-                except Exception:
-                    fired = []
-                for level in fired:
+                # Spend is recorded by the ModelCall row above; the alert
+                # thresholds are derived from the persisted total so they
+                # survive a restart and cannot double-fire after one.
+                for payload in self._budget_alerts(factory, cost, call_id):
                     self._bus.emit(
                         Event(
                             type="cost.alert",
                             session_id=session_id,
                             task_id=task_id,
                             actor="cost_tracker",
-                            payload={
-                                "scope": "daily",
-                                "level_pct": level,
-                                "spent_usd": self.budget.spent("daily"),
-                                "limit_usd": self.budget._limits.get("daily"),  # noqa: SLF001
-                                "model_call_id": call_id,
-                            },
+                            payload=payload,
                         ),
                         db,
                     )

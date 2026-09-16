@@ -293,26 +293,23 @@ def _wrap_plugin_handler(plugin: ToolPlugin, func: Any) -> Any:
 
 
 def _require_plugin_approval(plugin: ToolPlugin, args: dict[str, Any], ctx: Any) -> None:
-    """Execute-risk plugins demand a live approval, exactly like shell."""
-    from agent_system.services.tools import (
-        NeedsApprovalError,
-        _db_approval_ok,
-        _db_request_approval,
-    )
+    """Execute-risk plugins demand a live approval, exactly like shell.
 
-    settings = getattr(ctx, "settings", None)
-    if not bool(getattr(settings, "tools_require_approval", True)):
-        return
+    Delegates to the one authoritative permission gate: a plugin cannot invent
+    its own approval policy, and an approval granted through the API is visible
+    here because both go through the same durable store.
+    """
     import json as _json_args
 
+    from agent_system.services.permissions import CapabilityRisk, require_capability
+
     action = f"plugin:{plugin.name} {_json_args.dumps(args, sort_keys=True)[:200]}"
-    scope = f"plugin:{plugin.name}"
-    if _db_approval_ok(getattr(ctx, "factory", None), scope, action):
-        return
-    approval_id = _db_request_approval(
-        getattr(ctx, "factory", None), ctx, action, scope, risk="HIGH"
+    require_capability(
+        ctx,
+        scope=f"plugin:{plugin.name}",
+        action=action,
+        capability_risk=CapabilityRisk.EXECUTE,
     )
-    raise NeedsApprovalError(approval_id, action)
 
 
 def _run_in_sandbox(plugin: ToolPlugin, args: dict[str, Any], ctx: Any) -> dict[str, Any]:

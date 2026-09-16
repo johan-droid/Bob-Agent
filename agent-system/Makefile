@@ -1,4 +1,4 @@
-.PHONY: install dev test lint typecheck migrate up down check start setup bootstrap doctor chat settings setup-web web
+.PHONY: install dev test lint typecheck migrate up down check start setup bootstrap doctor chat settings setup-web web qa-sandbox-image
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -83,6 +83,12 @@ up:
 
 down:
 	docker compose down
+
+# Build the QA sandbox image that untrusted generated tests run inside
+# (Phase 13). It is a local build artifact — it exists on no registry — so
+# this target is what makes the Docker-gated QA path runnable. Idempotent.
+qa-sandbox-image:
+	docker build -t agent-system/qa-sandbox:latest -f backend/docker/qa-sandbox.Dockerfile backend/docker
 
 # ---------------------------------------------------------------------------
 # Web Dashboard Targets

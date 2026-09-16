@@ -193,8 +193,15 @@ class TestDockerSandboxIntegration:
         """
         try:
             sandbox = DockerSandbox()
-        except SandboxUnavailableError:
-            pytest.skip("docker daemon unavailable")
+        except SandboxUnavailableError as exc:
+            pytest.skip(f"docker daemon unavailable: {exc}")
+        # `agent-system/qa-sandbox` is built by this repository (it is on no
+        # registry), so a fresh checkout must build it before the sandbox can
+        # run. CI pre-builds it; this keeps a developer machine self-sufficient.
+        try:
+            sandbox.ensure_image(DockerSandbox.QA_IMAGE)
+        except SandboxUnavailableError as exc:
+            pytest.skip(f"qa sandbox image unavailable: {exc}")
         with tempfile.TemporaryDirectory() as staging:
             # Stage via the workspace-path contract: DockerSandbox mounts this
             # dir at /ws, so the pytest invocation must reference /ws paths.

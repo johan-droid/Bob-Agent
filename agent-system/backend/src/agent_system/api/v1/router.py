@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading as _threading
 import time as _time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -24,6 +24,7 @@ from agent_system.infra.db import session_scope
 from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import Artifact, Session, Task, Workspace
 from agent_system.services.auth import Authenticator
+from agent_system.services.orchestrator import Supervisor
 from agent_system.services.permissions import (
     ApprovalRequest as GateRequest,
 )
@@ -33,6 +34,8 @@ from agent_system.services.permissions import (
     Policy,
     Risk,
 )
+from agent_system.services.planner import PlanningError
+from agent_system.services.tools.registry import build_registry as build_tool_registry
 
 router = APIRouter(prefix="/api/v1", dependencies=[])
 authenticated = APIRouter(prefix="/api/v1", dependencies=[Depends(get_authenticator)])
@@ -185,6 +188,58 @@ def update_session(session_id: str, body: SessionUpdate, request: Request) -> Se
             db,
         )
         return SessionOut(id=row.id, goal=row.goal, status=row.status)
+
+
+class PlanOut(BaseModel):
+    session_id: str
+    intent: str
+    risk: str
+    strategy: str
+    warnings: list[str]
+    tasks: list[dict[str, Any]]
+
+
+@authenticated.post("/sessions/{session_id}/plan", status_code=201)
+def plan_session(session_id: str, request: Request) -> PlanOut:
+    """Plan a session's goal into a task DAG and persist it as tasks.
+
+    Planning (Planner), validation/persistence (Supervisor) and execution
+    (Orchestrator) are separate steps; this endpoint performs the first two and
+    leaves the tasks QUEUED. An invalid plan fails closed with 400 and the
+    session is marked PLANNING_FAILED rather than executing a bad DAG.
+    """
+    factory = request.app.state.session_factory
+    bus: EventBus = request.app.state.event_bus
+    settings = request.app.state.settings
+    supervisor = Supervisor(bus)
+    with session_scope(factory) as db:
+        row = db.get(Session, session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        if db.query(Task).filter_by(session_id=session_id).count():
+            raise HTTPException(
+                status_code=409, detail="session already has tasks; planning is one-shot"
+            )
+        goal = row.goal
+    try:
+        _, plan, _task_ids = supervisor.create_planned_session(
+            factory, goal, settings=settings, session_id=session_id
+        )
+    except PlanningError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid plan: {exc}") from exc
+    warnings = supervisor.validate_plan(
+        plan, available_capabilities=set(build_tool_registry(settings).names())
+    )
+    return PlanOut(
+        session_id=session_id,
+        intent=plan.intent,
+        risk=plan.risk,
+        strategy=plan.strategy,
+        warnings=warnings,
+        tasks=[task.to_json() for task in plan.tasks],
+    )
 
 
 @authenticated.delete("/sessions/{session_id}", status_code=204)
@@ -818,7 +873,10 @@ def list_events(
         # session_id is pushed into the SQL WHERE clause (indexed) instead
         # of Python post-filtering; limit is capped at 500 rows per page.
         events = bus.replay_after(
-            db, after_sequence=after_sequence, event_type=type, limit=limit,
+            db,
+            after_sequence=after_sequence,
+            event_type=type,
+            limit=limit,
             session_id=session_id,
         )
         return [
@@ -917,7 +975,7 @@ def list_vault_notes(
                     source=str(fm.get("source") or "unknown"),
                     created=str(fm.get("created") or ""),
                     tags=tags,
-                    links=[str(l) for l in fm.get("links") or []],
+                    links=[str(link) for link in fm.get("links") or []],
                     size_bytes=p.stat().st_size if p.exists() else 0,
                     task_id=fm.get("task_id"),
                     session_id=fm.get("session_id"),
@@ -952,8 +1010,8 @@ def get_vault_note(
         title=str(fm.get("title") or target.stem),
         source=str(fm.get("source") or "unknown"),
         created=str(fm.get("created") or ""),
-        tags=[str(t) for t in fm.get("tags") or []],
-        links=[str(l) for l in fm.get("links") or []],
+        tags=[str(tag) for tag in fm.get("tags") or []],
+        links=[str(link) for link in fm.get("links") or []],
         size_bytes=target.stat().st_size,
         task_id=fm.get("task_id"),
         session_id=fm.get("session_id"),
@@ -1039,7 +1097,6 @@ class TemplateRestore(BaseModel):
 @authenticated.get("/templates")
 def list_templates(request: Request) -> list[TemplateOut]:
     import json
-    from agent_system.services.workspaces import TemplateManager
 
     settings = request.app.state.settings
     tpl_dir = Path(settings.templates_dir)
@@ -1050,7 +1107,7 @@ def list_templates(request: Request) -> list[TemplateOut]:
         meta_file = tpl_dir / f"{tpl_id}.json"
         name = tpl_id
         skipped: list[str] = []
-        created_str = datetime.fromtimestamp(archive.stat().st_mtime, tz=timezone.utc).isoformat()
+        created_str = datetime.fromtimestamp(archive.stat().st_mtime, tz=UTC).isoformat()
         if meta_file.exists():
             try:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -1074,6 +1131,7 @@ def list_templates(request: Request) -> list[TemplateOut]:
 @authenticated.post("/templates", status_code=201)
 def create_template(body: TemplateCreate, request: Request) -> TemplateOut:
     import json
+
     from agent_system.services.workspaces import TemplateManager, WorkspaceManager
 
     settings = request.app.state.settings
@@ -1086,7 +1144,7 @@ def create_template(body: TemplateCreate, request: Request) -> TemplateOut:
     tpl_id = ids.new_id("tpl_")
     archive = tpl_mgr.snapshot(tpl_id, ws_path, body.name)
     meta_file = Path(settings.templates_dir) / f"{tpl_id}.json"
-    now_str = datetime.now(timezone.utc).isoformat()
+    now_str = datetime.now(UTC).isoformat()
     meta_file.write_text(
         json.dumps(
             {
@@ -1124,9 +1182,9 @@ def restore_template(template_id: str, body: TemplateRestore, request: Request) 
     tpl_mgr = TemplateManager(Path(settings.templates_dir))
     try:
         restored_files = tpl_mgr.clone(template_id, target_path)
-    except Exception as e:
+    except Exception as exc:
         ws_mgr.delete(ws_id)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     with session_scope(factory) as db:
         db.add(Workspace(id=ws_id, name=name, status="CREATED"))
@@ -1134,7 +1192,11 @@ def restore_template(template_id: str, body: TemplateRestore, request: Request) 
             Event(
                 type="workspace.restored",
                 actor="user",
-                payload={"workspace_id": ws_id, "template_id": template_id, "files": len(restored_files)},
+                payload={
+                    "workspace_id": ws_id,
+                    "template_id": template_id,
+                    "files": len(restored_files),
+                },
             ),
             db,
         )
@@ -1157,4 +1219,3 @@ def delete_template(template_id: str, request: Request) -> None:
         archive.unlink()
     if meta.exists():
         meta.unlink()
-

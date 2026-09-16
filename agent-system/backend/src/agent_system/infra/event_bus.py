@@ -14,7 +14,12 @@ from collections.abc import Callable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agent_system.domain.events import Event, EventSensitivity, EventVisibility
+from agent_system.domain.events import (
+    Event,
+    EventSensitivity,
+    EventVisibility,
+    validate_event_type,
+)
 from agent_system.infra.models import EventRow
 
 Subscriber = Callable[[Event], None]
@@ -56,7 +61,12 @@ class EventBus:
         Duplicate `event_id` delivery is absorbed (idempotent emit): the
         previously persisted row is returned untouched, no sequence burned,
         no duplicate subscriber fanout (v3.1 §6 dedupe rule).
+
+        The event type is validated against the canonical taxonomy first: an
+        unknown type raises rather than quietly persisting an event no
+        consumer knows how to interpret.
         """
+        validate_event_type(event.type)
         event = event.model_copy(update={"payload": redact_payload(event.payload)})
         with self._lock:
             existing = session.get(EventRow, event.event_id)

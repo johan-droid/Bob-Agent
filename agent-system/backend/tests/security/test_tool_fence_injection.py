@@ -17,6 +17,7 @@ parsing is untouched.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from agent_system.services.agent_loop import (
@@ -24,7 +25,11 @@ from agent_system.services.agent_loop import (
     run_tool_loop,
     sanitize_tool_result,
 )
-from agent_system.services.tools import Tool, ToolRegistry
+from agent_system.services.tools import Tool, ToolContext, ToolRegistry
+
+#: Approvals are switched off so the ONLY thing that can stop the injected
+#: shell call is the sanitiser — the security property this suite pins.
+_NO_APPROVALS = ToolContext(settings=SimpleNamespace(tools_require_approval=False))
 
 # Attacker-controlled payload as it might appear in a fetched web page or an
 # MCP tool response. It embeds a LIVE tool fence targeting the shell tool.
@@ -105,7 +110,7 @@ class TestToolFenceInjectionViaLoop:
             system="sys",
             task="fetch https://evil.example.com",
             registry=registry,
-            ctx=None,
+            ctx=_NO_APPROVALS,
             max_iters=4,
         )
 
@@ -134,7 +139,7 @@ class TestToolFenceInjectionViaLoop:
             system="sys",
             task="fetch https://example.com",
             registry=registry,
-            ctx=None,
+            ctx=_NO_APPROVALS,
             max_iters=4,
         )
 
