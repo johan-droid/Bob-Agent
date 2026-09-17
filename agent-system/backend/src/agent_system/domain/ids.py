@@ -42,6 +42,10 @@ def new_approval_id() -> str:
     return new_id("approval")
 
 
+def new_policy_decision_id() -> str:
+    return new_id("policy")
+
+
 def new_workspace_id() -> str:
     return new_id("ws")
 

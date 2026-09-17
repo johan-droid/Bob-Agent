@@ -139,6 +139,7 @@ class TestExecuteRiskSandboxing:
 
     def test_execute_plugin_demands_approval_like_shell(self, tmp_path: Path) -> None:
         from agent_system.services.tools import NeedsApprovalError
+        from agent_system.services.tools.execution import execute_tool
 
         plugdir = tmp_path / "plugins"
         meta = dict(READ_PLUGIN_META, risk="execute", description="dangerous sample")
@@ -148,7 +149,7 @@ class TestExecuteRiskSandboxing:
         tool = registry.get("doer")
         assert tool is not None
         with pytest.raises(NeedsApprovalError):
-            tool.handler({"x": 1}, ToolContext(settings=settings, factory=None))
+            execute_tool(tool, {"text": "test"}, ToolContext(settings=settings, factory=None))
 
 
 class TestEnableDisable:

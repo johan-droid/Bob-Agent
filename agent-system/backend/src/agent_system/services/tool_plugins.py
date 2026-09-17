@@ -16,9 +16,12 @@ Safety model — identical gates as built-in tools, no exemptions:
 
 - ``risk`` must be ``read`` | ``write`` | ``execute``; anything else is a
   validation error and the plugin never loads.
-- ``execute``-risk plugins are **always** approval-gated (same DB approval
-  flow + ``NeedsApprovalError`` as ``shell`` when ``tools_require_approval``)
-  and **always** run isolated from the host: ``DockerSandbox`` locally,
+- ``execute``-risk plugins are **always** approval-gated: the built tool
+  declares ``risk="execute"`` with the forced scope ``plugin:<name>``, so the
+  one execution engine asks the one permission gate *before* the handler runs
+  (same DB approval flow + ``NeedsApprovalError`` as ``shell`` when
+  ``tools_require_approval``). No plugin-local gate exists to drift. They also
+  **always** run isolated from the host: ``DockerSandbox`` locally,
   ``SubprocessJail`` when ``HEROKU_JAIL=true`` (cloud containment) — a plugin
   cannot declare itself exempt, and ``tools_shell_mode=local`` does not
   apply to plugins.
@@ -246,7 +249,13 @@ class ToolPluginManager:
     # -- build --------------------------------------------------------
 
     def build_tools(self) -> list[Any]:
-        """Build safety-wrapped ``Tool`` objects for every enabled plugin."""
+        """Build safety-wrapped ``Tool`` objects for every enabled plugin.
+
+        The declared contract carries the safety model — the plugin author never
+        does. ``risk`` comes from ``tool.json`` (validated to read|write|execute),
+        the scope is forced to ``plugin:<name>``, and the origin is ``plugin``,
+        so the one execution engine gates the call before the handler is reached.
+        """
         from agent_system.services.tools import Tool
 
         tools: list[Any] = []
@@ -263,19 +272,25 @@ class ToolPluginManager:
                     parameters=plugin.parameters,
                     risk=plugin.risk,
                     handler=_wrap_plugin_handler(plugin, func),
+                    scope=f"plugin:{plugin.name}",
+                    kind="plugin",
                 )
             )
         return tools
 
 
 def _wrap_plugin_handler(plugin: ToolPlugin, func: Any) -> Any:
-    """Apply the built-in safety model to a plugin handler (no exemptions)."""
+    """Wrap a plugin handler: sandboxed when execute, in-process otherwise.
+
+    Approval is *not* handled here — the declared ``risk``/``scope`` on the
+    ``Tool`` route the call through the one permission gate before this handler
+    runs, so there is no second, plugin-local gate to drift.
+    """
     from agent_system.services.tools import RISK_EXECUTE, ToolError
 
     if plugin.risk == RISK_EXECUTE:
 
         def execute_handler(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
-            _require_plugin_approval(plugin, args, ctx)
             return _run_in_sandbox(plugin, args, ctx)
 
         return execute_handler
@@ -290,26 +305,6 @@ def _wrap_plugin_handler(plugin: ToolPlugin, func: Any) -> Any:
         return result
 
     return passthrough_handler
-
-
-def _require_plugin_approval(plugin: ToolPlugin, args: dict[str, Any], ctx: Any) -> None:
-    """Execute-risk plugins demand a live approval, exactly like shell.
-
-    Delegates to the one authoritative permission gate: a plugin cannot invent
-    its own approval policy, and an approval granted through the API is visible
-    here because both go through the same durable store.
-    """
-    import json as _json_args
-
-    from agent_system.services.permissions import CapabilityRisk, require_capability
-
-    action = f"plugin:{plugin.name} {_json_args.dumps(args, sort_keys=True)[:200]}"
-    require_capability(
-        ctx,
-        scope=f"plugin:{plugin.name}",
-        action=action,
-        capability_risk=CapabilityRisk.EXECUTE,
-    )
 
 
 def _run_in_sandbox(plugin: ToolPlugin, args: dict[str, Any], ctx: Any) -> dict[str, Any]:

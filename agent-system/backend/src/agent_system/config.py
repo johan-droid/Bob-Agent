@@ -162,6 +162,21 @@ class Settings(BaseSettings):
     # Default model routing (used by the ModelRouter when no task rule set).
     default_provider: str = "echo"
     default_model: str | None = None
+    # Planner (goal -> DAG) may consult the Model Layer: when enabled *and* a
+    # real provider is configured, Planner.plan() tries an LLM decomposition
+    # first (strategy "llm_model_v1", recorded on the plan) and falls back to
+    # the deterministic keyword planner on any failure. Offline/echo setups
+    # always use the deterministic path, so planning never requires a key.
+    planner_use_llm: bool = True
+    planner_model: str | None = None
+    # Verifier (post-execution REVIEW gate in the Orchestrator): when enabled,
+    # successful handler results pass through RUNNING -> REVIEW -> SUCCEEDED
+    # with qa.* events; failures go REVIEW -> FAILED. Lenient by default: tasks
+    # without verifiable artifacts pass with a recorded reason. Strict mode
+    # fails tasks whose verification cannot be evidenced.
+    verifier_enabled: bool = True
+    verifier_use_llm_judge: bool = False
+    verifier_strict: bool = False
     # Extra headers sent with every provider call, as JSON:
     #   PROVIDER_EXTRA_HEADERS='{"X-API-Key":"...","User-Agent":"bob-agent/0.1"}'
     provider_extra_headers: str = "{}"

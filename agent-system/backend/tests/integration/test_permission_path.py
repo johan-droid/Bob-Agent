@@ -154,7 +154,6 @@ class TestApiApprovalUnblocksCapability:
     def test_decision_survives_restart(self, factory: Any) -> None:
         gate = PermissionGate(factory=factory)
         record = gate.request(
-            ApprovalRequest(
                 requested_action="git_commit",
                 risk=Risk.MEDIUM,
                 scope="git:write:repo",

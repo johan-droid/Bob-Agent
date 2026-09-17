@@ -159,25 +159,109 @@ def execute_task(task_id: str | None = None, factory: Any = None) -> dict[str, A
         task = db.get(Task, task_id)
         run = db.get(AgentRun, run_id)
         lease = db.get(AgentLease, run_id)
+        # REVIEW gate (mirrors Orchestrator._verify_and_finish): successful
+        # handler output is verified before it can succeed.
+        verification_passed = True
+        verification_reason = "no verifier"
+        verification_mode = "off"
+        if task is not None and task.state == TaskState.RUNNING.value:
+            validate_transition(TaskState.RUNNING, TaskState.REVIEW)
+            task.state = TaskState.REVIEW.value
+            bus.emit(
+                Event(
+                    type="qa.started",
+                    session_id=session_id,
+                    task_id=task_id,
+                    agent_run_id=run_id,
+                    actor="verifier",
+                    payload={"task_type": task.task_type},
+                ),
+                db,
+            )
+            try:
+                from agent_system.services.verifier import Verifier
+
+                verification = Verifier(get_settings()).verify(
+                    input_snapshot,
+                    result or {},
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "agent_run_id": run_id,
+                        "agent_type": agent_type,
+                        "factory": factory,
+                        "bus": bus,
+                    },
+                )
+                verification_passed = verification.passed
+                verification_reason = verification.reason
+                verification_mode = verification.mode
+            except Exception as exc:
+                verification_passed = True
+                verification_reason = f"verifier crashed; lenient pass: {type(exc).__name__}"
+            bus.emit(
+                Event(
+                    type="qa.completed" if verification_passed else "qa.failed",
+                    session_id=session_id,
+                    task_id=task_id,
+                    agent_run_id=run_id,
+                    actor="verifier",
+                    payload={
+                        "passed": verification_passed,
+                        "reason": verification_reason,
+                        "mode": verification_mode,
+                    },
+                ),
+                db,
+            )
         if task is not None:
-            validate_transition(TaskState.RUNNING, TaskState.SUCCEEDED)
-            task.state = TaskState.SUCCEEDED.value
-            task.completed_at = utcnow()
-            task.result_json = result
+            if verification_passed:
+                validate_transition(TaskState(task.state), TaskState.SUCCEEDED)
+                task.state = TaskState.SUCCEEDED.value
+                task.completed_at = utcnow()
+                enriched = dict(result or {})
+                enriched.setdefault(
+                    "verification",
+                    {
+                        "passed": True,
+                        "reason": verification_reason,
+                        "mode": verification_mode,
+                    },
+                )
+                task.result_json = enriched
+                result = enriched
+            else:
+                validate_transition(TaskState(task.state), TaskState.FAILED)
+                task.state = TaskState.FAILED.value
+                task.completed_at = utcnow()
+                task.last_error = f"verification failed: {verification_reason}"[:500]
+                result = {
+                    "error_class": "VerificationFailed",
+                    "error": task.last_error,
+                    "verification": {
+                        "passed": False,
+                        "reason": verification_reason,
+                        "mode": verification_mode,
+                    },
+                }
             from agent_system.infra.telemetry import elapsed_seconds, get_metrics
 
             seconds = elapsed_seconds(task.started_at, task.completed_at)
             if seconds is not None:
-                get_metrics().record_task_duration("SUCCEEDED", seconds)
+                get_metrics().record_task_duration(
+                    "SUCCEEDED" if verification_passed else "FAILED", seconds
+                )
         if run is not None:
-            run.state = AgentState.COMPLETED.value
+            run.state = (
+                AgentState.COMPLETED.value if verification_passed else AgentState.FAILED.value
+            )
             run.ended_at = utcnow()
             run.result_json = result
         if lease is not None:
             db.delete(lease)
         bus.emit(
             Event(
-                type="task.completed",
+                type="task.completed" if verification_passed else "task.failed",
                 session_id=session_id,
                 task_id=task_id,
                 agent_run_id=run_id,
@@ -188,7 +272,11 @@ def execute_task(task_id: str | None = None, factory: Any = None) -> dict[str, A
         )
     if engine is not None:
         engine.dispose()
-    return {"task_id": task_id, "state": "SUCCEEDED", "result": result}
+    return {
+        "task_id": task_id,
+        "state": "SUCCEEDED" if verification_passed else "FAILED",
+        "result": result,
+    }
 
 
 def _finish_failed(

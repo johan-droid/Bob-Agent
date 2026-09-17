@@ -6,6 +6,8 @@ Layout:
         __init__.py    public API (this module)
         registry.py    Tool / ToolContext / ToolRegistry / build_registry
         schemas.py     runtime JSON-schema validation of arguments
+        contract.py    the Phase 1 tool contract (request/decision/result/
+                       metadata/lifecycle) — data only, no execution
         execution.py   the single validate -> authorize -> run path
         protocol.py    provider-native + fenced ToolCall protocols
         paths.py       workspace jail + scrubbing shared by capabilities
@@ -27,9 +29,21 @@ from agent_system.services.tool_errors import (
     ToolPermissionError,
     ToolValidationError,
 )
+from agent_system.services.tools.contract import (
+    CapabilityMetadata,
+    ExecutionDecision,
+    ExecutionOutcome,
+    ExecutionRequest,
+    ExecutionResult,
+    ToolLifecycle,
+    ToolLifecycleError,
+)
 from agent_system.services.tools.execution import (
     PermissionPlan,
     authorize_tool,
+    capability_metadata,
+    decide,
+    execute_request,
     execute_tool,
     plan_permission,
 )
@@ -49,6 +63,11 @@ RISK_EXECUTE = "execute"
 RISK_DESTRUCTIVE = "destructive"
 
 __all__ = [
+    "CapabilityMetadata",
+    "ExecutionDecision",
+    "ExecutionOutcome",
+    "ExecutionRequest",
+    "ExecutionResult",
     "NeedsApprovalError",
     "PermissionPlan",
     "RISK_DESTRUCTIVE",
@@ -58,11 +77,16 @@ __all__ = [
     "Tool",
     "ToolContext",
     "ToolError",
+    "ToolLifecycle",
+    "ToolLifecycleError",
     "ToolPermissionError",
     "ToolRegistry",
     "ToolValidationError",
     "authorize_tool",
     "build_registry",
+    "capability_metadata",
+    "decide",
+    "execute_request",
     "execute_tool",
     "plan_permission",
     "validate_arguments",

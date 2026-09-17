@@ -152,6 +152,7 @@ def register_optional(settings: Any) -> list[Tool]:
                     handler=_openconnector_execute,
                     scope=_oc_scope,
                     group="openconnector",
+                    kind="openconnector",
                 )
             )
             tools.append(
@@ -173,6 +174,7 @@ def register_optional(settings: Any) -> list[Tool]:
                     risk="read",
                     handler=_openconnector_list,
                     group="openconnector",
+                    kind="openconnector",
                 )
             )
     except Exception:
@@ -197,6 +199,7 @@ def register_optional(settings: Any) -> list[Tool]:
                     risk="read",
                     handler=_mcp_list,
                     group="mcp",
+                    kind="mcp",
                 )
             )
             tools.append(
@@ -217,6 +220,7 @@ def register_optional(settings: Any) -> list[Tool]:
                     handler=_mcp_call,
                     scope=_mcp_scope,
                     group="mcp",
+                    kind="mcp",
                 )
             )
     except Exception:

@@ -114,7 +114,12 @@ class Supervisor:
         from agent_system.services.planner import Planner
         from agent_system.services.tools.registry import build_registry
 
-        plan = Planner(settings).plan(goal)
+        # Planner consults the Model Layer first (LLM DAG) with deterministic
+        # fallback; the bus + factory let the model call be recorded with the
+        # target session id for cost accounting.
+        plan = Planner(settings).plan(
+            goal, factory=factory, bus=self._bus, session_id=session_id
+        )
         target_session = session_id or self.create_session(factory, goal)
         try:
             known = set(build_registry(settings).names()) if settings is not None else None
@@ -284,14 +289,49 @@ class Supervisor:
 
 
 class Orchestrator:
-    """Executes queued tasks with isolated agent runs + lease tracking."""
+    """Executes queued tasks with isolated agent runs + lease tracking.
 
-    def __init__(self, event_bus: EventBus, heartbeat_interval: float = 5.0) -> None:
+    Successful handler results pass through the Verifier while the task is in
+    REVIEW (``RUNNING -> REVIEW -> SUCCEEDED/FAILED`` with ``qa.*`` events),
+    so the VERIFIER box in the architecture is an enforced gate rather than a
+    sidecar. The default verifier is lenient: tasks without verifiable
+    artifacts pass with a recorded reason.
+    """
+
+    def __init__(
+        self,
+        event_bus: EventBus,
+        heartbeat_interval: float = 5.0,
+        verifier: Any = None,
+        settings: Any = None,
+    ) -> None:
         self._bus = event_bus
         self._handlers: dict[str, AgentHandler] = {}
         self._lock = threading.Lock()
         self._cancel_requested: set[str] = set()
         self._heartbeat_interval = heartbeat_interval
+        self._verifier = verifier
+        self._settings = settings
+
+    @property
+    def verifier(self) -> Any:
+        """Lazily constructed default verifier (lenient, never breaks runs)."""
+        if self._verifier is None:
+            try:
+                from agent_system.services.verifier import Verifier
+
+                settings = self._settings
+                if settings is None:
+                    try:
+                        from agent_system.config import get_settings
+
+                        settings = get_settings()
+                    except Exception:
+                        settings = None
+                self._verifier = Verifier(settings)
+            except Exception:
+                self._verifier = None
+        return self._verifier
 
     # -- registration -------------------------------------------------------
 
@@ -434,13 +474,13 @@ class Orchestrator:
                 "bus": self._bus,
             }
             result = handler(input_snapshot, context)
-            self._finish(
+            self._verify_and_finish(
                 factory,
                 task_id,
                 run_id,
                 session_id,
                 agent_type_snapshot,
-                TaskState.SUCCEEDED,
+                input_snapshot,
                 result or {},
             )
             return True
@@ -458,6 +498,108 @@ class Orchestrator:
         finally:
             stop.set()
             hb.join(timeout=2)
+
+    def _verify_and_finish(
+        self,
+        factory: Any,
+        task_id: str,
+        run_id: str,
+        session_id: str,
+        agent_type: str,
+        task_input: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """RUNNING -> REVIEW (verify) -> SUCCEEDED/FAILED.
+
+        The REVIEW state is now the enforced verifier gate: the task enters
+        REVIEW, ``qa.started`` is emitted, the Verifier runs, then
+        ``qa.completed``/``qa.failed`` is emitted and the task finishes. The
+        verifier never wedges execution — a verifier crash degrades to the
+        verifier's own lenient/strict policy.
+        """
+        with session_scope(factory) as db:
+            task = db.get(Task, task_id)
+            if task is not None and TaskState(task.state) == TaskState.RUNNING:
+                validate_transition(TaskState.RUNNING, TaskState.REVIEW)
+                task.state = TaskState.REVIEW.value
+                self._bus.emit(
+                    Event(
+                        type="qa.started",
+                        session_id=session_id,
+                        task_id=task_id,
+                        agent_run_id=run_id,
+                        actor="verifier",
+                        payload={"task_type": task.task_type},
+                    ),
+                    db,
+                )
+            else:
+                # Not in RUNNING (e.g. cancelled mid-handler): skip verification
+                # and let _finish reconcile the terminal/cancelled state.
+                self._finish(
+                    factory, task_id, run_id, session_id, agent_type, TaskState.SUCCEEDED, result
+                )
+                return
+        verifier = self.verifier
+        try:
+            context = {
+                "session_id": session_id,
+                "task_id": task_id,
+                "agent_run_id": run_id,
+                "agent_type": agent_type,
+                "factory": factory,
+                "bus": self._bus,
+            }
+            verification = verifier.verify(task_input, result, context) if verifier else None
+        except Exception as exc:  # belt-and-braces; Verifier.verify never raises
+            from agent_system.services.verifier import VerificationResult
+
+            verification = VerificationResult(
+                True, f"verifier crashed; lenient pass: {type(exc).__name__}"
+            )
+        if verification is None or verification.passed:
+            reason = verification.reason if verification else "no verifier"
+            mode = verification.mode if verification else "off"
+            enriched = dict(result)
+            enriched.setdefault("verification", {"passed": True, "reason": reason, "mode": mode})
+            with session_scope(factory) as db:
+                self._bus.emit(
+                    Event(
+                        type="qa.completed",
+                        session_id=session_id,
+                        task_id=task_id,
+                        agent_run_id=run_id,
+                        actor="verifier",
+                        payload={"passed": True, "reason": reason, "mode": mode},
+                    ),
+                    db,
+                )
+            self._finish(
+                factory, task_id, run_id, session_id, agent_type, TaskState.SUCCEEDED, enriched
+            )
+            return
+        payload = {
+            "error_class": "VerificationFailed",
+            "error": f"verification failed: {verification.reason}"[:500],
+            "verification": {
+                "passed": False,
+                "reason": verification.reason,
+                "mode": verification.mode,
+            },
+        }
+        with session_scope(factory) as db:
+            self._bus.emit(
+                Event(
+                    type="qa.failed",
+                    session_id=session_id,
+                    task_id=task_id,
+                    agent_run_id=run_id,
+                    actor="verifier",
+                    payload={"passed": False, "reason": verification.reason, "mode": verification.mode},
+                ),
+                db,
+            )
+        self._finish(factory, task_id, run_id, session_id, agent_type, TaskState.FAILED, payload)
 
     def _heartbeat_loop(self, factory: Any, run_id: str, stop: threading.Event) -> None:
         """Refresh the lease heartbeat while the run is executing (mirrors worker.py)."""

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,27 @@ from agent_system.services.permissions import CapabilityRisk
 from agent_system.services.tool_errors import ToolError
 
 Handler = Callable[[dict[str, Any], Any], dict[str, Any]]
+
+
+class ToolKind(StrEnum):
+    """Where a capability comes from (its declaration origin).
+
+    Every origin reaches the same execution engine and produces the same
+    :class:`agent_system.services.tools.contract.ExecutionResult`; the kind is
+    provenance, never a behavioural exemption.
+
+    - ``BUILTIN`` — a first-party capability (``services/tools/builtin/``);
+    - ``MCP`` — an MCP-server capability (``mcp_list`` / ``mcp_call``);
+    - ``OPENCONNECTOR`` — an OpenConnector action capability;
+    - ``PLUGIN`` — a folder-drop third-party plugin;
+    - ``UNKNOWN`` — a capability the registry does not have (refusals only).
+    """
+
+    BUILTIN = "builtin"
+    MCP = "mcp"
+    OPENCONNECTOR = "openconnector"
+    PLUGIN = "plugin"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -63,6 +85,10 @@ class Tool:
     destructive_reason: str | None = None
     timeout_seconds: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Where this capability came from (see :class:`ToolKind`). Appended last so
+    #: existing positional construction is unaffected; read it through
+    #: :attr:`origin`, which fails safe on an unknown value.
+    kind: str = ToolKind.BUILTIN
 
     # -- derived policy -----------------------------------------------------
 
@@ -73,6 +99,14 @@ class Tool:
             return CapabilityRisk(str(self.risk))
         except ValueError:
             return CapabilityRisk.EXECUTE
+
+    @property
+    def origin(self) -> ToolKind:
+        """Canonical origin (unknown values fail safe to ``BUILTIN``)."""
+        try:
+            return ToolKind(str(self.kind))
+        except ValueError:
+            return ToolKind.BUILTIN
 
     def scope_for(self, args: dict[str, Any]) -> str:
         """Resolve this capability's permission scope for one call."""
@@ -122,6 +156,7 @@ class Tool:
             "name": self.name,
             "description": self.description,
             "group": self.group,
+            "kind": self.origin.value,
             "risk": self.tier.value,
             "permission": (
                 "deny (default-deny)"
@@ -220,6 +255,7 @@ __all__ = [
     "Handler",
     "Tool",
     "ToolContext",
+    "ToolKind",
     "ToolRegistry",
     "build_registry",
     "ToolError",
