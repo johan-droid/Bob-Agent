@@ -147,6 +147,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             def recover_tasks() -> None:
                 recovery_orchestrator.recover_orphans(recovery_factory)
                 sweep_backlog(recovery_factory, recovery_bus)
+                # Drain the Telegram delivery outbox alongside recovery (every
+                # polling cycle), so durable messages are delivered even in the
+                # single-dyno cloud path without a separate worker. (spec §16)
+                try:
+                    from agent_system.services.outbox import Outbox
+
+                    Outbox(recovery_factory, settings).drain()
+                except Exception:
+                    pass
 
             recover_tasks()
             app.state.runner_scheduler = BackgroundScheduler()

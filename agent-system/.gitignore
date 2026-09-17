@@ -177,7 +177,29 @@ coverage/
 *.orig
 
 # =============================================
-# Docker
-# =============================================
-.docker/
-docker-compose.override.yml
+# Profilis — profiler artifacts (never commit)
+# https://github.com/ankan97dutta/profilis
+# ---------------------------------------------------------------------------
+# JSONL log directory (configured via PROFILIS_LOG_DIR / .profilic log_dir)
+data/profilis/
+backend/data/profilis/
+logs/
+backend/logs/
+
+# Prometheus metrics endpoint artifact
+/metrics
+
+# Profilis dashboard state (Flask blueprint /_profilis, FastAPI router /profilis)
+.profilis-dashboard/
+profilis-dashboard/
+
+# Profilis runtime cache
+.profilis-cache/
+profilis-cache/
+
+# Profilis test artifacts
+.profilis-test/
+test-profilis/
+
+# ---------------------------------------------------------------------------
+

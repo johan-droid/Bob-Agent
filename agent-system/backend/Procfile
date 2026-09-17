@@ -2,5 +2,16 @@
 # Single uvicorn worker: Basic dynos have 512MB — gunicorn multi-worker
 # would exceed quota. PYTHONPATH=src resolves the src-layout package
 # without requiring an installed wheel.
+
+# web: HTTP API + Telegram webhook receiver + recovery/outbox scheduler.
+#      Telegram goals are enqueued as durable tasks; the web dyno must
+#      return quickly (no long-running agent jobs in request handlers).
 web: PYTHONPATH=src python -m uvicorn agent_system.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+
+# worker: RQ task execution + delivery-outbox draining. In cloud_inline_run
+# mode the web dyno also drives sessions in-process, but a dedicated worker
+# keeps Telegram delivery and task execution off the request path.
+worker: PYTHONPATH=src python -m agent_system.worker
+
+# release: database migrations before every deploy (safe + idempotent).
 release: PYTHONPATH=src python -m alembic upgrade head

@@ -75,6 +75,22 @@ class Settings(BaseSettings):
     # instead of the Obsidian file vault (ephemeral on dynos). Local dev
     # keeps the file vault.
     cloud_vault_db: bool = False
+
+    # Identity & multi-user isolation. ``local`` (default): single operator,
+    # REST bearer/cookie auth as today, Telegram = allowlisted chats, zero
+    # behavior change. ``telegram``: Telegram users are provisioned as Bob
+    # users (allowlist + first-user-becomes-owner), ownership is enforced on
+    # sessions/tasks/approvals, and Telegram auth uses the full identity
+    # chain instead of bare chat ids. Cloud flips this to ``telegram``.
+    agent_identity_mode: str = "local"
+    # Telegram allowlist as *telegram user ids* (identity mode) — comma
+    # separated. Empty + identity mode => nobody can provision.
+    telegram_allowed_user_ids: str = ""
+    # Delivery-outbox tuning (persist-first Telegram delivery).
+    outbox_max_attempts: int = 5
+    outbox_lease_seconds: int = 60
+    outbox_backoff_base_seconds: float = 1.0
+    outbox_poll_seconds: float = 2.0
     # Pluggable tools (folder drop, same discovery pattern as SkillManager).
     # Relative paths resolve against the backend working directory.
     tools_plugin_dir: str = "tools_plugins"

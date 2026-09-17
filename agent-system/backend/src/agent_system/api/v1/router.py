@@ -17,7 +17,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from agent_system.api.deps import get_authenticator
+from agent_system.api.deps import (
+    enforce_session_visible,
+    enforce_task_visible,
+    get_authenticator,
+    get_principal,
+)
 from agent_system.config import get_settings
 from agent_system.domain import ids
 from agent_system.domain.events import Event, EventSensitivity, utcnow
@@ -128,12 +133,21 @@ class SessionOut(BaseModel):
 
 
 @authenticated.post("/sessions", status_code=201)
-def create_session(body: SessionCreate, request: Request) -> SessionOut:
+def create_session(
+    body: SessionCreate, request: Request, principal: Any = Depends(get_principal)
+) -> SessionOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     session_id = ids.new_session_id()
     with session_scope(factory) as db:
-        db.add(Session(id=session_id, goal=body.goal, status="ACTIVE"))
+        db.add(
+            Session(
+                id=session_id,
+                goal=body.goal,
+                status="ACTIVE",
+                owner_user_id=(principal.user_id if principal is not None else None),
+            )
+        )
         bus.emit(
             Event(
                 type="session.created",
@@ -147,22 +161,32 @@ def create_session(body: SessionCreate, request: Request) -> SessionOut:
 
 
 @authenticated.get("/sessions")
-def list_sessions(request: Request, limit: int = 50, offset: int = 0) -> list[SessionOut]:
+def list_sessions(
+    request: Request,
+    principal: Any = Depends(get_principal),
+    limit: int = 50,
+    offset: int = 0,
+) -> list[SessionOut]:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        rows = (
-            db.query(Session).order_by(Session.created_at.desc()).offset(offset).limit(limit).all()
-        )
+        query = db.query(Session)
+        if getattr(principal, "mode", None) is not None and getattr(
+            principal, "mode", None
+        ).value != "local":
+            uid = getattr(principal, "user_id", None)
+            if uid is not None:
+                query = query.filter(Session.owner_user_id == uid)
+        rows = query.order_by(Session.created_at.desc()).offset(offset).limit(limit).all()
         return [SessionOut(id=r.id, goal=r.goal, status=r.status) for r in rows]
 
 
 @authenticated.get("/sessions/{session_id}")
-def get_session(session_id: str, request: Request) -> SessionOut:
+def get_session(
+    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+) -> SessionOut:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        row = db.get(Session, session_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="session not found")
+        row = enforce_session_visible(db, session_id, principal)
         return SessionOut(id=row.id, goal=row.goal, status=row.status)
 
 
@@ -172,13 +196,13 @@ class SessionUpdate(BaseModel):
 
 
 @authenticated.patch("/sessions/{session_id}")
-def update_session(session_id: str, body: SessionUpdate, request: Request) -> SessionOut:
+def update_session(
+    session_id: str, body: SessionUpdate, request: Request, principal: Any | None = Depends(get_principal)
+) -> SessionOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
-        row = db.get(Session, session_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="session not found")
+        row = enforce_session_visible(db, session_id, principal)
         if body.goal is not None:
             row.goal = body.goal
         if body.status is not None:
@@ -205,7 +229,9 @@ class PlanOut(BaseModel):
 
 
 @authenticated.post("/sessions/{session_id}/plan", status_code=201)
-def plan_session(session_id: str, request: Request) -> PlanOut:
+def plan_session(
+    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+) -> PlanOut:
     """Plan a session's goal into a task DAG and persist it as tasks.
 
     Planning (Planner), validation/persistence (Supervisor) and execution
@@ -218,9 +244,7 @@ def plan_session(session_id: str, request: Request) -> PlanOut:
     settings = request.app.state.settings
     supervisor = Supervisor(bus)
     with session_scope(factory) as db:
-        row = db.get(Session, session_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="session not found")
+        row = enforce_session_visible(db, session_id, principal)
         if db.query(Task).filter_by(session_id=session_id).count():
             raise HTTPException(
                 status_code=409, detail="session already has tasks; planning is one-shot"
@@ -248,13 +272,13 @@ def plan_session(session_id: str, request: Request) -> PlanOut:
 
 
 @authenticated.delete("/sessions/{session_id}", status_code=204)
-def delete_session(session_id: str, request: Request) -> None:
+def delete_session(
+    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+) -> None:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
-        row = db.get(Session, session_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="session not found")
+        row = enforce_session_visible(db, session_id, principal)
         tasks = db.query(Task).filter_by(session_id=session_id).all()
         for t in tasks:
             db.delete(t)
@@ -277,7 +301,7 @@ def delete_session(session_id: str, request: Request) -> None:
 
 class TaskCreate(BaseModel):
     session_id: str
-    task_type: str = Field(pattern=r"^[a-z_]{1,40}$")
+    task_type: str = Field(pattern=r"^[A-Za-z0-9_]{1,40}$")
     title: str = Field(min_length=1, max_length=500)
     input: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
@@ -330,7 +354,9 @@ def _fresh_task_out(factory: Any, task_id: str) -> TaskOut | None:
 
 
 @authenticated.post("/tasks", status_code=201)
-def create_task(body: TaskCreate, request: Request) -> TaskOut:
+def create_task(
+    body: TaskCreate, request: Request, principal: Any | None = Depends(get_principal)
+) -> TaskOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     # Idempotency (v3.1 §10):
@@ -342,11 +368,7 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
     task_id = ids.new_task_id()
     try:
         with session_scope(factory) as db:
-            if db.get(Session, body.session_id) is None:
-                raise HTTPException(status_code=404, detail="session not found")
-            # Chat-created tasks carry the user's prompt as the goal. The ReAct
-            # handler derives its objective from input.goal; without this the
-            # task would run with an empty objective.
+            _ = enforce_session_visible(db, body.session_id, principal)
             task_input = dict(body.input)
             if "goal" not in task_input:
                 task_input["goal"] = body.title
@@ -360,6 +382,7 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
                 agent_type=body.agent_type,
                 idempotency_key=body.idempotency_key,
                 state=TaskState.PENDING.value,
+                owner_user_id=(principal.user_id if principal is not None else None),
             )
             db.add(task)
             bus.emit(
@@ -384,7 +407,7 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
     return _task_out(task)
 
 
-@authenticated.get("/tasks")
+@router.get("/tasks")
 def list_tasks(
     request: Request,
     session_id: str | None = None,
@@ -403,12 +426,12 @@ def list_tasks(
 
 
 @authenticated.get("/tasks/{task_id}")
-def get_task(task_id: str, request: Request) -> TaskOut:
+def get_task(
+    task_id: str, request: Request, principal: Any | None = Depends(get_principal)
+) -> TaskOut:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        row = db.get(Task, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="task not found")
+        row = enforce_task_visible(db, task_id, principal)
         return _task_out(row)
 
 
@@ -418,7 +441,9 @@ class TaskTransition(BaseModel):
 
 
 @authenticated.post("/tasks/{task_id}/transition")
-def transition_task(task_id: str, body: TaskTransition, request: Request) -> TaskOut:
+def transition_task(
+    task_id: str, body: TaskTransition, request: Request, principal: Any | None = Depends(get_principal)
+) -> TaskOut:
     """Explicit, validated state transition — invalid ones are rejected (v3.1 §7).
 
     Redelivery is idempotent: requesting the state the task is already in
@@ -428,9 +453,7 @@ def transition_task(task_id: str, body: TaskTransition, request: Request) -> Tas
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
-        row = db.get(Task, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="task not found")
+        row = enforce_task_visible(db, task_id, principal)
         current = TaskState(row.state)
         if current == body.target:
             return _task_out(row)
@@ -490,7 +513,9 @@ def transition_task(task_id: str, body: TaskTransition, request: Request) -> Tas
 
 
 @authenticated.post("/tasks/{task_id}/retry", status_code=202)
-def retry_task(task_id: str, request: Request, response: Response) -> TaskOut:
+def retry_task(
+    task_id: str, request: Request, response: Response, principal: Any | None = Depends(get_principal)
+) -> TaskOut:
     """Retry a failed task: FAILED -> QUEUED + execution kickoff.
 
     Redelivery is idempotent: when the task is already QUEUED (duplicate
@@ -501,9 +526,7 @@ def retry_task(task_id: str, request: Request, response: Response) -> TaskOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
-        row = db.get(Task, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="task not found")
+        row = enforce_task_visible(db, task_id, principal)
         current = TaskState(row.state)
         if current == TaskState.QUEUED:
             response.status_code = 200
@@ -554,7 +577,9 @@ def retry_task(task_id: str, request: Request, response: Response) -> TaskOut:
 
 
 @authenticated.post("/tasks/{task_id}/run", status_code=202)
-def run_task(task_id: str, request: Request) -> TaskOut:
+def run_task(
+    task_id: str, request: Request, principal: Any | None = Depends(get_principal)
+) -> TaskOut:
     """Explicit execution trigger: queue (if needed) + run in-process.
 
     This is what the chat UIs call after creating a task. Unlike the bare
@@ -566,9 +591,7 @@ def run_task(task_id: str, request: Request) -> TaskOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
-        row = db.get(Task, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="task not found")
+        row = enforce_task_visible(db, task_id, principal)
         current = TaskState(row.state)
         if current in (TaskState.PENDING, TaskState.FAILED):
             try:
@@ -631,6 +654,7 @@ class ApprovalCreate(BaseModel):
     session_id: str | None = None
     workspace_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
+    owner_user_id: str | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -657,7 +681,9 @@ def _approval_out(rec: Any) -> ApprovalOut:
 
 
 @authenticated.post("/approvals", status_code=202)
-def request_approval(body: ApprovalCreate, request: Request) -> ApprovalOut:
+def request_approval(
+    body: ApprovalCreate, request: Request, principal: Any | None = Depends(get_principal)
+) -> ApprovalOut:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
     factory = request.app.state.session_factory
@@ -672,6 +698,7 @@ def request_approval(body: ApprovalCreate, request: Request) -> ApprovalOut:
             session_id=body.session_id,
             workspace_id=body.workspace_id,
             context=body.context,
+            owner_user_id=(principal.user_id if principal is not None else None),
         )
     )
     with session_scope(factory) as db:
@@ -694,14 +721,24 @@ def request_approval(body: ApprovalCreate, request: Request) -> ApprovalOut:
 
 
 @authenticated.get("/approvals")
-def list_approvals(request: Request, pending_only: bool = True) -> list[ApprovalOut]:
+def list_approvals(
+    request: Request,
+    pending_only: bool = True,
+    principal: Any | None = Depends(get_principal),
+) -> list[ApprovalOut]:
     gate: PermissionGate = request.app.state.gate
     records = gate.list_pending() if pending_only else gate.list_all()
+    if getattr(principal, "mode", None) is not None and getattr(principal, "mode", None).value != "local":
+        uid = getattr(principal, "user_id", None)
+        if uid is not None:
+            records = [r for r in records if r.owner_user_id == uid or r.owner_user_id is None]
     return [_approval_out(r) for r in records]
 
 
 @authenticated.post("/approvals/{approval_id}/decision")
-def decide_approval(approval_id: str, body: ApprovalDecision, request: Request) -> ApprovalOut:
+def decide_approval(
+    approval_id: str, body: ApprovalDecision, request: Request, principal: Any | None = Depends(get_principal)
+) -> ApprovalOut:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
     factory = request.app.state.session_factory
@@ -714,10 +751,14 @@ def decide_approval(approval_id: str, body: ApprovalDecision, request: Request) 
         return _approval_out(current)
     try:
         record = gate.decide(
-            approval_id, approve=body.approve, policy=body.policy, reason=body.reason
+            approval_id,
+            approve=body.approve,
+            policy=body.policy,
+            reason=body.reason,
+            decided_by_user_id=(principal.user_id if principal is not None else None),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     event_type = (
         "approval.approved"
         if record.decision == Decision.APPROVED
@@ -746,7 +787,9 @@ def decide_approval(approval_id: str, body: ApprovalDecision, request: Request) 
 
 
 @authenticated.post("/approvals/sweep")
-def sweep_approvals(request: Request) -> dict[str, object]:
+def sweep_approvals(
+    request: Request, principal: Any | None = Depends(get_principal)
+) -> dict[str, object]:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
     factory = request.app.state.session_factory

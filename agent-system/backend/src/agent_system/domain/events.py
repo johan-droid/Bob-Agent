@@ -41,6 +41,8 @@ SESSION_EVENTS = (
     "session.updated",
     "session.completed",
     "session.deleted",
+    "session.blocked_user",
+    "audit.denied",
 )
 TASK_EVENTS = (
     "task.created",

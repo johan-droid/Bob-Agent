@@ -182,10 +182,17 @@ class Supervisor:
         for node in graph:
             visit(node)
 
-    def create_session(self, factory: Any, goal: str) -> str:
+    def create_session(self, factory: Any, goal: str, owner_user_id: str | None = None) -> str:
         session_id = ids.new_session_id()
         with session_scope(factory) as db:
-            db.add(Session(id=session_id, goal=goal, status="ACTIVE"))
+            db.add(
+                Session(
+                    id=session_id,
+                    goal=goal,
+                    status="ACTIVE",
+                    owner_user_id=owner_user_id,
+                )
+            )
             self._bus.emit(
                 Event(
                     type="session.created",
@@ -196,6 +203,30 @@ class Supervisor:
                 db,
             )
         return session_id
+
+    def session_status(self, factory: Any) -> dict[str, int]:
+        """Aggregate task-session counts for the /status UX (Telegram + CLI)."""
+        from agent_system.domain.tasks import TaskState
+
+        with session_scope(factory) as db:
+            total_sessions = db.query(Session).count()
+            total = db.query(Task).count()
+            running = db.query(Task).filter(Task.state == TaskState.RUNNING.value).count()
+            queued = db.query(Task).filter(Task.state == TaskState.QUEUED.value).count()
+            waiting_approval = (
+                db.query(Task).filter(Task.state == TaskState.BLOCKED_APPROVAL.value).count()
+            )
+            complete = db.query(Task).filter(Task.state == TaskState.SUCCEEDED.value).count()
+            failed = db.query(Task).filter(Task.state == TaskState.FAILED.value).count()
+        return {
+            "sessions": total_sessions,
+            "total": total,
+            "running": running,
+            "queued": queued,
+            "waiting_approval": waiting_approval,
+            "complete": complete,
+            "failed": failed,
+        }
 
     def add_task(
         self,

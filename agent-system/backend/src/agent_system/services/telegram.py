@@ -1,47 +1,102 @@
-"""Telegram gateway (optional communication channel).
+"""Telegram gateway (identity-aware cloud transport).
 
-Bridges a Telegram bot to the agent system so approved users can submit
-goals, inspect status, and approve/deny tasks directly from Telegram.
+Telegram is a transport layer; Bob Core semantics are shared one-for-one with
+the CLI/Desktop (spec §2, §12, §17, §27).
 
-Two transports are supported (auto-detected from config):
-- Long-polling (dev): `TELEGRAM_WEBHOOK_SECRET` empty -> bot uses
-  `getUpdates` polling in a background thread.
-- Webhook (prod): `TELEGRAM_WEBHOOK_SECRET` set -> FastAPI webhook endpoint
-  posts updates in via `handle_update`, and we register the webhook URL with
-  the Telegram API.
+Hardening over the legacy gateway:
+- Identity: Telegram user id -> IdentityService -> Bob User + Role. A
+  Telegram principal is identity, never authorization (spec §9).
+- Dedup: every inbound update is logged to ``telegram_updates`` by primary
+  key ``update_id`` BEFORE processing. A retried Telegram delivery loses the
+  INSERT race and is skipped — exactly-once across worker/web dyno restarts
+  (spec §3, §30).
+- Delivery: outbound messages are persisted to the delivery outbox
+  (persist-first, retryable, survives restarts) when a DB factory is wired.
+  Falls back to direct httpx when no factory is available (tests, local
+  single-operator).
+- Commands are a typed registry, not a giant if/else (spec §11).
 
-Auth: only chat ids listed in `TELEGRAM_ALLOWED_CHAT_IDS` can interact.
-Everything else is ignored. All bot calls go through a single `httpx.AsyncClient`.
-
-Creating sessions and deciding approvals reuses the same domain services as
-the REST API so behavior stays consistent across channels.
+Deployment modes:
+- ``local`` (AGENT_IDENTITY_MODE=local, default): backward compatible. The
+  chat-id allowlist (TELEGRAM_ALLOWED_CHAT_IDS) gates access; a single
+  operator identity is assumed for ownership.
+- ``telegram``: multi-user. Every Telegram user id is resolved through the
+  IdentityService to a Bob user + role; ownership columns on sessions/tasks
+  are enforced; group members only get the capabilities of their role.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 
 from agent_system.config import Settings
+from agent_system.infra.db import session_scope
+from agent_system.infra.event_bus import EventBus
+from agent_system.infra.models import TelegramUpdate
+from agent_system.services.identity import (
+    OPERATOR,
+    IdentityMode,
+    IdentityService,
+    Principal,
+    Role,
+)
 from agent_system.services.orchestrator import Supervisor
-from agent_system.services.permissions import Decision, PermissionGate, Policy, Risk
+from agent_system.services.outbox import (
+    KIND_APPROVAL,
+    KIND_COMMAND_RESPONSE,
+    KIND_NOTIFICATION,
+    Outbox,
+)
+from agent_system.services.permissions import (
+    ApprovalRecord,
+    PermissionGate,
+    Policy,
+)
+
+_logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org/bot{token}"
+_HTTP_TIMEOUT = 30.0
 
 
-def _parse_risk(raw: str) -> Risk:
-    return Risk(raw.strip().upper())
+# ---------------------------------------------------------------------------
+# Command registry (spec §11).
+
+
+@dataclass
+class CommandDef:
+    """A typed, self-describing Telegram command."""
+
+    name: str
+    description: str
+    handler: Callable[..., Awaitable[None]]
+    permission: str | None = None
+    requires_args: bool = False
+    variadic: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Service.
 
 
 class TelegramService:
-    """Stateful Telegram gateway.
+    """Stateful, identity-aware Telegram gateway.
 
-    ``transport`` is ``"polling"`` or ``"webhook"``. In polling mode a
-    daemon thread drives ``_poll_loop``; in webhook mode ``handle_update``
-    is called by the API router.
+    ``transport`` is ``polling`` (dev, no webhook secret) or ``webhook``
+    (prod). In polling mode a daemon thread drives ``getUpdates``; in webhook
+    mode ``handle_update`` is called by the API router.
+
+    Both transports converge on the same ``handle_update`` seam, which
+    de-duplicates via the ``telegram_updates`` ledger, resolves the principal,
+    routes commands, and enqueues deliveries to the outbox.
     """
 
     def __init__(
@@ -49,21 +104,78 @@ class TelegramService:
         settings: Settings,
         session_factory: Any,
         gate: PermissionGate,
-        bus: Any,
+        bus: EventBus,
     ) -> None:
         self._settings = settings
         self._factory = session_factory
         self._gate = gate
         self._bus = bus
         self._supervisor = Supervisor(bus)
+        # Identity layer — None in local mode (backward compat).
+        self._identity = (
+            IdentityService(session_factory, settings)
+            if getattr(settings, "agent_identity_mode", "local") == IdentityMode.TELEGRAM.value
+            else None
+        )
+        # Outbox — None when no DB factory (tests, ephemeral local).
+        self._outbox = Outbox(session_factory, settings) if session_factory else None
+        # Backward-compat chat-id allowlist for local / pre-identity mode.
         self._allowed = settings.allowed_chat_ids
         self._token = settings.telegram_bot_token
         self._client: httpx.AsyncClient | None = None
+        # In-memory dedup fallback when no DB factory is wired.
+        self._seen_updates: set[int] = set()
+        # Polling lifecycle.
         self._poll_task: asyncio.Task[Any] | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop = threading.Event()
-        self._last_update_id = 0
+        self._update_offset: int = 0
+        # Command registry.
+        self._commands: dict[str, CommandDef] = {}
+        self._register_commands()
+
+    # -- command registry ---------------------------------------------------
+
+    def _register_commands(self) -> None:
+        self._commands["/start"] = CommandDef("/start", "Connect Bob to this chat", self._cmd_start)
+        self._commands["/help"] = CommandDef("/help", "Show available commands", self._cmd_help)
+        self._commands["/status"] = CommandDef(
+            "/status", "Summarize active sessions and tasks", self._cmd_status
+        )
+        self._commands["/cancel"] = CommandDef(
+            "/cancel",
+            "Cancel a task",
+            self._cmd_cancel,
+            permission="task.cancel",
+            requires_args=True,
+        )
+        self._commands["/retry"] = CommandDef(
+            "/retry",
+            "Re-queue a failed task",
+            self._cmd_retry,
+            permission="task.cancel",
+            requires_args=True,
+        )
+        self._commands["/approve"] = CommandDef(
+            "/approve",
+            "Grant a pending approval",
+            self._cmd_approve,
+            permission="approval.decide",
+            requires_args=True,
+        )
+        self._commands["/deny"] = CommandDef(
+            "/deny",
+            "Deny a pending approval",
+            self._cmd_deny,
+            permission="approval.decide",
+            requires_args=True,
+        )
+
+    @property
+    def commands(self) -> dict[str, CommandDef]:
+        """Read-only view of registered commands (for the /help and status UX)."""
+        return dict(self._commands)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -80,13 +192,27 @@ class TelegramService:
         """Begin listening. In polling mode spawns a background thread + loop."""
         if not self.is_configured():
             return
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         if self.transport == "polling":
             self._loop = asyncio.new_event_loop()
             self._thread = threading.Thread(
                 target=self._run_polling_loop, args=(self._loop,), daemon=True
             )
             self._thread.start()
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _run_polling_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
@@ -96,17 +222,6 @@ class TelegramService:
         finally:
             loop.close()
 
-    async def stop(self) -> None:
-        self._stop.set()
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-        if self._thread is not None and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._client is not None:
-            await self._client.aclose()
-
-    # -- polling ------------------------------------------------------------
-
     async def _poll_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -114,34 +229,96 @@ class TelegramService:
                 for update in updates:
                     await self.handle_update(update)
             except asyncio.CancelledError:
-                break
+                raise
             except Exception:
-                pass
-            await asyncio.sleep(1.0)
+                _logger.exception("telegram poll loop error")
+            await asyncio.sleep(max(0, self._settings.outbox_poll_seconds or 1.0))
 
     async def _get_updates(self) -> list[dict[str, Any]]:
-        assert self._client is not None
-        resp = await self._client.post(
+        """Long-poll ``getUpdates``; updates are de-duped in handle_update."""
+        if self._client is None or not self._token:
+            return []
+        resp = await self._client.get(
             _API_BASE.format(token=self._token) + "/getUpdates",
-            json={
-                "offset": self._last_update_id + 1,
-                "timeout": 0,
+            params={
+                "offset": self._update_offset + 1,
+                "timeout": 30,
                 "allowed_updates": ["message", "callback_query"],
             },
         )
+        resp.raise_for_status()
         data = resp.json()
-        if not data.get("ok"):
-            return []
-        results = list(data.get("result", []) or [])
-        if results:
-            self._last_update_id = max(self._last_update_id, int(results[-1]["update_id"]))
-        return results
+        updates: list[dict[str, Any]] = data.get("result", [])
+        if updates:
+            self._update_offset = max(u["update_id"] for u in updates)
+        return updates
 
-    # -- update dispatch ----------------------------------------------------
+    # -- identity & authorization -------------------------------------------
+
+    def _is_authorized(self, chat_id: int) -> bool:
+        """Backward-compatible local-mode check (chat-id allowlist).
+
+        In identity mode, authorization is resolved from the Telegram user id
+        via :meth:`_resolve_principal`. Kept so existing callers and tests that
+        pass a raw chat id keep working.
+        """
+        if self._identity is not None:
+            return True  # principal resolved elsewhere; check is identity-based
+        return chat_id in self._allowed
+
+    def _resolve_principal(
+        self, chat_id: int, from_user: dict[str, Any] | None
+    ) -> Principal | None:
+        """Resolve a Telegram update originator to a principal.
+
+        - Local mode: chat id must be on the allowlist -> OPERATOR.
+        - Identity mode: Telegram user id -> IdentityService -> Principal.
+        """
+        if self._identity is None:
+            if chat_id in self._allowed:
+                return OPERATOR
+            return None
+        tid = str(from_user["id"]) if from_user else None
+        if tid is None:
+            return None
+        return self._identity.resolve(tid, chat_id)
+
+    def _authorized_chat_ids(self) -> list[int]:
+        """All chat ids that should receive an approval broadcast.
+
+        Local mode: the allowlist. Identity mode: all active, non-blocked
+        TelegramAccount chat ids resolved from the DB.
+        """
+        if self._identity is None:
+            return sorted(self._allowed)
+        from agent_system.infra.models import TelegramAccount, User
+
+        with session_scope(self._factory) as db:
+            rows = (
+                db.query(TelegramAccount)
+                .join(User, TelegramAccount.user_id == User.id)
+                .filter(
+                    TelegramAccount.role != Role.BLOCKED.value,
+                    User.is_active.is_(True),
+                    TelegramAccount.chat_id.isnot(None),
+                )
+                .all()
+            )
+        return [int(r.chat_id) for r in rows if r.chat_id]
+
+    # -- inbound: update handling -------------------------------------------
 
     async def handle_update(self, update: dict[str, Any]) -> None:
-        """Process a single raw Telegram update (shared by polling + webhook)."""
+        """Process a single raw Telegram update (shared by polling + webhook).
+
+        De-duplicates via the ``telegram_updates`` ledger, resolves the
+        principal, and routes messages vs. callback queries.
+        """
         if not self.is_configured():
+            return
+        # Idempotency gate: log the update BEFORE any side effects.
+        if not self._log_update(update):
+            # Already seen this update_id — skip silently (Telegram retry).
             return
         message = update.get("message")
         if message:
@@ -151,72 +328,150 @@ class TelegramService:
         if callback:
             await self._handle_callback(callback)
 
+    def _log_update(self, update: dict[str, Any]) -> bool:
+        """Record the update in the ingest ledger. Returns False if duplicate.
+
+        Without a DB factory (tests), falls back to an in-memory set.
+        """
+        update_id = update.get("update_id")
+        if update_id is None:
+            return True
+        if self._factory is None:
+            key = int(update_id)
+            if key in self._seen_updates:
+                return False
+            self._seen_updates.add(key)
+            return True
+        from_chat = update.get("message", {}).get("chat", {}).get("id")
+        with session_scope(self._factory) as db:
+            row = TelegramUpdate(
+                update_id=int(update_id),
+                chat_id=str(from_chat) if from_chat else None,
+                payload_json=update,
+            )
+            db.add(row)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                return False
+            return True
+
     async def _handle_message(self, message: dict[str, Any]) -> None:
-        from_chat = message.get("chat", {}).get("id")
+        chat = message.get("chat", {})
+        from_chat = chat.get("id")
+        from_user = message.get("from", {})
         text = (message.get("text") or "").strip()
-        if from_chat is None or not self._is_authorized(from_chat):
+        if from_chat is None:
+            return
+        principal = self._resolve_principal(from_chat, from_user)
+        if principal is None:
+            self._audit_denied(from_chat, from_user)
             return
         if not text:
             return
-        await self._dispatch_command(from_chat, text)
+        await self._dispatch_command(principal, from_chat, text)
 
     async def _handle_callback(self, callback: dict[str, Any]) -> None:
-        from_chat = callback.get("from", {}).get("id")
-        message = callback.get("message", {})
-        chat_id = message.get("chat", {}).get("id") or from_chat
+        from_chat = callback.get("message", {}).get("chat", {}).get("id")
+        from_user = callback.get("from", {})
         data = callback.get("data") or ""
-        if chat_id is None or not self._is_authorized(chat_id):
+        chat_id = from_chat or from_user.get("id")
+        if chat_id is None:
+            return
+        principal = self._resolve_principal(chat_id, from_user)
+        if principal is None:
+            self._audit_denied(chat_id, from_user)
             return
         if data.startswith("approve:"):
             approval_id = data.split(":", 1)[1]
-            await self._decide(chat_id, approval_id, approve=True)
+            await self._cmd_approve_run(principal, chat_id, approval_id, approve=True)
         elif data.startswith("deny:"):
             approval_id = data.split(":", 1)[1]
-            await self._decide(chat_id, approval_id, approve=False)
+            await self._cmd_approve_run(principal, chat_id, approval_id, approve=False)
 
-    def _is_authorized(self, chat_id: int) -> bool:
-        return chat_id in self._allowed
+    def _audit_denied(self, chat_id: int, from_user: dict[str, Any] | None) -> None:
+        """Log a silent denial — no oracle to probing senders (spec §10)."""
+        tid = str(from_user.get("id")) if from_user else "unknown"
+        _logger.info(
+            "telegram update from chat %s (user %s) ignored (not provisioned)",
+            chat_id,
+            tid,
+        )
 
     # -- command routing ----------------------------------------------------
 
-    async def _dispatch_command(self, chat_id: int, text: str) -> None:
+    async def _dispatch_command(
+        self,
+        principal: Principal,
+        chat_id: int,
+        text: str,
+    ) -> None:
         lower = text.lower().split()
-        cmd = lower[0]
+        cmd_name = lower[0] if lower else ""
         args = text.split()[1:] if len(text.split()) > 1 else []
 
-        if cmd == "/start":
-            await self._send(chat_id, "Bob Agent connected.\nSend a goal or use /help.")
-        elif cmd == "/help":
-            await self._send(
-                chat_id,
-                "Commands:\n"
-                "/start - connect\n"
-                "/help - this help\n"
-                "/status - summarize active tasks\n"
-                "/approve <approval_id> - approve a task\n"
-                "/deny <approval_id> - deny a task\n"
-                "/cancel <task_id> - cancel a task\n"
-                "/retry <task_id> - re-queue a failed task and run it\n"
-                "or just send a goal to start a session",
-            )
-        elif cmd == "/status":
-            await self._status(chat_id)
-        elif cmd == "/approve" and args:
-            await self._decide(chat_id, args[0], approve=True)
-        elif cmd == "/deny" and args:
-            await self._decide(chat_id, args[0], approve=False)
-        elif cmd == "/cancel" and args:
-            await self._cancel_task(chat_id, args[0])
-        elif cmd == "/retry" and args:
-            await self._retry_task(chat_id, args[0])
-        else:
-            await self._create_session(chat_id, text)
-
-    # -- actions ------------------------------------------------------------
-
-    async def _create_session(self, chat_id: int, goal: str) -> None:
+        cmd = self._commands.get(cmd_name)
+        if cmd is None:
+            # Natural-language goal -> start a session (spec §12).
+            await self._create_session(principal, chat_id, text)
+            return
+        if cmd.permission is not None and not principal.can(cmd.permission):
+            await self._send(chat_id, "You do not have permission for that command.")
+            return
+        if cmd.requires_args and not args:
+            await self._send(chat_id, f"{cmd.name} requires arguments. See /help.")
+            return
         try:
-            session_id = self._supervisor.create_session(self._factory, goal)
+            await cmd.handler(principal, chat_id, *args)
+        except Exception as exc:
+            await self._send(chat_id, f"Command failed: {exc}")
+
+    # -- command handlers ---------------------------------------------------
+
+    async def _cmd_start(self, principal: Principal, chat_id: int, *args: str) -> None:
+        await self._send(
+            chat_id,
+            "Bob Agent connected. Send a goal or use /help.",
+            kind=KIND_COMMAND_RESPONSE,
+        )
+
+    async def _cmd_help(self, principal: Principal, chat_id: int, *args: str) -> None:
+        lines = ["/help — show this help", "/status — active sessions/tasks"]
+        if principal.can("task.cancel"):
+            lines += ["/cancel <task_id>", "/retry <task_id>"]
+        if principal.can("approval.decide"):
+            lines += ["/approve <id>", "/deny <id>"]
+        lines += ["\nOr just send a goal — Bob will start working on it."]
+        await self._send(chat_id, "\n".join(lines), kind=KIND_COMMAND_RESPONSE)
+
+    async def _cmd_status(self, principal: Principal, chat_id: int, *args: str) -> None:
+        await self._status(chat_id)
+
+    async def _cmd_cancel(self, principal: Principal, chat_id: int, *args: str) -> None:
+        task_id = args[0] if args else ""
+        await self._cancel_task(chat_id, task_id)
+
+    async def _cmd_retry(self, principal: Principal, chat_id: int, *args: str) -> None:
+        task_id = args[0] if args else ""
+        await self._retry_task(chat_id, task_id)
+
+    async def _cmd_approve(self, principal: Principal, chat_id: int, *args: str) -> None:
+        approval_id = args[0] if args else ""
+        await self._cmd_approve_run(principal, chat_id, approval_id, approve=True)
+
+    async def _cmd_deny(self, principal: Principal, chat_id: int, *args: str) -> None:
+        approval_id = args[0] if args else ""
+        await self._cmd_approve_run(principal, chat_id, approval_id, approve=False)
+
+    # -- core handlers (kept from legacy, identity-wired) -------------------
+
+    async def _create_session(self, principal: Principal, chat_id: int, goal: str) -> None:
+        owner_id = principal.user_id
+        try:
+            session_id = self._supervisor.create_session(
+                self._factory, goal, owner_user_id=owner_id
+            )
         except Exception as exc:
             await self._send(chat_id, f"Failed to create session: {exc}")
             return
@@ -224,10 +479,8 @@ class TelegramService:
             chat_id,
             f"Session created: {session_id}\nGoal: {goal[:200]}",
         )
-        # Cloud (CLOUD_INLINE_RUN): no RQ worker exists, so drive the
-        # session in-process in a background thread (webhook must return
-        # fast — Telegram retries slow responses). Local dev keeps this
-        # off; `make start` runs the real worker instead.
+        # Cloud (CLOUD_INLINE_RUN): no RQ worker, so drive in-process.
+        # The web request must return fast; Telegram retries slow responses.
         if bool(getattr(self._settings, "cloud_inline_run", False)):
             thread = threading.Thread(
                 target=self._drive_and_report,
@@ -237,114 +490,80 @@ class TelegramService:
             thread.start()
 
     def _drive_and_report(self, chat_id: int, session_id: str) -> None:
-        """Drive one session in-process, then report the outcome (sync)."""
         try:
             from agent_system.services.cloud import drive_session
 
             summary = drive_session(self._factory, self._bus, session_id)
         except Exception as exc:
-            self._send_sync(chat_id, f"Session {session_id} failed to run: {exc}")
+            self._send_sync(chat_id, f"Session {session_id} failed: {exc}")
             return
-        total = summary["total"]
         ok = summary["succeeded"]
+        total = summary["total"]
         failed = summary["failed"]
         if failed:
             ids = ", ".join(summary["failed_task_ids"][:5])
             self._send_sync(
                 chat_id,
-                f"Session {session_id}: {ok}/{total} tasks succeeded, "
-                f"{failed} failed ({ids}).\n"
-                f"Approve any pending action with /approve <id>, then /retry <task_id>.",
+                f"Session {session_id}: {ok}/{total} succeeded, {failed} failed ({ids}).",
             )
         else:
-            self._send_sync(chat_id, f"Session {session_id}: all {total} task(s) succeeded.")
-
-    def _send_sync(self, chat_id: int, text: str) -> None:
-        """Send a Telegram message from a background thread (own client)."""
-        if not self.is_configured():
-            return
-        try:
-            import httpx as _httpx
-
-            resp = _httpx.Client(timeout=30.0).post(
-                _API_BASE.format(token=self._token) + "/sendMessage",
-                json={"chat_id": chat_id, "text": text[:4000]},
-            )
-            resp.raise_for_status()
-        except Exception:
-            pass
+            self._send_sync(chat_id, f"Session {session_id}: all {total} succeeded.")
 
     async def _retry_task(self, chat_id: int, task_id: str) -> None:
-        """Explicit retry FAILED -> QUEUED, then drive again in cloud mode."""
         try:
             from agent_system.services.cloud import retry_task_queued
 
-            session_id = retry_task_queued(self._factory, self._bus, task_id)
-        except LookupError:
-            await self._send(chat_id, f"Unknown task: {task_id}")
-            return
+            retry_task_queued(self._factory, self._bus, task_id)
         except Exception as exc:
-            await self._send(chat_id, f"Task {task_id} not retryable: {exc}")
+            await self._send(chat_id, f"Retry failed: {exc}")
             return
-        await self._send(chat_id, f"Task {task_id} re-queued.")
-        if bool(getattr(self._settings, "cloud_inline_run", False)):
-            thread = threading.Thread(
-                target=self._drive_and_report,
-                args=(chat_id, session_id),
-                daemon=True,
-            )
-            thread.start()
+        await self._send(chat_id, f"Re-queued task {task_id}")
 
     async def _status(self, chat_id: int) -> None:
         try:
-            from agent_system.infra.db import session_scope
-            from agent_system.infra.models import Session, Task
-
-            with session_scope(self._factory) as db:
-                sessions = db.query(Session).order_by(Session.created_at.desc()).limit(5).all()
-                if not sessions:
-                    await self._send(chat_id, "No sessions yet.")
-                    return
-                lines = []
-                for s in sessions:
-                    tasks = (
-                        db.query(Task)
-                        .filter_by(session_id=s.id)
-                        .order_by(Task.created_at.desc())
-                        .limit(5)
-                        .all()
-                    )
-                    line = f"• {s.goal[:60]} ({s.id})\n"
-                    for t in tasks:
-                        line += f"    - {t.title[:40]} [{t.state}] {t.id}\n"
-                    lines.append(line.rstrip())
-                await self._send(chat_id, "\n".join(lines))
+            summary = self._supervisor.session_status(self._factory)
         except Exception as exc:
-            await self._send(chat_id, f"Status error: {exc}")
+            await self._send(chat_id, f"Status unavailable: {exc}")
+            return
+        if summary["total"] == 0:
+            await self._send(chat_id, "No active sessions.")
+            return
+        await self._send(
+            chat_id,
+            f"Sessions: {summary['total']} total, "
+            f"{summary['running']} running, {summary['complete']} complete, "
+            f"{summary['failed']} failed.",
+        )
 
     async def _decide(self, chat_id: int, approval_id: str, approve: bool) -> None:
-        record = self._gate.get(approval_id)
-        if record is None:
-            await self._send(chat_id, f"Unknown approval id: {approval_id}")
-            return
+        """Grant/deny an approval (kept for backward compat: _decide is called
+        directly from tests and the REST approval flow)."""
+        await self._cmd_approve_run(OPERATOR, chat_id, approval_id, approve=approve)
+
+    async def _cmd_approve_run(
+        self, principal: Principal, chat_id: int, approval_id: str, *, approve: bool
+    ) -> None:
+        verdict = "APPROVED" if approve else "DENIED"
         try:
-            decided = self._gate.decide(
+            if not principal.can("approval.decide"):
+                await self._send(chat_id, "You cannot approve/deny.")
+                return
+            affected = self._gate.decide(
                 approval_id,
                 approve=approve,
                 policy=Policy.ALLOW_ONCE,
-                decided_by=f"telegram:{chat_id}",
+                decided_by=str(principal.user_id or "local"),
             )
         except Exception as exc:
             await self._send(chat_id, f"Decision failed: {exc}")
             return
-        verdict = "APPROVED" if approve else "DENIED"
-        if decided.decision == Decision.PENDING:
-            await self._send(chat_id, "Approval is no longer pending (expired or already decided).")
-            return
-        await self._send(
-            chat_id,
-            f"Approval {approval_id} -> {verdict}\nAction: {record.requested_action}",
-        )
+        if affected:
+            await self._send(chat_id, f"Approval {approval_id} -> {verdict}")
+        else:
+            await self._send(
+                chat_id,
+                "Approval is no longer pending (expired or already decided).",
+            )
 
     async def _cancel_task(self, chat_id: int, task_id: str) -> None:
         try:
@@ -358,28 +577,76 @@ class TelegramService:
         if ok:
             await self._send(chat_id, f"Cancelled task {task_id}")
         else:
-            await self._send(chat_id, f"Task {task_id} not cancellable (not found / not queued).")
+            await self._send(chat_id, f"Task {task_id} not found or not cancelable.")
 
-    # -- sends --------------------------------------------------------------
-
-    async def send_message(self, chat_id: int, text: str) -> None:
-        await self._send(chat_id, text)
-
-    async def send_notification(self, chat_id: int, text: str) -> None:
-        """Fire-and-forget notification to a single approved chat."""
-        if not self._is_authorized(chat_id):
-            return
-        await self._send(chat_id, text)
-
-    async def broadcast(self, text: str, reply_markup: dict[str, Any] | None = None) -> None:
-        """Send to every approved chat id (used for approval requests)."""
-        for chat_id in self._allowed:
-            try:
-                await self._send(chat_id, text, reply_markup=reply_markup)
-            except Exception:
-                continue
+    # -- outbound delivery --------------------------------------------------
 
     async def _send(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        kind: str = KIND_COMMAND_RESPONSE,
+        event_id: str | None = None,
+    ) -> None:
+        """Persist + deliver one Telegram message.
+
+        When a DB factory is wired, the message is enqueued to the delivery
+        outbox (persist-first, durable). Otherwise (tests, local without DB)
+        it is sent directly via the httpx client so existing behaviour and
+        tests are unchanged.
+        """
+        if not self.is_configured():
+            return
+        text = (text or "")[:4000]
+        if self._outbox is not None:
+            self._outbox.enqueue(
+                kind=kind,
+                chat_id=int(chat_id),
+                text=text,
+                reply_markup=reply_markup,
+                event_id=event_id,
+            )
+            return
+        await self._send_direct(chat_id, text, reply_markup)
+
+    def _send_sync(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        kind: str = KIND_COMMAND_RESPONSE,
+    ) -> None:
+        """Synchronous deliver (for background threads, no async loop)."""
+        if not self.is_configured():
+            return
+        text = (text or "")[:4000]
+        if self._outbox is not None:
+            self._outbox.enqueue(
+                kind=kind,
+                chat_id=int(chat_id),
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return
+        import httpx as _httpx
+
+        try:
+            resp = _httpx.Client(timeout=_HTTP_TIMEOUT).post(
+                _API_BASE.format(token=self._token) + "/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    **({"reply_markup": reply_markup} if reply_markup else {}),
+                },
+            )
+            resp.raise_for_status()
+        except Exception:
+            pass
+
+    async def _send_direct(
         self,
         chat_id: int,
         text: str,
@@ -388,7 +655,7 @@ class TelegramService:
         if not self.is_configured():
             return
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
@@ -400,10 +667,37 @@ class TelegramService:
         except httpx.HTTPError:
             pass
 
-    async def send_approval_request(self, record: Any) -> None:
-        """Push an approval prompt with inline approve/deny buttons to everyone."""
+    async def send_message(self, chat_id: int, text: str) -> None:
+        await self._send(chat_id, text)
+
+    async def send_notification(self, chat_id: int, text: str) -> None:
+        """Fire-and-forget notification to a single authorized chat."""
+        if not self._is_authorized(chat_id):
+            return
+        await self._send(chat_id, text, kind=KIND_NOTIFICATION)
+
+    async def broadcast(
+        self,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        """Send to every authorized chat (legacy approval request path)."""
+        for chat_id in self._authorized_chat_ids():
+            try:
+                await self._send(chat_id, text, reply_markup=reply_markup)
+            except Exception:
+                continue
+
+    async def send_approval_request(self, record: ApprovalRecord) -> None:
+        """Push an approval prompt with inline approve/deny buttons.
+
+        When a DB factory is wired, each message is enqueued to the outbox
+        (persist-first, retryable). The callback ``data`` carries only the
+        approval id — no action is trusted from the callback text alone
+        (spec §13, §14). The server re-validates principal + scope on submit.
+        """
         text = (
-            f"Approval required\n"
+            "⚠️ Approval required\n"
             f"Action: {record.requested_action}\n"
             f"Risk: {record.risk.value if hasattr(record.risk, 'value') else record.risk}\n"
             f"Scope: {record.scope}\n"
@@ -417,4 +711,11 @@ class TelegramService:
                 ]
             ]
         }
-        await self.broadcast(text, reply_markup=markup)
+        for chat_id in self._authorized_chat_ids():
+            await self._send(
+                chat_id,
+                text,
+                reply_markup=markup,
+                kind=KIND_APPROVAL,
+                event_id=record.approval_id,
+            )

@@ -118,3 +118,39 @@ def test_all_risks_get_ttl(risk: Risk) -> None:
     gate = PermissionGate()
     record = gate.request(_req(risk=risk))
     assert record.expires_at is not None
+
+    # -- regression: owner identity propagation & cross-owner isolation --
+
+
+    def test_owner_propagated_through_request() -> None:
+        gate = PermissionGate()
+        record = gate.request(_req(owner_user_id="user_alice"))
+        assert record.owner_user_id == "user_alice"
+        persisted = gate.get(record.approval_id)
+        assert persisted is not None
+        assert persisted.owner_user_id == "user_alice"
+
+
+    def test_none_decider_allows_when_owner_set() -> None:
+        """Backward compat: when no decider identity is supplied the ownership
+        gate is skipped so local/legacy paths that do not carry a principal
+        can still decide approvals."""
+        gate = PermissionGate()
+        record = gate.request(_req(owner_user_id="user_alice"))
+        decided = gate.decide(record.approval_id, approve=True, decided_by_user_id=None)
+        assert decided.decision == Decision.APPROVED
+
+
+    def test_cross_owner_cannot_decide_approval() -> None:
+        gate = PermissionGate()
+        record = gate.request(_req(owner_user_id="user_alice"))
+        with pytest.raises(ValueError, match="belongs to a different owner"):
+            gate.decide(record.approval_id, approve=True, decided_by_user_id="user_bob")
+
+
+    def test_owner_can_decide_own_approval() -> None:
+        gate = PermissionGate()
+        record = gate.request(_req(owner_user_id="user_alice"))
+        decided = gate.decide(record.approval_id, approve=True, decided_by_user_id="user_alice")
+        assert decided.decision == Decision.APPROVED
+        assert decided.decided_by == "user"

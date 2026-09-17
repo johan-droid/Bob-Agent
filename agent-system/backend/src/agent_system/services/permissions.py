@@ -147,6 +147,9 @@ class ApprovalRequest(BaseModel):
     agent_run_id: str | None = None
     session_id: str | None = None
     workspace_id: str | None = None
+    # Server-resolved owner (never client-supplied): set by the REST layer or
+    # resolved from the session inside the gate (multi-user isolation §17).
+    owner_user_id: str | None = None
     context: dict[str, object] = Field(default_factory=dict)
 
 
@@ -163,6 +166,8 @@ class ApprovalRecord(BaseModel):
     context: dict[str, object] = Field(default_factory=dict)
     decision: Decision = Decision.PENDING
     policy: Policy = Policy.ALLOW_ONCE
+    # Server-resolved owner (multi-user isolation §17).
+    owner_user_id: str | None = None
     consumed: bool = False
     decided_by: str | None = None
     reason: str | None = None
@@ -260,6 +265,7 @@ def _record_to_row(record: ApprovalRecord) -> Any:
         context_json=dict(record.context),
         decided_by=record.decided_by,
         reason=record.reason,
+        owner_user_id=record.owner_user_id,
         created_at=record.created_at or utcnow(),
         decided_at=record.decided_at,
         expires_at=record.expires_at or utcnow(),
@@ -283,6 +289,7 @@ def _row_to_record(row: Any) -> ApprovalRecord:
         consumed=bool(row.consumed),
         decided_by=row.decided_by,
         reason=row.reason,
+        owner_user_id=row.owner_user_id,
         created_at=row.created_at,
         decided_at=row.decided_at,
         expires_at=row.expires_at,
@@ -385,6 +392,7 @@ class PermissionGate:
             session_id=req.session_id,
             workspace_id=req.workspace_id,
             context=req.context,
+            owner_user_id=req.owner_user_id,
             created_at=utcnow(),
             expires_at=utcnow() + timedelta(minutes=RISK_TTL_MINUTES[req.risk]),
         )
@@ -399,8 +407,14 @@ class PermissionGate:
         policy: Policy = Policy.ALLOW_ONCE,
         decided_by: str = "user",
         reason: str | None = None,
+        decided_by_user_id: str | None = None,
     ) -> ApprovalRecord:
-        """Record a user/admin decision. The first decision sticks."""
+        """Record a user/admin decision. The first decision sticks.
+
+        Multi-user isolation: when ``owner_user_id`` is set on the approval,
+        only that owner (or an admin) may decide it. Unknown deciders receive
+        a ``ValueError`` so the API layer can return 404/403.
+        """
         record = self._store.get(approval_id)
         if record is None:
             raise ValueError(f"approval '{approval_id}' not found")
@@ -420,6 +434,15 @@ class PermissionGate:
             record.decided_at = utcnow()
             self._persist(record)
             return record
+        # Ownership gate: only the owner (or an admin) may decide a
+        # tenant-bound approval.  When no owner is set (legacy / local mode)
+        # or no decider identity is supplied we allow the decision to proceed
+        # for backward compatibility.
+        if record.owner_user_id is not None and decided_by_user_id is not None:
+            if record.owner_user_id != decided_by_user_id:
+                raise ValueError(
+                    f"approval '{approval_id}' belongs to a different owner"
+                )
         record.decision = Decision.APPROVED if approve else Decision.DENIED
         record.policy = policy
         record.decided_by = decided_by
@@ -554,6 +577,7 @@ class PermissionGate:
             session_id=req.session_id,
             workspace_id=req.workspace_id,
             context=req.context,
+            owner_user_id=req.owner_user_id,
             decision=decision,
             decided_by=decided_by,
             reason=reason,
@@ -628,6 +652,7 @@ def require_capability(
             session_id=getattr(ctx, "session_id", None),
             workspace_id=getattr(ctx, "workspace_id", None),
             context={"capability_risk": str(capability_risk)},
+            owner_user_id=getattr(ctx, "owner_user_id", None),
         )
     )
     if decision.outcome is Outcome.ALLOW:
@@ -663,6 +688,7 @@ def _deny_record_id(
             agent_run_id=getattr(ctx, "agent_run_id", None),
             session_id=getattr(ctx, "session_id", None),
             workspace_id=getattr(ctx, "workspace_id", None),
+            owner_user_id=getattr(ctx, "owner_user_id", None),
         )
     )
     return decision.approval_id or ""

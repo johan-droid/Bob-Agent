@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -47,6 +48,7 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = _pk()
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
     created_at: Mapped[datetime] = _ts()
@@ -68,6 +70,7 @@ class Task(Base):
     agent_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     batch_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -131,6 +134,7 @@ class Approval(Base):
     scope: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
     requester: Mapped[str] = mapped_column(String(60), nullable=False)
     decision: Mapped[str] = mapped_column(String(12), default="PENDING", nullable=False, index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     policy: Mapped[str] = mapped_column(String(20), default="ALLOW_ONCE", nullable=False)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -402,4 +406,103 @@ class MemoryNote(Base):
     session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     agent_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
+
+
+# ---------------------------------------------------------------------------
+# Cloud identity & transport (Telegram-first cloud runtime)
+# ---------------------------------------------------------------------------
+
+
+class User(Base):
+    """A Bob user — the authorization principal (multi-user isolation).
+
+    ``auth_provider`` records how the user is identified: ``telegram`` (a
+    linked Telegram account) or ``local`` (the single-operator local runtime,
+    where the web session secret *is* the operator identity). Telegram
+    identity is never authorization: the :class:`Role` on
+    :class:`TelegramAccount` decides what a Telegram principal may do.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = _pk()
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_provider: Mapped[str] = mapped_column(String(20), default="telegram", nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = _ts()
+
+
+class TelegramAccount(Base):
+    """A Telegram identity linked to exactly one Bob user.
+
+    Uniqueness on ``telegram_user_id`` makes the Telegram User -> Bob User
+    mapping a function (one Telegram account can never map to two users).
+    """
+
+    __tablename__ = "telegram_accounts"
+
+    id: Mapped[str] = _pk()
+    telegram_user_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chat_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)
+    linked_at: Mapped[datetime] = _ts()
+
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", name="uq_telegram_accounts_tg_user_id"),
+    )
+
+
+class TelegramUpdate(Base):
+    """Ingest ledger + durable payload buffer for Telegram updates.
+
+    One row per Telegram ``update_id``. The UNIQUE primary key is the
+    idempotency gate: a retried webhook/poll delivery loses the INSERT race
+    and the loser re-processes the winner's stored payload (exactly-once
+    processing even across worker restarts). ``processed_at IS NULL`` marks
+    an ingested-but-not-yet-executed update.
+    """
+
+    __tablename__ = "telegram_updates"
+
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    account_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    chat_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime] = _ts()
+
+
+class DeliveryOutbox(Base):
+    """Durable outbound-notification queue (persist-first Telegram delivery).
+
+    State is persisted BEFORE delivery is attempted (a Telegram message is
+    never the record of record). Delivery loops claim rows with an atomic
+    conditional UPDATE, back off exponentially on Telegram failures, cap
+    total attempts (dead-letter), and reap claims stuck beyond the lease.
+    """
+
+    __tablename__ = "delivery_outbox"
+
+    id: Mapped[str] = _pk()
+    channel: Mapped[str] = mapped_column(String(20), default="telegram", nullable=False, index=True)
+    chat_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    reply_markup_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)
+    event_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    state: Mapped[str] = mapped_column(String(12), default="PENDING", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = _ts()
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
