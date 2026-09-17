@@ -106,9 +106,14 @@ Skipped (honest, not failures): 5 Redis-backed worker tests, 3 optional-extra te
 ## Dangerous Functionality
 
 - **Sandbox/QA:** untrusted test code never runs in-process — Docker sandbox preferred,
-  resource-limited isolated subprocess fallback. The QA image is built from the in-repo
-  `backend/docker/qa-sandbox.Dockerfile` (not pulled from a registry); a missing image
-  fails closed with `SandboxUnavailableError` and never silently weakens isolation.
+  resource-limited isolated subprocess fallback (opt-in only). The QA image is built from the
+  in-repo `backend/docker/qa-sandbox.Dockerfile` (digest-pinned base layer, non-root `USER`
+  fallback, not pulled from a registry); a missing image fails closed with
+  `SandboxUnavailableError` and never silently weakens isolation. Every sandbox container is
+  hardened at the boundary in code — `cap_drop=ALL`, `no-new-privileges`, private IPC,
+  `noexec,nosuid` `/tmp` — pinned by `tests/security/test_docker_sandbox_hardening.py`
+  including live-container proofs; the daemon itself and the Autopilot executor's OS account
+  are the two owned deployment items (`SECURITY.md` production execution checklist).
 - **One execution path:** every capability goes through
   `services/tools/execution.py` → `require_capability` → `PermissionGate.authorize`;
   `destructive` capabilities are default-deny and not approvable.

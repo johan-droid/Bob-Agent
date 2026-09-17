@@ -135,7 +135,7 @@ class TestFallback:
                     yield "partial"
                     raise ConnectionError("mid-stream cut")
 
-                return _gen(), {}
+                return _gen(), {}, None
 
         factory, _bus, router, engine = _env(tmp_path)
         pricing = router.pricing

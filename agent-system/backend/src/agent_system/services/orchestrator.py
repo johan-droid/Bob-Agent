@@ -384,13 +384,27 @@ class Orchestrator:
             task = db.get(Task, task_id)
             if task is None or task.state != TaskState.QUEUED.value:
                 return False
-            validate_transition(TaskState.QUEUED, TaskState.RUNNING)
-            task.state = TaskState.RUNNING.value
-            task.started_at = utcnow()
+            # Conditional claim: concurrent drivers (threads, cloud drive, a
+            # second API process) serialize here — exactly one claimant moves
+            # QUEUED -> RUNNING and counts the attempt.
             # attempt counts "times execution started" — incremented on every
             # entry into RUNNING (worker, API transition, and this in-process
             # path). Requeue/recovery paths must NOT increment.
-            task.attempt += 1
+            claimed: int = (
+                db.query(Task)
+                .filter(Task.id == task_id, Task.state == TaskState.QUEUED.value)
+                .update(
+                    {
+                        "state": TaskState.RUNNING.value,
+                        "started_at": utcnow(),
+                        "attempt": Task.attempt + 1,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if claimed == 0:
+                return False
+            db.refresh(task)
             run_id = ids.new_agent_run_id()
             agent_type = task.agent_type or task.task_type
             db.add(

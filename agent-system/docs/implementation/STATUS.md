@@ -13,7 +13,7 @@ Verified against the codebase on 2026-09-16 (`uv run pytest -q`: **605 passed, 0
 | 2 — Event system | ✅ Done | EventBus (monotonic seq, redaction, replay, **idempotent dedupe**) + WS/SSE fanout with resume tests |
 | 3 — API + permissions | ✅ Done | session-secret auth, `/api/v1` routers, PermissionGate, approvals + expiry sweeper, contract tests |
 | 4 — Orchestrator + queue | ✅ Done + **live-verified** | supervisor DAG + RQ worker; E2E: out-of-process execution ✓, kill -9 → lease reaper recovery ✓, attempt double-increment fixed |
-| 5 — Sandbox + workspace | ✅ Done | DockerSandbox + traversal-safe WorkspaceManager + `/exec`; daemon-gated tests |
+| 5 — Sandbox + workspace | ✅ Done | DockerSandbox + traversal-safe WorkspaceManager + `/exec`; **boundary hardening live-verified** (`tests/security/test_docker_sandbox_hardening.py`: empty `CapEff`, `/tmp` noexec, egress blocked in a real container) |
 | 6 — Browser + research | ✅ Core done | Playwright contexts + recording + citations (optional import) |
 | 7 — Documents | ✅ Done | PPTX/DOCX/XLSX/PDF deterministic builders + artifacts API |
 | 8 — Memory + vault | ✅ Core done | Obsidian writer + MemoryStore + hashed-lexical embeddings; LanceDB swap-in pending |
@@ -21,7 +21,7 @@ Verified against the codebase on 2026-09-16 (`uv run pytest -q`: **605 passed, 0
 | 10 — CLI | ✅ Core done | `agentctl` (sessions/tasks/approvals/workspaces/events/status/chat), `--json`, exit codes, contract tests |
 | 11 — Router + cost | ✅ Done | ModelRouter/Pricing + `/model-calls` API + Cost tab; **budget ledger now derived from persisted `model_calls`** (restart-safe, scopes daily/session/task/provider) |
 | 12 — Error recovery | ✅ Done | classify→plan→execute→learn; no auto-retry on destructive/permission/validation |
-| 13 — QA | ✅ Core done | untrusted-test sandbox + subprocess fallback; 1 test fails only w/o Docker daemon |
+| 13 — QA | ✅ Done | untrusted-test sandbox + subprocess fallback; image provisioned in-repo (digest-pinned, non-root fallback) + real-container test passes |
 | 14 — Templates | ✅ Done | tar snapshots + pre-snapshot secret scan + clone fidelity |
 | 15 — Recording + replay | ✅ Done | BehaviorRecorder (.jsonl, secret-scrubbed), RecordingContext, ReplayService **INSPECT/SIMULATE/APPROVED_REEXECUTE**, fingerprint diff, `recordings/` + `recordings/{id}/replay` API, 15 unit tests |
 | 16 — Batching + recipes | ✅ Done | TaskBatcher (compatibility, partial-failure isolation, cancel, speedup), RecipeEngine (versioned validated DAGs, params, canonical pipeline, cancel), APIs + 19 tests |
@@ -34,18 +34,19 @@ Verified against the codebase on 2026-09-16 (`uv run pytest -q`: **605 passed, 0
 
 ## Tests Last Executed
 
-- 2026-09-16: **605 passed, 0 failed, 9 skipped** (`uv run pytest -q`).
-- ruff: `All checks passed!`; `ruff format --check`: 153 files formatted. mypy --strict: Success (96 files).
-- Frontend: `npx tsc --noEmit` clean; `npm run build` clean (17 routes).
-- Migrations: `alembic upgrade head` → `e6f7a8b9c0d1`; `alembic check` → `No new upgrade operations detected.`
-- QA sandbox: `make qa-sandbox-image` builds `agent-system/qa-sandbox:latest`; `test_real_docker_sandbox_runs_untrusted_test` passes in a real container (was mislabelled as a Docker-daemon gap — the image was simply never built; see `ARCHITECTURE_RECONCILIATION.md` B19).
-- The 9 skips are: 5 Redis-backed worker tests, 3 optional-extra tests (memory/telemetry), 1 by-design read-tier assertion.
-- Worker E2E smoke (echo provider): task → ReAct loop → ModelRouter → `ModelCall` → events → SUCCEEDED.
-- OpenConnector live verification: real container action discovery, `hackernews.get_top_stories` execution, action guide markdown, HTTP MCP `initialize → tools/list → tools/call` with session-id replay.
+- 2026-09-17: **920 passed, 0 failed** (`uv run pytest -q`); ruff + `ruff format --check` clean (168 files); mypy --strict clean (100 files). Sandbox boundary hardening added and live-proven (D-18): `qa-sandbox` image rebuilt digest-pinned with a non-root `USER` fallback; every container now runs `cap_drop=ALL` / `no-new-privileges` / private IPC / `noexec,nosuid` `/tmp` (`tests/security/test_docker_sandbox_hardening.py`, incl. real-container `CapEff=0`, `/tmp` exec refused, egress blocked).
+- 2026-09-16 (prior pass): **605 passed, 0 failed, 9 skipped** (`uv run pytest -q`).
+  - ruff: `All checks passed!`; `ruff format --check`: 153 files formatted. mypy --strict: Success (96 files).
+  - Frontend: `npx tsc --noEmit` clean; `npm run build` clean (17 routes).
+  - Migrations: `alembic upgrade head` → `e6f7a8b9c0d1`; `alembic check` → `No new upgrade operations detected.`
+  - QA sandbox: `make qa-sandbox-image` builds `agent-system/qa-sandbox:latest`; `test_real_docker_sandbox_runs_untrusted_test` passes in a real container (was mislabelled as a Docker-daemon gap — the image was simply never built; see `ARCHITECTURE_RECONCILIATION.md` B19).
+  - The 9 skips are: 5 Redis-backed worker tests, 3 optional-extra tests (memory/telemetry), 1 by-design read-tier assertion.
+  - Worker E2E smoke (echo provider): task → ReAct loop → ModelRouter → `ModelCall` → events → SUCCEEDED.
+  - OpenConnector live verification: real container action discovery, `hackernews.get_top_stories` execution, action guide markdown, HTTP MCP `initialize → tools/list → tools/call` with session-id replay.
 
 ## Blockers (environment only — no code gaps)
 
-- ~~Docker/Redis absent~~ → **Redis live-verified 2026-09-06** (`docker compose up -d`); Docker daemon still absent for sandbox/browser/QA-live paths.
+- ~~Docker/Redis absent~~ → **Redis live-verified 2026-09-06** (`docker compose up -d`); Docker daemon available — sandbox/QA-live paths verified in real containers (see `tests/security/test_docker_sandbox_hardening.py` and `test_real_docker_sandbox_runs_untrusted_test`).
 
 ## Live Worker Verification (2026-09-06)
 

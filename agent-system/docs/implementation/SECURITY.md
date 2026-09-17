@@ -77,15 +77,44 @@ other capability (its working directory is resolved through the jail).
 ### Image provenance
 
 Untrusted generated tests run in `agent-system/qa-sandbox:latest`, built from the in-repo
-`backend/docker/qa-sandbox.Dockerfile` (`python:3.12-slim` + pytest + coverage, nothing
-else). It is deliberately not pulled from a registry: the image the sandbox runs is the one
-in this repository's history. Sandbox containers run as the invoking uid so bind-mounted
-files stay host-owned, with network disabled by default and `pids_limit`/memory/CPU caps
-applied.
+`backend/docker/qa-sandbox.Dockerfile` (pinned by digest: `python:3.12-slim@sha256:78387…184ea`
++ pytest + coverage, nothing else). It is deliberately not pulled from a registry: the image
+the sandbox runs is the one in this repository's history, and the base layer cannot drift
+because a mutable upstream tag moved. Rotating the pinned digest is a deliberate, reviewed
+change, never silent. The image declares a non-root `USER` fallback (a caller that forgets
+`user=` still does not get root); `DockerSandbox` overrides it with the invoking uid so
+bind-mounted files stay host-owned, with network disabled by default and
+`pids_limit`/memory/CPU caps applied.
+
+The container runtime itself is hardened — not configurable, never relaxed by a networked
+run: `cap_drop=ALL` (empty effective capability set), `no-new-privileges` (no re-exec
+path to more privilege), private IPC, and a `noexec,nosuid` tmpfs on `/tmp`. These are
+enforced for every container this repository starts and pinned by
+`tests/security/test_docker_sandbox_hardening.py`, which includes live-daemon proofs
+(effective caps read as 0 inside a real container, `/tmp` execution refused, egress blocked).
 
 A missing local image fails closed — `SandboxUnavailableError` — and never silently falls
 back to a weaker execution mode. The QA agent's subprocess fallback is opt-in
 (`ExecutionMode.ISOLATED_SUBPROCESS`), never automatic.
+
+## Production execution checklist
+
+Architecture is one thing; a hardened deployment is an explicit set of operator choices.
+Anything not checked is a residual deployment risk that this document refuses to hide:
+
+| # | deployment requirement | status in this repo | what the operator must do |
+| --- | --- | --- | --- |
+| 1 | Docker daemon reachable + QA image built | code provisions it (`make qa-sandbox-image`, CI builds it, `ensure_image` on demand); missing → fail closed | run the backend on a host with Docker; do not ship where it is absent |
+| 2 | Daemon itself is a trust boundary | containers: no caps, no-new-privileges, no socket, limits, pinned base image — tested live | keep the daemon patched; use rootless Docker or a dedicated daemon (e.g. Sysbox) for hostile-tenant multi-tenancy; gate `/var/run/docker.sock` exposure |
+| 3 | `tools_shell_mode` is deployment configuration | default `sandbox`; `local` is an explicit host opt-in, `off` disables | in production set `TOOLS_SHELL_MODE=sandbox` (or `off`); never `local` on a shared host |
+| 4 | shell mode ≠ QA sandbox | the QA agent always uses `DockerSandbox` + the QA image regardless of `tools_shell_mode` | nothing — the generated-test path is not operator-switchable to the host |
+| 5 | Autopilot executor isolation | service is gated, off by default, per-action approvals, sticky kill switch; the *OS-level* isolation of the executor process is deployment packaging | run the executor process as a dedicated non-privileged OS account with no sudo, on a session/display it alone owns (or inside a container/VM); verify with `id` of the running process |
+| 6 | resource ceilings fit the host | container caps come from settings | size `MAX_CONTAINER_CPU`/`MAX_CONTAINER_MEMORY_MB` to the host, not to defaults |
+
+Items 1, 3, 4, 6 are ordinary configuration with enforced defaults. Items 2 and 5 are the
+honest production-hardening boundary: the repository enforces everything inside the
+container it starts, and says plainly that the daemon and the executor account are the
+operator's side of the line.
 
 ## Tool argument validation
 

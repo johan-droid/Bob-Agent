@@ -195,3 +195,26 @@ behaviours were deliberately rejected: silently pulling from a registry (the san
 the image in this repository's history), and falling back to weaker isolation (a missing image
 fails closed; the subprocess fallback stays opt-in). The failure message differs by image
 class because "run the build" is the wrong advice for an image Docker can pull itself.
+
+## D-18 — The Docker boundary is hardened in code; the daemon and executor account are owned deployment concerns
+
+**Decision.** After the sandbox *architecture* was proven (in-repo image, fail-closed, no
+in-process untrusted execution), the *runtime* was hardened too, as non-configurable code:
+every container `DockerSandbox` starts runs with `cap_drop=ALL`, `security_opt=no-new-privileges`,
+private IPC, and a `noexec,nosuid` tmpfs on `/tmp`; the QA image's base layer is pinned by
+digest and falls back to a non-root `USER` if a caller ever forgets `user=`. Only the network
+posture is switchable (`network=True`), and it relaxes nothing else. These properties are
+pinned by `tests/security/test_docker_sandbox_hardening.py` (unit assertions on every `run()`
+call plus live-daemon proofs: `CapEff` read as 0 inside a real container, `/tmp` execution
+refused, egress blocked).
+
+**Why.** The container boundary was reported as "configuration-dependent" because the Docker
+daemon is a trust boundary no in-repo control can eliminate — but that true statement had
+become an excuse for leaving the daemon side unhardened and for letting Autopilot's
+"restricted OS account" exist only in the aspirational spec. The line is now drawn explicitly
+(`SECURITY.md` → "Production execution checklist"): the repository enforces everything inside
+the containers it starts and names exactly two operator-owned deployment items — keep/derive
+the daemon from a hardened runtime (rootless Docker / dedicated daemon for hostile tenants),
+and run the Autopilot executor as a dedicated non-privileged OS account on a session it alone
+owns (or in a container/VM). A report that says "deployment concern" without an operator
+checklist is deflection, not documentation.

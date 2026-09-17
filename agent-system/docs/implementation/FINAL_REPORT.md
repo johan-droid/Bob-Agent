@@ -46,7 +46,7 @@ assertion.
 | 2 | Event system + WS/SSE | **IMPLEMENTED** | dedupe, redaction, replay, resume; **emit-time type validation added in the reconciliation** |
 | 3 | API v1 + PermissionGate + approvals | **IMPLEMENTED** | contract + security tests; **unified to one DB-backed gate in the reconciliation** |
 | 4 | Supervisor DAG + Orchestrator + RQ worker | **IMPLEMENTED** + live-verified | Redis via compose; out-of-process exec ✓; kill -9 → reaper recovery ✓; **Planner split out in the reconciliation** |
-| 5 | DockerSandbox + Workspaces + traversal safety | **IMPLEMENTED** | live exec: **CONFIGURATION REQUIRED** (Docker) |
+| 5 | DockerSandbox + Workspaces + traversal safety | **IMPLEMENTED** | containers hardened at the boundary: `cap_drop=ALL`, `no-new-privileges`, private IPC, `noexec,nosuid` `/tmp`, pinned base image — **verified in a live container** (`tests/security/test_docker_sandbox_hardening.py`); running the daemon in production = ordinary config (see `SECURITY.md` production execution checklist) |
 | 6 | Browser + research agents | **PARTIALLY IMPLEMENTED** | capability layer + jail tests green; Playwright not installed here; live capture **CONFIGURATION REQUIRED**; download/upload = **KNOWN LIMITATION** |
 | 7 | DocumentAgent (PPTX/DOCX/XLSX/PDF) | **IMPLEMENTED** | deterministic builders, artifacts API; PDF *text extraction* = **KNOWN LIMITATION** |
 | 8 | Obsidian vault + MemoryStore | **PARTIALLY IMPLEMENTED** | core done; LanceDB/semantic embeddings = **KNOWN LIMITATION** (hashed-lexical default, honest) |
@@ -59,8 +59,8 @@ assertion.
 | 15 | Behavior recording + 3-mode replay | **IMPLEMENTED** | fingerprints + approval enforcement verified |
 | 16 | Task batching + recipes | **IMPLEMENTED** | compatibility, partial failure, versioned DAGs |
 | 17 | Personality + insights + scheduler | **IMPLEMENTED** | security-bounded personality; event-derived insights |
-| 18 | Autopilot | **IMPLEMENTED** (service) | **off by default**; restricted-OS-account executor is a **deployment concern** (CONFIGURATION REQUIRED for production use) |
-| 19 | Hardening (chaos/restart/security) | **PARTIALLY IMPLEMENTED** | suite runs green; full chaos matrix incl. Redis-loss/WS-flap under live infra **CONFIGURATION REQUIRED** |
+| 18 | Autopilot | **IMPLEMENTED** (service) | **off by default**; per-action approvals, sticky kill switch, audit — 17 security tests; *OS-level* executor isolation = **CONFIGURATION REQUIRED** and owned as such (production execution checklist item 5: dedicated non-privileged account, own session/display, or container/VM) |
+| 19 | Hardening (chaos/restart/security) | **IMPLEMENTED** (test suite) | chaos/restart/security suites green; live-container boundary proofs added (`test_docker_sandbox_hardening.py`); full chaos matrix incl. Redis-loss/WS-flap under live infra **CONFIGURATION REQUIRED** |
 | 20 | Real LLM task execution (ReAct + tool loop) | **IMPLEMENTED** | `agents/react_agent.py` — goal → ModelRouter + capability loop; worker/orchestrator wiring; honest echo fallback |
 | 21 | OpenConnector + MCP over HTTP | **IMPLEMENTED** + live-verified | `services/openconnector.py` (Runtime API); `services/mcp.py` streamable-HTTP MCP; scoped approvals through the one gate; live against `ghcr.io/oomol-lab/open-connector:latest` |
 | R | **Architecture reconciliation** | **IMPLEMENTED** | one permission path, canonical events, runtime schema validation, capability library (61 tools), Planner/Supervisor/Orchestrator split, explicit agent registry, restart-safe budgets, prioritised context, CI on `main`, QA sandbox image provisioning — see `ARCHITECTURE_RECONCILIATION.md` |
@@ -77,6 +77,11 @@ assertion.
 - Secrets: redaction at event emit, recording write, vault write, and insight persistence.
 - Replay: re-execution blocked without fresh approval + fingerprint match (Phase 15).
 - QA: generated tests never run in-process; sandbox or resource-limited subprocess only.
+- **Container boundary hardened and live-proven:** every sandbox container runs with
+  `cap_drop=ALL` (empty effective `CapEff` read from inside a real container),
+  `no-new-privileges`, private IPC, `noexec,nosuid` `/tmp`, network disabled by default —
+  asserted by unit tests on every `run()` and proven in a live container
+  (`tests/security/test_docker_sandbox_hardening.py`).
 - Autopilot: off by default, per-action approvals, hard default-deny list, sticky kill
   switch, full audit.
 - Path traversal: blocked in workspace read/write/tree, symlink escapes, and template

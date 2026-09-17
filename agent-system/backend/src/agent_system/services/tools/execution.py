@@ -12,6 +12,15 @@ Individual capabilities do not evaluate permissions: they declare a risk tier
 and a scope, and this module resolves both. A handler is never entered with
 arguments that failed validation.
 
+The physical invocation of ``tool.handler`` lives in exactly one place —
+:func:`_invoke_handler`. Every entry point (:func:`execute_tool`,
+:func:`execute_request`, :func:`execute_with_policy`,
+:func:`execute_request_with_policy`, :func:`run_tool_call`,
+:func:`run_request`) funnels the run step through it; no caller enters a
+handler directly. Policy-aware paths authorize once through the
+:class:`PolicyEngine` and then reuse the same run seam — they never inline
+execution, so the authorization and the handler call cannot drift.
+
 Two typed entry points sit on top of that same path (Phase 1 tool contract):
 
 - :func:`decide` — the *pure* policy verdict (:class:`ExecutionDecision`);
@@ -139,22 +148,35 @@ def authorize_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> Approv
     )
 
 
-def execute_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Validate, authorize, then run one capability call.
+def _invoke_handler(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """The single physical handler invocation point (private).
 
-    Raises :class:`ToolValidationError` before the handler is entered, and
-    propagates :class:`NeedsApprovalError` when a live approval is required.
+    No caller ever enters ``tool.handler`` directly — every entry point in
+    this module funnels the run step through here. Validation and
+    authorization are performed upstream; this helper only runs the
+    capability and normalizes the result.
     """
-    errors = validate_arguments(tool.name, tool.parameters, args)
-    if errors:
-        raise ToolValidationError(tool.name, errors)
-    authorize_tool(tool, args, ctx)
     result = tool.handler(args, ctx)
     if result is None:
         return {}
     if not isinstance(result, dict):
         raise ToolError(f"capability '{tool.name}' returned {type(result).__name__}, expected dict")
     return result
+
+
+def execute_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Validate, authorize, then run one capability call.
+
+    Raises :class:`ToolValidationError` before the handler is entered, and
+    propagates :class:`NeedsApprovalError` when a live approval is required.
+    Execution is delegated to :func:`_invoke_handler` — the one place a tool
+    handler can be entered in this codebase.
+    """
+    errors = validate_arguments(tool.name, tool.parameters, args)
+    if errors:
+        raise ToolValidationError(tool.name, errors)
+    authorize_tool(tool, args, ctx)
+    return _invoke_handler(tool, args, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -200,29 +222,27 @@ def execute_with_policy(
 
     This is the Phase 3 unified execution path that evaluates all policy
     dimensions (risk, scope, approval, sandbox, identity, resource, timeout)
-    before execution.
+    before execution. The engine is the single authorization point here; the
+    physical handler invocation is delegated to the canonical run seam
+    (:func:`_invoke_handler`), never inlined.
     """
     engine = engine or get_policy_engine(
         factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None)
     )
     policy_ctx = _build_policy_context(tool, args, ctx)
 
-    # Full policy evaluation
-    decision, grant = engine.evaluate_and_authorize(policy_ctx)
+    # Full policy evaluation; raises NeedsApprovalError when a grant is missing.
+    decision, _grant = engine.evaluate_and_authorize(policy_ctx)
 
     # Validate arguments (still required)
     errors = validate_arguments(tool.name, tool.parameters, args)
     if errors:
         raise ToolValidationError(tool.name, errors)
 
-    # Execute the tool
-    result = tool.handler(args, ctx)
-    if result is None:
-        result = {}
-    if not isinstance(result, dict):
-        raise ToolError(f"capability '{tool.name}' returned {type(result).__name__}, expected dict")
-
-    return decision, result
+    # Delegate execution to the single handler seam. The engine already
+    # authorized (and consumed an ALLOW_ONCE grant if one was used), so the
+    # gate must not run a second time here.
+    return decision, _invoke_handler(tool, args, ctx)
 
 
 def execute_request_with_policy(
@@ -275,10 +295,12 @@ def execute_request_with_policy(
         )
         return ExecutionResult.refuse(request, exec_decision)
 
-    # Allowed - execute
+    # Allowed - execute. The engine already authorized, so go straight to the
+    # single handler seam rather than re-running the gate (which would
+    # double-consume ALLOW_ONCE grants and re-request approvals).
     started = time.perf_counter()
     try:
-        output = execute_tool(tool, request.arguments, ctx)
+        output = _invoke_handler(tool, request.arguments, ctx)
     except NeedsApprovalError as exc:
         outcome = ExecutionOutcome.DENY if exc.denied else ExecutionOutcome.AWAIT_APPROVAL
         effective = ExecutionDecision.allow(metadata, "allowed by existing grant").with_outcome(

@@ -100,7 +100,21 @@ TRUNCATION_MARKER = "\n…[truncated]"
 
 
 def _render_result_block(name: str, result: dict[str, Any]) -> str:
-    raw = _json.dumps(result, default=str)
+    try:
+        raw = _json.dumps(result, default=str)
+    except (TypeError, ValueError) as exc:
+        # A hostile/buggy capability can return a payload that is not JSON
+        # representable (e.g. a cyclic structure). That must degrade to a
+        # model-readable note, never crash the run.
+        raw = _json.dumps(
+            {
+                "error": "result_unserializable",
+                "tool": name,
+                "detail": f"{type(exc).__name__}: {exc}",
+                "hint": "The capability returned a value that cannot be represented; "
+                "try a narrower call.",
+            }
+        )
     truncated = len(raw) > MAX_TOOL_RESULT_CHARS
     if truncated:
         raw = raw[:MAX_TOOL_RESULT_CHARS] + TRUNCATION_MARKER
@@ -282,6 +296,19 @@ def run_tool_loop(
                 stopped="error",
                 protocols=protocol_counts,
             )
+        if not isinstance(response, dict):
+            # A broken adapter (None, a list, a string) is a provider failure,
+            # not a loop bug: degrade to stopped=error instead of crashing on
+            # attribute access below.
+            return LoopResult(
+                output=last_text
+                or f"model invocation returned {type(response).__name__}, expected dict",
+                tool_calls=tool_calls,
+                iterations=iteration,
+                usage=usage,
+                stopped="error",
+                protocols=protocol_counts,
+            )
         text = str(response.get("output") or "")
         last_text = text
         usage = _merge_usage(usage, dict(response.get("usage") or {}))
@@ -313,6 +340,7 @@ def run_tool_loop(
                     "kept_count": compacted.kept_count,
                     "estimated_tokens_saved": compacted.tokens_saved,
                     "retained_important": compacted.retained_important,
+                    "dropped_names": compacted.dropped_names,
                 },
             )
         transcript += "\n\nContinue reasoning with the results above. Answer when done."

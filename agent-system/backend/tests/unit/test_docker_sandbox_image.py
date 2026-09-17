@@ -72,6 +72,15 @@ def test_repo_ships_the_qa_sandbox_dockerfile() -> None:
     )
     body = QA_SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
     assert "pytest" in body, "QA sandbox image must ship pytest to run generated tests"
+    from_line = next(line for line in body.splitlines() if line.startswith("FROM "))
+    assert "@sha256:" in from_line, (
+        "the base image must be pinned by digest — a mutable tag lets the "
+        "sandbox base layer drift without any change to this repository"
+    )
+    assert "USER " in body, (
+        "the image must declare a non-root USER fallback so a caller that "
+        "forgets user= still does not run untrusted code as root"
+    )
 
 
 def test_image_present_true_when_daemon_has_it() -> None:

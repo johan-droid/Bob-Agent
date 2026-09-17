@@ -16,10 +16,19 @@ Every adapter sends documented auth headers plus an optional user-supplied
 `extra_headers` blob (from `PROVIDER_EXTRA_HEADERS`). Credentials never get
 logged. Model pricing defaults are per-provider; unknown pricing is flagged
 `estimated` by the router, never fabricated.
+
+**Tool-call carrier (one shape, every provider):** each adapter normalizes the
+provider-native structured calls (OpenAI ``message.tool_calls``, Gemini
+``functionCall`` parts, Anthropic ``tool_use`` blocks — and the fragments
+streamed over SSE) into a canonical ``"tool_calls"`` list on the adapter result
+dict: ``[{"id", "name", "arguments"}]`` where ``arguments`` is a JSON string.
+Both ``invoke`` and ``stream`` produce this shape, so downstream execution
+(""router -> agent loop -> protocol parser"") never branches per provider.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -199,6 +208,51 @@ def _usage(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _canonical_tool_calls(raw_items: Any) -> list[dict[str, Any]]:
+    """Normalize provider-native structured tool calls into one carrier shape.
+
+    Every adapter emits the same canonical list ``[{"id", "name", "arguments"}]``
+    (``arguments`` as a JSON-encoded string, matching how the OpenAI
+    ``function.arguments`` field arrives on the wire). Accepted inbound shapes:
+
+    - OpenAI — ``{"id", "type": "function", "function": {"name", "arguments"}}``;
+    - flat — ``{"id", "name", "arguments"}`` (and Gemini's ``args`` / Anthropic's
+      ``input`` aliases, both of which carry a dict that we re-encode).
+
+    Nameless entries are dropped; ``id`` is synthesized for providers that omit
+    it (Gemini). The result rides the adapter result as ``"tool_calls"`` so the
+    downstream execution lifecycle never branches per provider.
+    """
+    canonical: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_items or []):
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            arguments: Any = function.get("arguments")
+        else:
+            name = item.get("name")
+            arguments = item.get("arguments", item.get("args", item.get("input")))
+        if not name:
+            continue
+        if isinstance(arguments, str):
+            raw = arguments
+        else:
+            try:
+                raw = json.dumps(arguments) if arguments is not None else "{}"
+            except (TypeError, ValueError):
+                raw = "{}"
+        canonical.append(
+            {
+                "id": str(item.get("id") or f"call_native_{index + 1}"),
+                "name": str(name),
+                "arguments": raw,
+            }
+        )
+    return canonical
+
+
 def build_extra_headers(settings: Settings) -> dict[str, str]:
     """User-supplied headers applied to every provider call."""
     return settings.extra_headers
@@ -270,17 +324,27 @@ class OpenAICompatibleAdapter:
             data = resp.json()
         choices = data.get("choices") or []
         text = ""
+        message: dict[str, Any] = {}
         if choices:
-            text = (choices[0].get("message") or {}).get("content") or ""
-        return {"output": text, "usage": _usage(data)}
+            message = choices[0].get("message") or {}
+            text = message.get("content") or ""
+        return {
+            "output": text,
+            "usage": _usage(data),
+            "tool_calls": _canonical_tool_calls(message.get("tool_calls")),
+        }
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:
         """Yield text deltas via SSE (``stream:true``); usage when provided.
 
-        Returns ``(chunks, usage)`` where ``chunks`` is an iterator of ``str``
-        deltas and ``usage`` is a dict populated from the terminal SSE chunk
-        (``stream_options.include_usage``) — empty when the provider omits it,
-        in which case the router flags usage as estimated, same as ``invoke``.
+        Returns ``(chunks, usage, tool_calls)``:
+        - ``chunks``     iterator of ``str`` deltas;
+        - ``usage``      dict populated from the terminal SSE chunk
+          (``stream_options.include_usage``) — empty when the provider omits it,
+          in which case the router flags usage as estimated, same as ``invoke``;
+        - ``tool_calls`` list of canonical ``{"id", "name", "arguments"}`` calls
+          assembled from the fragmented ``delta.tool_calls`` streaming chunks
+          (``None`` when the provider streamed no structured calls).
         """
         messages = list(kwargs.pop("messages", None) or [])
         if not messages:
@@ -304,36 +368,71 @@ class OpenAICompatibleAdapter:
         extra = {k: v for k, v in kwargs.items() if k not in payload}
         payload.update(extra)
         usage: dict[str, Any] = {}
+        #: Filled in-place by the generator's ``finally`` once the stream is
+        #: exhausted, so the 3-tuple element reflects the assembled calls.
+        tool_calls: list[dict[str, Any]] = []
 
         def _chunks() -> Any:
-            with httpx.Client(timeout=self.timeout) as client:
-                with client.stream(
-                    "POST",
-                    f"{self.spec.base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=payload,
-                ) as resp:
-                    resp.raise_for_status()
-                    for line in resp.iter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data_raw = line[5:].strip()
-                        if not data_raw or data_raw == "[DONE]":
-                            continue
-                        try:
-                            import json as _sj
+            assembled: dict[int, dict[str, str]] = {}
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    with client.stream(
+                        "POST",
+                        f"{self.spec.base_url}/chat/completions",
+                        headers=self._headers(),
+                        json=payload,
+                    ) as resp:
+                        resp.raise_for_status()
+                        for line in resp.iter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data_raw = line[5:].strip()
+                            if not data_raw or data_raw == "[DONE]":
+                                continue
+                            try:
+                                import json as _sj
 
-                            chunk = _sj.loads(data_raw)
-                        except ValueError:
-                            continue
-                        if "usage" in chunk and isinstance(chunk["usage"], dict):
-                            usage.update(_usage({"usage": chunk["usage"]}))
-                        for choice in chunk.get("choices") or []:
-                            delta = (choice.get("delta") or {}).get("content")
-                            if delta:
-                                yield str(delta)
+                                chunk = _sj.loads(data_raw)
+                            except ValueError:
+                                continue
+                            if "usage" in chunk and isinstance(chunk["usage"], dict):
+                                usage.update(_usage({"usage": chunk["usage"]}))
+                            for choice in chunk.get("choices") or []:
+                                delta = choice.get("delta") or {}
+                                for item in delta.get("tool_calls") or []:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    index = int(item.get("index") or 0)
+                                    slot = assembled.setdefault(
+                                        index, {"id": "", "name": "", "arguments": ""}
+                                    )
+                                    if item.get("id"):
+                                        slot["id"] = str(item["id"])
+                                    function = item.get("function") or {}
+                                    if function.get("name"):
+                                        slot["name"] = str(function["name"])
+                                    args_delta = function.get("arguments")
+                                    if args_delta:
+                                        slot["arguments"] += str(args_delta)
+                                content = delta.get("content")
+                                if content:
+                                    yield str(content)
+            finally:
+                calls: list[dict[str, Any]] = []
+                for index in sorted(assembled):
+                    slot = assembled[index]
+                    if not slot["name"]:
+                        continue
+                    calls.append(
+                        {
+                            "id": slot["id"] or f"call_native_{index + 1}",
+                            "name": slot["name"],
+                            "arguments": slot["arguments"] or "{}",
+                        }
+                    )
+                tool_calls[:] = calls
 
-        return _chunks(), usage
+        return _chunks(), usage, tool_calls
 
 
 class GeminiAdapter:
@@ -368,9 +467,13 @@ class GeminiAdapter:
             data = resp.json()
         candidates = data.get("candidates") or []
         text = ""
+        function_calls: list[dict[str, Any]] = []
         if candidates:
             parts = (candidates[0].get("content") or {}).get("parts") or []
             text = "".join(p.get("text", "") for p in parts)
+            function_calls = [
+                p.get("functionCall") for p in parts if isinstance(p.get("functionCall"), dict)
+            ]
         usage_meta = data.get("usageMetadata") or {}
         return {
             "output": text,
@@ -379,6 +482,7 @@ class GeminiAdapter:
                 "output_tokens": int(usage_meta.get("candidatesTokenCount") or 0),
                 "cached_tokens": 0,
             },
+            "tool_calls": _canonical_tool_calls(function_calls),
         }
 
 
@@ -432,12 +536,18 @@ class AnthropicAdapter:
                 "output_tokens": int(usage.get("output_tokens") or 0),
                 "cached_tokens": int(usage.get("cache_read_input_tokens") or 0),
             },
+            "tool_calls": _canonical_tool_calls(
+                [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+            ),
         }
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:
         """Yield text deltas via Anthropic SSE; usage from message deltas.
 
-        Same ``(chunks, usage)`` contract as ``OpenAICompatibleAdapter.stream``.
+        Same ``(chunks, usage, tool_calls)`` contract as
+        ``OpenAICompatibleAdapter.stream`` — ``tool_use`` blocks are assembled
+        from ``content_block_start`` / ``content_block_delta``
+        (``input_json_delta.partial_json`` fragments) / ``content_block_stop``.
         """
         messages = list(kwargs.pop("messages", None) or [])
         if not messages:
@@ -461,54 +571,92 @@ class AnthropicAdapter:
         # Populated as chunks are consumed; stays empty when the provider
         # omits usage (the router then flags usage as estimated).
         usage: dict[str, Any] = {}
+        #: Filled in-place by the generator's ``finally`` once the stream is
+        #: exhausted, so the 3-tuple element reflects the assembled calls.
+        tool_calls: list[dict[str, Any]] = []
 
         def _chunks() -> Any:
             import json as _sj
 
-            with httpx.Client(timeout=self.timeout) as client:
-                with client.stream(
-                    "POST",
-                    f"{self.spec.base_url}/messages",
-                    headers=headers,
-                    json=payload,
-                ) as resp:
-                    resp.raise_for_status()
-                    event_name = ""
-                    for line in resp.iter_lines():
-                        if line.startswith("event:"):
-                            event_name = line[6:].strip()
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        data_raw = line[5:].strip()
-                        if not data_raw:
-                            continue
-                        try:
-                            data_evt = _sj.loads(data_raw)
-                        except ValueError:
-                            continue
-                        if event_name == "content_block_delta":
-                            delta = data_evt.get("delta") or {}
-                            if delta.get("type") == "text_delta" and delta.get("text"):
-                                yield str(delta["text"])
-                        elif event_name in ("message_start", "message_delta"):
-                            msg_usage = (
-                                data_evt.get("message", {}).get("usage")
-                                or data_evt.get("usage")
-                                or {}
-                            )
-                            if msg_usage:
-                                usage.update(
-                                    {
-                                        "input_tokens": int(msg_usage.get("input_tokens") or 0),
-                                        "output_tokens": int(msg_usage.get("output_tokens") or 0),
-                                        "cached_tokens": int(
-                                            msg_usage.get("cache_read_input_tokens") or 0
-                                        ),
+            assembled: dict[int, dict[str, str]] = {}
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    with client.stream(
+                        "POST",
+                        f"{self.spec.base_url}/messages",
+                        headers=headers,
+                        json=payload,
+                    ) as resp:
+                        resp.raise_for_status()
+                        event_name = ""
+                        for line in resp.iter_lines():
+                            if line.startswith("event:"):
+                                event_name = line[6:].strip()
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+                            data_raw = line[5:].strip()
+                            if not data_raw:
+                                continue
+                            try:
+                                data_evt = _sj.loads(data_raw)
+                            except ValueError:
+                                continue
+                            if event_name == "content_block_start":
+                                block = data_evt.get("content_block") or {}
+                                if block.get("type") == "tool_use":
+                                    index = int(data_evt.get("index") or 0)
+                                    assembled[index] = {
+                                        "id": str(block.get("id") or ""),
+                                        "name": str(block.get("name") or ""),
+                                        "arguments": "",
                                     }
+                            elif event_name == "content_block_delta":
+                                delta = data_evt.get("delta") or {}
+                                if delta.get("type") == "text_delta" and delta.get("text"):
+                                    yield str(delta["text"])
+                                elif delta.get("type") == "input_json_delta":
+                                    partial = delta.get("partial_json")
+                                    if partial:
+                                        index = int(data_evt.get("index") or 0)
+                                        slot = assembled.setdefault(
+                                            index, {"id": "", "name": "", "arguments": ""}
+                                        )
+                                        slot["arguments"] += str(partial)
+                            elif event_name in ("message_start", "message_delta"):
+                                msg_usage = (
+                                    data_evt.get("message", {}).get("usage")
+                                    or data_evt.get("usage")
+                                    or {}
                                 )
+                                # Each SSE message only carries *some* counters
+                                # (message_start: input; message_delta: output);
+                                # update in place so a later event never
+                                # clobbers a counter it did not include.
+                                if msg_usage.get("input_tokens"):
+                                    usage["input_tokens"] = int(msg_usage["input_tokens"])
+                                if msg_usage.get("output_tokens"):
+                                    usage["output_tokens"] = int(msg_usage["output_tokens"])
+                                if msg_usage.get("cache_read_input_tokens"):
+                                    usage["cached_tokens"] = int(
+                                        msg_usage["cache_read_input_tokens"]
+                                    )
+            finally:
+                calls: list[dict[str, Any]] = []
+                for index in sorted(assembled):
+                    slot = assembled[index]
+                    if not slot["name"]:
+                        continue
+                    calls.append(
+                        {
+                            "id": slot["id"] or f"call_native_{index + 1}",
+                            "name": slot["name"],
+                            "arguments": slot["arguments"] or "{}",
+                        }
+                    )
+                tool_calls[:] = calls
 
-        return _chunks(), usage
+        return _chunks(), usage, tool_calls
 
 
 ADAPTER_CLASSES: dict[str, type[Any]] = {

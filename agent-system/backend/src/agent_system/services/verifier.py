@@ -105,6 +105,18 @@ class Verifier:
         self, task_input: dict[str, Any], result: dict[str, Any]
     ) -> VerificationResult | None:
         result = result or {}
+        # A ReAct run that never produced an answer (provider death, timeout,
+        # network drop) must fail the gate — otherwise the lenient default
+        # would mark a task SUCCEEDED whose only output is an error notice.
+        # The task then fails visibly and stays retryable instead of
+        # phantom-succeeding.
+        if result.get("stopped") == "error":
+            output = str(result.get("output") or "")[:300]
+            return VerificationResult(
+                False,
+                f"agent loop ended in error: {output}",
+                mode="deterministic",
+            )
         if result.get("verified") is False:
             return VerificationResult(
                 False,

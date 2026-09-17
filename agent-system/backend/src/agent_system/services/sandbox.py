@@ -17,11 +17,15 @@ Two backends, one envelope ``{"exit_code", "stdout", "timed_out"}``:
   NOT container isolation — execute tools stay approval-gated, and an
   allowlist can restrict binaries. Selected via ``HEROKU_JAIL=true``.
 
-Security notes (v3.1 §27):
+Security notes (v3.1 §27, hardened per D-18):
 - containers run with no host filesystem bind-mounts except the workspace dir,
 - network is disabled unless explicitly enabled for a task,
 - output is capped; execution is time-limited,
-- every exec emits `tool.*` events through the caller.
+- every exec emits `tool.*` events through the caller,
+- the container runtime is hardened in code (not configuration): `cap_drop=ALL`,
+  `no-new-privileges`, private IPC, `noexec,nosuid` tmpfs on `/tmp`; only the
+  network posture is switchable and it relaxes nothing else — pinned by
+  `tests/security/test_docker_sandbox_hardening.py`.
 """
 
 from __future__ import annotations
@@ -137,6 +141,15 @@ class DockerSandbox:
             "nano_cpus": int(settings.max_container_cpu * 1e9),
             "pids_limit": 128,
             "network_disabled": True,
+            # Production hardening of the Docker boundary itself (the daemon
+            # is a trust boundary — THREAT_MODEL.md assets list): run with no
+            # capabilities, forbid privilege reacquisition, isolate IPC, and
+            # keep /tmp non-executable. These are not configurable and are
+            # never dropped by the network exception below.
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges"],
+            "ipc_mode": "private",
+            "tmpfs": {"/tmp": "rw,noexec,nosuid,size=16m"},
         }
 
     def run(
@@ -154,7 +167,10 @@ class DockerSandbox:
             command = ["/bin/sh", "-c", command]
         limits = self._limits()
         if network:
+            # Only the network posture is relaxed for explicitly networked
+            # runs; cap_drop / no-new-privileges / IPC / tmpfs hardening stay.
             limits.pop("network_disabled")
+            limits["network_mode"] = "bridge"
         # Run as the invoking user so bind-mounted files stay owned by the
         # host user (containers otherwise write root-owned files into /ws).
         uid = os.getuid()
@@ -260,8 +276,17 @@ class SubprocessJail:
         workspace_path: str,
         command: list[str] | str,
         timeout_seconds: int | None = None,
+        network: bool = False,
+        image: str | None = None,
+        *,
         allowlist: str = "",
     ) -> dict[str, Any]:
+        """Run ``command`` confined to the workspace.
+
+        Mirrors the ``DockerSandbox.run`` envelope (``network``, ``image`` are
+        accepted for backend-swap compatibility but have no effect here: the
+        jail inherits the host network and manages no images).
+        """
         settings = get_settings()
         timeout = timeout_seconds or settings.max_execution_time_seconds
         if isinstance(command, list):

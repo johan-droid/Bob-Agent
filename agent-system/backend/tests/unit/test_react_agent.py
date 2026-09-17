@@ -125,6 +125,7 @@ def test_llm_handler_runs_react_loop_with_tool(
                 tokens_in=len(prompt) // 4,
                 tokens_out=len(output) // 4,
                 tokens_cached=0,
+                tool_calls=None,
             )
 
     stub = _StubRouter()
@@ -166,6 +167,7 @@ def test_llm_handler_survives_model_failure(
                 tokens_in=None,
                 tokens_out=None,
                 tokens_cached=None,
+                tool_calls=None,
             )
 
     monkeypatch.setattr(react_agent, "_build_router", lambda _s, _b: _DeadRouter())

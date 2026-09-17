@@ -247,7 +247,11 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             "output_tokens": int(result.tokens_out or 0),
             "cached_tokens": int(result.tokens_cached or 0),
         }
-        return {"output": result.output or "", "usage": usage}
+        return {
+            "output": result.output or "",
+            "usage": usage,
+            "tool_calls": result.tool_calls or [],
+        }
 
     tool_registry = build_registry(settings)
     # Capabilities resolve permissions through the shared gate: same durable

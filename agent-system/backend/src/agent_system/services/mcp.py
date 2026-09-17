@@ -35,6 +35,13 @@ class McpError(RuntimeError):
     """MCP transport or protocol failure."""
 
 
+# Hostile/broken-server containment (security suite: tests/security/test_hostile_mcp.py).
+# A remote MCP server controls everything it sends back; these caps bound what a
+# single response can do to this process before any of it is trusted or parsed.
+_MAX_BODY_CHARS = 4_000_000  # one HTTP response body (JSON or SSE)
+_MAX_LINE_CHARS = 4_000_000  # one stdio JSON-RPC line / one SSE data: chunk
+
+
 @dataclass
 class McpServerConfig:
     name: str
@@ -161,16 +168,27 @@ class McpStdioClient:
         def _readline() -> str:
             return str(stdout.readline())
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_readline)
-            try:
-                line = future.result(timeout=self.config.timeout)
-            except concurrent.futures.TimeoutError as exc:
-                raise McpError(
-                    f"mcp server '{self.config.name}': response timeout ({self.config.timeout}s)"
-                ) from exc
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(_readline)
+        try:
+            line = future.result(timeout=self.config.timeout)
+        except concurrent.futures.TimeoutError as exc:
+            # Do NOT join the executor here: the reader thread is parked in
+            # readline() and joining would block far beyond the timeout (until
+            # the server's process dies). close() kills the process, which
+            # unblocks the thread; leaking it briefly is bounded and safe.
+            raise McpError(
+                f"mcp server '{self.config.name}': response timeout ({self.config.timeout}s)"
+            ) from exc
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         if not line:
             raise McpError(f"mcp server '{self.config.name}': server closed stdout")
+        if len(line) > _MAX_LINE_CHARS:
+            raise McpError(
+                f"mcp server '{self.config.name}': response line exceeds "
+                f"{_MAX_LINE_CHARS} chars — refused (hostile/buggy server)"
+            )
         try:
             data = _json.loads(line)
         except _json.JSONDecodeError as exc:
@@ -263,8 +281,27 @@ class McpHttpClient:
         return headers
 
     def _parse_body(self, text: str, content_type: str) -> list[dict[str, Any]]:
-        """Parse a JSON or SSE response body into JSON-RPC message dicts."""
-        if "text/event-stream" in content_type:
+        """Parse a JSON or SSE response body into JSON-RPC message dicts.
+
+        The content type is an **allowlist** (``application/json`` or
+        ``text/event-stream``) — anything else is refused outright, not merely
+        left to fail JSON parsing. A hostile server cannot smuggle a JSON-RPC
+        reply through ``text/html`` or any other unexpected type. Malformed
+        bodies raise the typed :class:`McpError` — a hostile or broken server
+        never leaks a bare parser exception past this seam.
+        """
+        base_type = content_type.split(";")[0].strip().lower()
+        if base_type not in ("application/json", "text/event-stream"):
+            raise McpError(
+                f"mcp http '{self.config.name}': unexpected content type "
+                f"'{content_type or '(none)'}' — refused"
+            )
+        if len(text) > _MAX_BODY_CHARS:
+            raise McpError(
+                f"mcp http '{self.config.name}': response body exceeds "
+                f"{_MAX_BODY_CHARS} chars — refused (hostile/buggy server)"
+            )
+        if base_type == "text/event-stream":
             messages: list[dict[str, Any]] = []
             for line in text.splitlines():
                 if line.startswith("data:"):
@@ -278,7 +315,12 @@ class McpHttpClient:
                     if isinstance(parsed, dict):
                         messages.append(parsed)
             return messages
-        parsed = _json.loads(text)
+        try:
+            parsed = _json.loads(text)
+        except _json.JSONDecodeError as exc:
+            raise McpError(
+                f"mcp http '{self.config.name}': malformed response body ({exc})"
+            ) from exc
         return [parsed] if isinstance(parsed, dict) else []
 
     def _post(self, payload: dict[str, Any]) -> Any:
@@ -286,7 +328,13 @@ class McpHttpClient:
 
         assert self.config.url, "McpHttpClient requires a url"
         with httpx.Client(timeout=self.config.timeout) as client:
-            return client.post(self.config.url, headers=self._headers(), json=payload)
+            resp = client.post(self.config.url, headers=self._headers(), json=payload)
+        if len(resp.text) > _MAX_BODY_CHARS:
+            raise McpError(
+                f"mcp http '{self.config.name}': response body exceeds "
+                f"{_MAX_BODY_CHARS} chars — refused (hostile/buggy server)"
+            )
+        return resp
 
     def _rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         self._request_id += 1
@@ -306,7 +354,20 @@ class McpHttpClient:
         if session_id:
             self._session_id = session_id
         messages = self._parse_body(resp.text, resp.headers.get("content-type", ""))
-        reply = next((m for m in messages if m.get("id") == request_id), None)
+        # The client never pipelines, so a *reply* (has id + result/error, no
+        # method) whose id is not ours is a spoofed or hijacked response —
+        # rejected outright, mirroring the stdio client's id-mismatch guard.
+        reply = None
+        for message in messages:
+            if message.get("id") == request_id:
+                reply = message
+                break
+            if (
+                "method" not in message
+                and message.get("id") is not None
+                and ("result" in message or "error" in message)
+            ):
+                raise McpError(f"mcp http '{self.config.name}': id mismatch")
         if reply is None:
             return None
         if "error" in reply:
@@ -349,7 +410,14 @@ def _open_client(config: McpServerConfig) -> McpStdioClient | McpHttpClient:
         client = McpHttpClient(config)
     else:
         client = McpStdioClient(config)
-    client.open()
+    try:
+        client.open()
+    except McpError:
+        raise
+    except Exception as exc:
+        # Connection-level failures (refused, DNS, reset) surface as the typed
+        # error — "server disappeared" is never a bare transport exception.
+        raise McpError(f"mcp server '{config.name}': cannot connect: {exc}") from exc
     return client
 
 

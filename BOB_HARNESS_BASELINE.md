@@ -424,6 +424,12 @@ drift versus the documented "clean" state, not a logic defect.
 | "No verifier / REVIEW orphaned" | In-flight `verifier.py` + REVIEW gate now active (lenient) |
 | "ruff/mypy clean" | ❌ see §9.1–9.3 |
 
+> **Addendum (2026-09-17, ADR-012):** this document is the **single authoritative
+> source for as-built stack versions** (Next.js 16.3.4 / React 19.1.0 / Python 3.12 —
+> see the header table). Where the pre-implementation spec documents in
+> `documentations/` quote different versions (e.g. "Next.js 15"), those are design
+> history, not the contract. Lockfiles win for exact versions.
+
 ### 9.5 Known gaps (from repo docs, still open)
 
 Browser live-capture needs Playwright; APScheduler service enable/trigger endpoints;

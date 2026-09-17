@@ -38,8 +38,8 @@
 | T4 | path traversal / symlink escape | jail resolves symlinks before containment; secret paths refused; NUL refused | `test_malicious_path_is_refused_before_the_handler`, `test_symlink_escape_is_refused` |
 | T5 | secret exfiltration (`.env`, keys) | `is_secret_path` at the jail; TTL/scoped approvals; redaction at the event boundary; `scrub_text` on capability output | `tests/unit/test_secrets.py`, `tests/security/test_workspaces.py` |
 | T6 | prompt injection re-arming a tool call from fetched content | tool results are sanitised (`sanitize_tool_result`) before re-entering the prompt; fenced-regex parsing is neutralised; approvals are unaffected | `tests/security/test_tool_fence_injection.py` (runs with approvals **off**, so the sanitiser is the only defence measured) |
-| T7 | container escape / host takeover | one execution seam; Docker sandbox with CPU/memory/process/output limits by default; no capability receives a Docker socket; `local` requires explicit opt-in | `tests/unit/test_subprocess_jail.py`, `tests/security/test_workspaces.py` |
-| T8 | resource exhaustion (fork bombs, disk fill, runaway output) | rlimits in the jail, sandbox limits, `max_file_size_mb`, output caps, timeouts, iteration budget, context budget | `tests/unit/test_subprocess_jail.py`, `tests/unit/test_context_compaction.py` |
+| T7 | container escape / host takeover | one execution seam; Docker sandbox by default with **no capabilities** (`cap_drop=ALL`, verified live as an empty `CapEff`), `no-new-privileges`, private IPC, `noexec,nosuid` `/tmp`, CPU/memory/process/output limits; no capability receives a Docker socket; `local` requires explicit opt-in | `tests/security/test_docker_sandbox_hardening.py` (unit + live-daemon proofs), `tests/unit/test_subprocess_jail.py`, `tests/security/test_workspaces.py` |
+| T8 | resource exhaustion (fork bombs, disk fill, runaway output) | rlimits in the jail, sandbox limits (`pids_limit=128`, memory/CPU caps, `noexec,nosuid` tmpfs), `max_file_size_mb`, output caps, timeouts, iteration budget, context budget | `tests/unit/test_subprocess_jail.py`, `tests/unit/test_context_compaction.py` |
 | T9 | malformed/hostile tool arguments | schema validation before the handler: types, required, unknown-key rejection, enums, patterns, size cap | `TestSchemaValidationBeforeExecution` |
 | T10 | unauthorized API access | bearer session token from a bootstrap secret; default secrets refused in production; CORS restricted | `tests/contract/test_api_v1.py` |
 | T11 | event tampering / lost audit | append-only store, monotonic sequence, dedupe by `event_id`, type validation, redaction at emit | `tests/integration/test_event_bus_persistence.py` |
@@ -50,10 +50,13 @@
 | T16 | silent capability substitution | unknown agent type raises unless a fallback is installed, and any fallback that runs emits `agent.fallback_applied` | `test_fallback_decision_is_recorded_as_an_event` |
 | T17 | unsafe archive extraction / template cloning | template snapshots are scanned for secrets before snapshot; clone fidelity tested | `tests/unit/test_features_16_17.py`, `tests/contract/test_vault_and_templates_api.py` |
 
+| T19 | untrusted-code escape through the sandbox *runtime* (kernel exploits, setuid-style re-escalation) | `cap_drop=ALL` + `no-new-privileges` + private IPC + `noexec,nosuid` `/tmp` on every container (not configurable, never relaxed for networked runs); pinned base image; container removed after every run | `tests/security/test_docker_sandbox_hardening.py` (live: `CapEff=0`, `/tmp` exec refused, egress blocked) |
+
 ## Residual risk (accepted, documented)
 
 | risk | why it remains | mitigation direction |
 | --- | --- | --- |
+| The Docker daemon itself is a trust boundary (kernel shared with every container) | no in-repo control can harden someone else's runtime; containers are capped but not nested-isolated | keep the daemon patched; rootless Docker / a dedicated daemon for hostile-tenant multi-tenancy; see the production execution checklist in `SECURITY.md` |
 | `tools_shell_mode=local` executes on the host | opt-in deployment choice for platforms without Docker | approvals still apply; document loudly (`SECURITY.md`) |
 | The subprocess jail is containment, not isolation | rlimits + scrubbed env + cwd confinement cannot stop a determined escape | Docker sandbox is the default; jail is the no-daemon fallback |
 | The deterministic planner may choose a mediocre DAG | no LLM planner exists | plan is inspectable and stored (`strategy` field) before any execution; `KNOWN LIMITATION` in the reconciliation report |

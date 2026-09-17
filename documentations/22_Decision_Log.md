@@ -88,4 +88,11 @@ up: "[[00_Index]]"
 - **Decision:** Centralized permission gate with 4 risk levels and 5 policies; dangerous operations default-deny; autopilot disabled by default and built last ([[27_Security_Permissions]]).
 - **Consequences:** Some friction on risky actions; audit records every decision; autopilot ships in Phase 18 only after audit/recording/recovery mature.
 
+## ADR-012 — One Authoritative Source for As-Built Stack Versions
+
+- **Date:** 2026-09-17
+- **Context:** Documentation drift: the original spec documents ([[03_Tech_Stack]], [[16_Dashboard_UIUX]], [[99_Master_Build_Plan]], ADR-001) describe a Next.js 15 stack decided before implementation began, while the as-built dashboard is Next.js 16.3 (React 19). Coding agents reading the wrong document implement against the wrong contract.
+- **Decision:** `BOB_HARNESS_BASELINE.md` (repo root) is the **single authoritative source for as-built stack versions** — it is machine-derived from the running code, not hand-written. Lockfiles (`agent-system/web/package.json`, `agent-system/backend/uv.lock`) are the ground truth for exact versions. The pre-implementation spec documents ([[documentations/]]) remain as aspiration/design history only and are **never** a version contract. Implementation docs under `agent-system/docs/implementation/` must match the baseline; where they disagree, the baseline wins and the doc is corrected.
+- **Consequences:** Future agents and reviewers resolve version conflicts in one place; the spec documents keep their historical framing but gain an explicit "superseded by baseline" reading rule.
+
 ---

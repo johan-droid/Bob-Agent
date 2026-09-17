@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from agent_system.api.deps import get_authenticator
 from agent_system.config import get_settings
@@ -339,31 +340,44 @@ def create_task(body: TaskCreate, request: Request) -> TaskOut:
             if existing is not None:
                 return _task_out(existing)
     task_id = ids.new_task_id()
-    with session_scope(factory) as db:
-        if db.get(Session, body.session_id) is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        # Chat-created tasks carry the user's prompt as the goal. The ReAct
-        # handler derives its objective from input.goal; without this the
-        # task would run with an empty objective.
-        task_input = dict(body.input)
-        if "goal" not in task_input:
-            task_input["goal"] = body.title
-        task = Task(
-            id=task_id,
-            session_id=body.session_id,
-            task_type=body.task_type,
-            title=body.title,
-            input_json=task_input,
-            depends_on_json=body.depends_on,
-            agent_type=body.agent_type,
-            idempotency_key=body.idempotency_key,
-            state=TaskState.PENDING.value,
-        )
-        db.add(task)
-        bus.emit(
-            Event(type="task.created", session_id=body.session_id, task_id=task_id, actor="user"),
-            db,
-        )
+    try:
+        with session_scope(factory) as db:
+            if db.get(Session, body.session_id) is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            # Chat-created tasks carry the user's prompt as the goal. The ReAct
+            # handler derives its objective from input.goal; without this the
+            # task would run with an empty objective.
+            task_input = dict(body.input)
+            if "goal" not in task_input:
+                task_input["goal"] = body.title
+            task = Task(
+                id=task_id,
+                session_id=body.session_id,
+                task_type=body.task_type,
+                title=body.title,
+                input_json=task_input,
+                depends_on_json=body.depends_on,
+                agent_type=body.agent_type,
+                idempotency_key=body.idempotency_key,
+                state=TaskState.PENDING.value,
+            )
+            db.add(task)
+            bus.emit(
+                Event(
+                    type="task.created", session_id=body.session_id, task_id=task_id, actor="user"
+                ),
+                db,
+            )
+    except IntegrityError:
+        # Lost a create race: a duplicate delivery inserted our idempotency
+        # key first. The UNIQUE constraint kept it to one row — return that
+        # row instead of a 500, so a retried request converges.
+        if body.idempotency_key is not None:
+            with session_scope(factory) as db:
+                existing = db.query(Task).filter_by(idempotency_key=body.idempotency_key).first()
+                if existing is not None:
+                    return _task_out(existing)
+        raise HTTPException(status_code=409, detail="conflicting concurrent write") from None
     # Pure create: the task stays PENDING until something explicitly queues it
     # (plan, POST /tasks/{id}/run, or a manual transition). Auto-kicking here
     # would race the explicit lifecycle the contract tests walk.
@@ -405,7 +419,12 @@ class TaskTransition(BaseModel):
 
 @authenticated.post("/tasks/{task_id}/transition")
 def transition_task(task_id: str, body: TaskTransition, request: Request) -> TaskOut:
-    """Explicit, validated state transition — invalid ones are rejected (v3.1 §7)."""
+    """Explicit, validated state transition — invalid ones are rejected (v3.1 §7).
+
+    Redelivery is idempotent: requesting the state the task is already in
+    returns it with no new event and no state change. Concurrent duplicate
+    deliveries serialize on a conditional claim — exactly one applies.
+    """
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
@@ -413,15 +432,39 @@ def transition_task(task_id: str, body: TaskTransition, request: Request) -> Tas
         if row is None:
             raise HTTPException(status_code=404, detail="task not found")
         current = TaskState(row.state)
+        if current == body.target:
+            return _task_out(row)
         try:
             validate_transition(current, body.target)
         except InvalidTransitionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        row.state = body.target.value
-        # attempt counts "times execution started" — increment on every entry
-        # into RUNNING (manual operator transitions included).
         if body.target == TaskState.RUNNING:
-            row.attempt += 1
+            # attempt counts "times execution started" — increment on every
+            # entry into RUNNING (manual operator transitions included), as a
+            # single expression so concurrent claims cannot lose an increment.
+            claimed: int = (
+                db.query(Task)
+                .filter(Task.id == task_id, Task.state == current.value)
+                .update(
+                    {"state": body.target.value, "attempt": Task.attempt + 1},
+                    synchronize_session=False,
+                )
+            )
+        else:
+            claimed = (
+                db.query(Task)
+                .filter(Task.id == task_id, Task.state == current.value)
+                .update({"state": body.target.value}, synchronize_session=False)
+            )
+        if claimed == 0:
+            # Lost a concurrent move: reconcile against the winner's state.
+            db.refresh(row)
+            if TaskState(row.state) == body.target:
+                return _task_out(row)
+            raise HTTPException(
+                status_code=409, detail=f"state changed concurrently to {row.state}"
+            )
+        db.refresh(row)
         event_type = {
             TaskState.QUEUED: "task.queued",
             TaskState.RUNNING: "task.started",
@@ -447,7 +490,14 @@ def transition_task(task_id: str, body: TaskTransition, request: Request) -> Tas
 
 
 @authenticated.post("/tasks/{task_id}/retry", status_code=202)
-def retry_task(task_id: str, request: Request) -> TaskOut:
+def retry_task(task_id: str, request: Request, response: Response) -> TaskOut:
+    """Retry a failed task: FAILED -> QUEUED + execution kickoff.
+
+    Redelivery is idempotent: when the task is already QUEUED (duplicate
+    delivery, or a retry after a crashed kickoff) the endpoint re-kicks
+    execution and returns 202/200 without a second requeue event. Concurrent
+    duplicate retries serialize on a conditional claim — exactly one requeues.
+    """
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
@@ -455,23 +505,40 @@ def retry_task(task_id: str, request: Request) -> TaskOut:
         if row is None:
             raise HTTPException(status_code=404, detail="task not found")
         current = TaskState(row.state)
-        try:
-            validate_transition(current, TaskState.QUEUED)
-        except InvalidTransitionError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        row.state = TaskState.QUEUED.value
-        # attempt counts "times execution started" — incremented only at the
-        # RUNNING transition (worker/orchestrator), never on requeue.
-        bus.emit(
-            Event(
-                type="task.queued",
-                session_id=row.session_id,
-                task_id=row.id,
-                actor="user",
-                payload={"retry": True, "attempt": row.attempt},
-            ),
-            db,
-        )
+        if current == TaskState.QUEUED:
+            response.status_code = 200
+        else:
+            try:
+                validate_transition(current, TaskState.QUEUED)
+            except InvalidTransitionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            claimed: int = (
+                db.query(Task)
+                .filter(Task.id == task_id, Task.state == current.value)
+                .update({"state": TaskState.QUEUED.value}, synchronize_session=False)
+            )
+            if claimed == 0:
+                # Lost a concurrent requeue: reconcile against the winner.
+                db.refresh(row)
+                if TaskState(row.state) != TaskState.QUEUED:
+                    raise HTTPException(
+                        status_code=409, detail=f"state changed concurrently to {row.state}"
+                    )
+                response.status_code = 200
+            else:
+                db.refresh(row)
+                # attempt counts "times execution started" — incremented only at the
+                # RUNNING transition (worker/orchestrator), never on requeue.
+                bus.emit(
+                    Event(
+                        type="task.queued",
+                        session_id=row.session_id,
+                        task_id=row.id,
+                        actor="user",
+                        payload={"retry": True, "attempt": row.attempt},
+                    ),
+                    db,
+                )
     # Retry is explicit operator intent to run: kick in-process execution.
     # The response is a fresh read; failures land on the task row + events,
     # never on this HTTP call.
@@ -638,6 +705,13 @@ def decide_approval(approval_id: str, body: ApprovalDecision, request: Request) 
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
     factory = request.app.state.session_factory
+    current = gate.get(approval_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"approval '{approval_id}' not found")
+    if current.decision is not Decision.PENDING:
+        # Redelivery: the first decision sticks — report it without emitting
+        # a second decision event for the same logical decision.
+        return _approval_out(current)
     try:
         record = gate.decide(
             approval_id, approve=body.approve, policy=body.policy, reason=body.reason

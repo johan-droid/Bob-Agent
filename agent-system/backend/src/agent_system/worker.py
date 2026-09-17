@@ -87,10 +87,26 @@ def execute_task(task_id: str | None = None, factory: Any = None) -> dict[str, A
         if task.state != TaskState.QUEUED.value:
             # Already handled (e.g. duplicate delivery) — not an error.
             return {"task_id": task_id, "skipped": True, "state": task.state}
-        validate_transition(TaskState.QUEUED, TaskState.RUNNING)
-        task.state = TaskState.RUNNING.value
-        task.started_at = utcnow()
-        task.attempt += 1
+        # Conditional claim: exactly one claimant moves QUEUED -> RUNNING and
+        # counts the attempt. Concurrent duplicate deliveries (RQ redelivery,
+        # a second worker) lose the race and skip below instead of running
+        # the task twice.
+        claimed: int = (
+            db.query(Task)
+            .filter(Task.id == task_id, Task.state == TaskState.QUEUED.value)
+            .update(
+                {
+                    "state": TaskState.RUNNING.value,
+                    "started_at": utcnow(),
+                    "attempt": Task.attempt + 1,
+                },
+                synchronize_session=False,
+            )
+        )
+        if claimed == 0:
+            db.refresh(task)
+            return {"task_id": task_id, "skipped": True, "state": task.state}
+        db.refresh(task)
         run_id = ids.new_agent_run_id()
         agent_type = task.agent_type or task.task_type
         db.add(

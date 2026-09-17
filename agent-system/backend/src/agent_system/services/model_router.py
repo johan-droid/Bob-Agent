@@ -98,11 +98,21 @@ class InvocationResult:
     cost_is_estimated: bool
     latency_ms: int
     output: str | None = None
+    #: Canonical ``[{"id", "name", "arguments"}]`` structured tool calls from
+    #: the adapter result (``None`` when the provider returned none).
+    tool_calls: list[dict[str, Any]] | None = None
     error: str | None = None
 
 
 class ProviderAdapter:
-    """Interface every provider adapter implements."""
+    """Interface every provider adapter implements.
+
+    ``invoke`` returns a dict that may carry ``output`` (str), ``usage``
+    (dict), and — for providers that produced structured tool calls — a
+    canonical ``tool_calls`` list (``[{"id", "name", "arguments"}]``). The
+    router forwards that list verbatim to :class:`InvocationResult` so the
+    agent loop can parse it; execution never branches per provider.
+    """
 
     supports_streaming: bool = False
 
@@ -110,7 +120,12 @@ class ProviderAdapter:
         raise NotImplementedError
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:
-        """Yield text deltas; return (chunks, usage). Only when supported."""
+        """Yield text deltas; return ``(chunks, usage, tool_calls)``.
+
+        ``tool_calls`` is the same canonical list as ``invoke`` (``None`` when
+        the provider streamed no structured calls). Only required when
+        ``supports_streaming`` is True.
+        """
         raise NotImplementedError
 
 
@@ -139,7 +154,7 @@ class EchoProvider(ProviderAdapter):
             for i, word in enumerate(words):
                 yield word + (" " if i < len(words) - 1 else "")
 
-        return _chunks(), dict(result["usage"])
+        return _chunks(), dict(result["usage"]), None
 
 
 class UnavailableProvider(ProviderAdapter):
@@ -433,10 +448,14 @@ class ModelRouter:
         started = time.monotonic()
         breaker = self._breaker_for(provider) if provider != "unknown" else None
 
-        def _call() -> tuple[str, dict[str, Any]]:
+        def _call() -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
             assert adapter is not None
             response = adapter.invoke(model_id, prompt, **kwargs)
-            return str(response.get("output", "")), dict(response.get("usage", {}))
+            return (
+                str(response.get("output", "")),
+                dict(response.get("usage", {})),
+                response.get("tool_calls") or None,
+            )
 
         budget_error = self._budget_check(
             factory, task_id=task_id, session_id=session_id, provider=provider
@@ -446,15 +465,17 @@ class ModelRouter:
             output: str | None = None
             error: str | None = budget_error
             usage: dict[str, Any] = {}
+            tool_calls: list[dict[str, Any]] | None = None
             circuit_events: list[tuple[str, dict[str, Any]]] = []
         elif adapter is None:
             ok = False
             output = None
             error = f"no adapter registered for provider '{provider}'"
             usage = {}
+            tool_calls = None
             circuit_events = []
         else:
-            ok, output, error, usage, circuit_events = self._run_guarded(breaker, _call)
+            ok, output, error, usage, tool_calls, circuit_events = self._run_guarded(breaker, _call)
         latency_ms = int((time.monotonic() - started) * 1000)
         return self._record(
             factory,
@@ -464,6 +485,7 @@ class ModelRouter:
             ok,
             output,
             usage,
+            tool_calls,
             error,
             latency_ms,
             skills_used,
@@ -530,6 +552,7 @@ class ModelRouter:
                 False,
                 None,
                 {},
+                None,
                 budget_error,
                 latency_ms,
                 skills_used,
@@ -549,6 +572,7 @@ class ModelRouter:
                 False,
                 None,
                 {},
+                None,
                 f"no adapter registered for provider '{provider}'",
                 latency_ms,
                 skills_used,
@@ -576,21 +600,21 @@ class ModelRouter:
             )
             index["n"] += 1
 
-        def _call() -> tuple[str, dict[str, Any]]:
+        def _call() -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
             assert adapter is not None
             if getattr(adapter, "supports_streaming", False):
-                chunks, stream_usage = adapter.stream(model_id, prompt, **kwargs)
+                chunks, stream_usage, stream_calls = adapter.stream(model_id, prompt, **kwargs)
                 parts: list[str] = []
                 for delta in chunks:
                     parts.append(delta)
                     _emit_chunk(delta)
-                return "".join(parts), dict(stream_usage)
+                return "".join(parts), dict(stream_usage), stream_calls or None
             response = adapter.invoke(model_id, prompt, **kwargs)
             full = str(response.get("output", ""))
             _emit_chunk(full)  # fallback: same event shape, one chunk
-            return full, dict(response.get("usage", {}))
+            return full, dict(response.get("usage", {})), response.get("tool_calls") or None
 
-        ok, output, error, usage, circuit_events = self._run_guarded(breaker, _call)
+        ok, output, error, usage, tool_calls, circuit_events = self._run_guarded(breaker, _call)
         latency_ms = int((time.monotonic() - started) * 1000)
         return self._record(
             factory,
@@ -600,6 +624,7 @@ class ModelRouter:
             ok,
             output,
             usage,
+            tool_calls,
             error,
             latency_ms,
             skills_used,
@@ -665,29 +690,38 @@ class ModelRouter:
         self,
         breaker: ProviderCircuitBreaker | None,
         call: Any,
-    ) -> tuple[bool, str | None, str | None, dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    ) -> tuple[
+        bool,
+        str | None,
+        str | None,
+        dict[str, Any],
+        list[dict[str, Any]] | None,
+        list[tuple[str, dict[str, Any]]],
+    ]:
         """Run ``call`` under the circuit breaker (shared by both paths).
 
-        Returns (ok, output, error, usage, circuit_events). Fast-fail while
-        OPEN performs no network call and never fabricates a response.
+        Returns ``(ok, output, error, usage, tool_calls, circuit_events)``.
+        Fast-fail while OPEN performs no network call and never fabricates a
+        response.
         """
         circuit_events: list[tuple[str, dict[str, Any]]] = []
         if breaker is None:
             try:
-                output, usage = call()
-                return True, output, None, usage, circuit_events
+                output, usage, tool_calls = call()
+                return True, output, None, usage, tool_calls, circuit_events
             except Exception as exc:
-                return False, None, f"{type(exc).__name__}: {exc}", {}, circuit_events
+                return False, None, f"{type(exc).__name__}: {exc}", {}, None, circuit_events
         try:
             breaker.before_call()
         except ProviderUnavailableError as exc:
-            return False, None, f"{type(exc).__name__}: {exc}", {}, circuit_events
+            return False, None, f"{type(exc).__name__}: {exc}", {}, None, circuit_events
         try:
-            output, usage = call()
+            output, usage, tool_calls = call()
             ok = True
             error = None
         except Exception as exc:
-            output, usage, ok, error = None, {}, False, f"{type(exc).__name__}: {exc}"
+            message = f"{type(exc).__name__}: {exc}"
+            output, usage, ok, error, tool_calls = None, {}, False, message, None
         transition = breaker.after_success() if ok else breaker.after_failure()
         if transition == "opened":
             circuit_events.append(
@@ -702,7 +736,7 @@ class ModelRouter:
             )
         elif transition == "closed":
             circuit_events.append(("model.circuit_closed", {"provider": breaker.provider}))
-        return ok, output, error, usage, circuit_events
+        return ok, output, error, usage, tool_calls, circuit_events
 
     def _emit_token(
         self,
@@ -749,6 +783,7 @@ class ModelRouter:
         ok: bool,
         output: str | None,
         usage: dict[str, Any],
+        tool_calls: list[dict[str, Any]] | None,
         error: str | None,
         latency_ms: int,
         skills_used: list[str],
@@ -866,6 +901,7 @@ class ModelRouter:
             cost_is_estimated=cost_estimated,
             latency_ms=latency_ms,
             output=output,
+            tool_calls=tool_calls,
             error=error,
         )
 

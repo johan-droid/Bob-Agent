@@ -384,7 +384,7 @@ class PolicyEngine:
     def _default_sandbox_provider(self) -> SandboxProvider | None:
         """Create the default sandbox provider based on settings."""
         if self._settings.heroku_jail:
-            return SubprocessJail()  # type: ignore[return-value]
+            return SubprocessJail()
         try:
             return DockerSandbox()
         except SandboxUnavailableError:

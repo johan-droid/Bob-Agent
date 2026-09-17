@@ -3,6 +3,8 @@
 > Handoff document for any autonomous agent resuming this build (v3.1 §37).
 > **Synced 2026-09-16** — all 21 phases implemented, **plus the architecture reconciliation pass (R)**. See `STATUS.md` for the full phase table and `ARCHITECTURE_RECONCILIATION.md` for the before/after architecture, divergence list, and capability/event/agent inventories.
 
+> **[Documentation authority — ADR-012]** As-built stack versions are defined by `BOB_HARNESS_BASELINE.md` (repo root, machine-derived) and the lockfiles (`web/package.json`, `backend/uv.lock`). The pre-implementation spec documents in `/documentations/` (e.g. "Next.js 15") are design history, **not** the version contract — the as-built dashboard is **Next.js 16.3 / React 19**. Never implement against a version quoted only in the spec documents.
+
 ## Current Phase
 
 **Build complete (Phases 0–21) + reconciliation (R).** Recent milestones:
