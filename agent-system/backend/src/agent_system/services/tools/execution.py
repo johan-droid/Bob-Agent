@@ -42,8 +42,6 @@ from agent_system.services.policy import (
     PolicyDecision,
     PolicyEngine,
     PolicyVerdict,
-    evaluate_and_authorize,
-    evaluate_policy,
     get_policy_engine,
 )
 from agent_system.services.tool_errors import (
@@ -178,7 +176,8 @@ def _build_policy_context(tool: Tool, args: dict[str, Any], ctx: ToolContext) ->
         requester=getattr(ctx, "agent_type", None) or "agent",
         authenticated=bool(getattr(ctx, "session_id", None)),
         permissions=getattr(ctx, "permissions", []),
-        workspace_path=getattr(ctx, "workspace_path", "") or getattr(ctx, "settings", {}).get("workspaces_dir", ""),
+        workspace_path=getattr(ctx, "workspace_path", "")
+        or getattr(ctx, "settings", {}).get("workspaces_dir", ""),
         network_required=getattr(ctx, "network_required", False),
         settings=getattr(ctx, "settings", None),
         factory=getattr(ctx, "factory", None),
@@ -203,7 +202,9 @@ def execute_with_policy(
     dimensions (risk, scope, approval, sandbox, identity, resource, timeout)
     before execution.
     """
-    engine = engine or get_policy_engine(factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None))
+    engine = engine or get_policy_engine(
+        factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None)
+    )
     policy_ctx = _build_policy_context(tool, args, ctx)
 
     # Full policy evaluation
@@ -236,7 +237,9 @@ def execute_request_with_policy(
     This is the Phase 3 replacement for :func:`execute_request` that uses
     the centralized PolicyEngine for all policy dimensions.
     """
-    engine = engine or get_policy_engine(factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None))
+    engine = engine or get_policy_engine(
+        factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None)
+    )
     policy_ctx = _build_policy_context(tool, request.arguments, ctx)
 
     # Evaluate policy (pure, no side effects)
@@ -245,18 +248,31 @@ def execute_request_with_policy(
     # Map PolicyDecision to ExecutionDecision for compatibility
     metadata = CapabilityMetadata.from_tool(tool, getattr(ctx, "settings", None))
     if decision.verdict is PolicyVerdict.DENY:
-        exec_decision = ExecutionDecision.deny(metadata, "; ".join(decision.denial_reasons), scope=decision.scope)
+        exec_decision = ExecutionDecision.deny(
+            metadata, "; ".join(decision.denial_reasons), scope=decision.scope
+        )
         return ExecutionResult.refuse(request, exec_decision)
     if decision.verdict is PolicyVerdict.AWAIT_APPROVAL:
         exec_decision = ExecutionDecision.await_approval(
-            metadata, decision.approval.reason, scope=decision.scope, approval_id=decision.approval.approval_id
+            metadata,
+            decision.approval.reason,
+            scope=decision.scope,
+            approval_id=decision.approval.approval_id,
         )
         return ExecutionResult.refuse(request, exec_decision)
-    if decision.verdict in (PolicyVerdict.INSUFFICIENT_IDENTITY, PolicyVerdict.RESOURCE_EXCEEDED, PolicyVerdict.TIMEOUT_EXCEEDED):
-        exec_decision = ExecutionDecision.deny(metadata, "; ".join(decision.denial_reasons), scope=decision.scope)
+    if decision.verdict in (
+        PolicyVerdict.INSUFFICIENT_IDENTITY,
+        PolicyVerdict.RESOURCE_EXCEEDED,
+        PolicyVerdict.TIMEOUT_EXCEEDED,
+    ):
+        exec_decision = ExecutionDecision.deny(
+            metadata, "; ".join(decision.denial_reasons), scope=decision.scope
+        )
         return ExecutionResult.refuse(request, exec_decision)
     if decision.verdict is PolicyVerdict.REQUIRES_SANDBOX:
-        exec_decision = ExecutionDecision.deny(metadata, "sandbox required but unavailable", scope=decision.scope)
+        exec_decision = ExecutionDecision.deny(
+            metadata, "sandbox required but unavailable", scope=decision.scope
+        )
         return ExecutionResult.refuse(request, exec_decision)
 
     # Allowed - execute
@@ -269,19 +285,44 @@ def execute_request_with_policy(
             outcome, exc.reason or "approval required", approval_id=exc.approval_id
         )
         payload = _permission_error(tool.name, effective, denied=exc.denied)
-        return ExecutionResult.refuse(request, effective, error=payload, duration_ms=_elapsed_ms(started))
+        return ExecutionResult.refuse(
+            request, effective, error=payload, duration_ms=_elapsed_ms(started)
+        )
     except ToolValidationError as exc:
-        effective = ExecutionDecision.invalid(metadata, tuple(exc.errors), reason="arguments failed schema validation")
-        return ExecutionResult.refuse(request, effective, error=exc.payload(), duration_ms=_elapsed_ms(started))
+        effective = ExecutionDecision.invalid(
+            metadata, tuple(exc.errors), reason="arguments failed schema validation"
+        )
+        return ExecutionResult.refuse(
+            request, effective, error=exc.payload(), duration_ms=_elapsed_ms(started)
+        )
     except ToolError as exc:
         payload = {"error": "tool_error", "tool": tool.name, "detail": str(exc)}
-        return ExecutionResult.failed(request, ExecutionDecision.allow(metadata, "execution failed"), payload, duration_ms=_elapsed_ms(started))
+        return ExecutionResult.failed(
+            request,
+            ExecutionDecision.allow(metadata, "execution failed"),
+            payload,
+            duration_ms=_elapsed_ms(started),
+        )
     except Exception as exc:
-        payload = {"error": "capability_crash", "tool": tool.name, "detail": f"{type(exc).__name__}: {exc}"}
-        return ExecutionResult.failed(request, ExecutionDecision.allow(metadata, "execution crashed"), payload, duration_ms=_elapsed_ms(started))
+        payload = {
+            "error": "capability_crash",
+            "tool": tool.name,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+        return ExecutionResult.failed(
+            request,
+            ExecutionDecision.allow(metadata, "execution crashed"),
+            payload,
+            duration_ms=_elapsed_ms(started),
+        )
 
     if "error" in output:
-        return ExecutionResult.failed(request, ExecutionDecision.allow(metadata, "handler returned error"), output, duration_ms=_elapsed_ms(started))
+        return ExecutionResult.failed(
+            request,
+            ExecutionDecision.allow(metadata, "handler returned error"),
+            output,
+            duration_ms=_elapsed_ms(started),
+        )
 
     # Success - map policy decision to execution decision
     effective = ExecutionDecision.allow(metadata, "allowed by policy", scope=decision.scope)
@@ -487,9 +528,7 @@ def _dispatch_request(
     return execute_request(tool, request, ctx)
 
 
-def run_tool_call(
-    call: ToolCall, registry: ToolRegistry, ctx: ToolContext
-) -> ExecutionResult:
+def run_tool_call(call: ToolCall, registry: ToolRegistry, ctx: ToolContext) -> ExecutionResult:
     """Unified entry for a parsed model call — any protocol, any tool kind.
 
     Provider-native calls and Bob-fenced calls both arrive as a ``ToolCall``;

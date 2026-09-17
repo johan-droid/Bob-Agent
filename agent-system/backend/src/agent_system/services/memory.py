@@ -235,7 +235,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     def __init__(self, model_name: str = MODEL_NAME) -> None:
         try:
-            from sentence_transformers import (  # type: ignore[import-not-found]
+            from sentence_transformers import (
                 SentenceTransformer,
             )
         except ImportError as exc:

@@ -295,3 +295,11 @@ class SubprocessJail:
             "stdout": logs[:MAX_OUTPUT_BYTES],
             "timed_out": False,
         }
+
+    def image_present(self, image: str) -> bool:
+        """SubprocessJail does not manage images."""
+        return False
+
+    def ensure_image(self, image: str, dockerfile: Any | None = None) -> bool:
+        """SubprocessJail does not manage images."""
+        raise SandboxUnavailableError("SubprocessJail does not support images")

@@ -154,6 +154,7 @@ class TestApiApprovalUnblocksCapability:
     def test_decision_survives_restart(self, factory: Any) -> None:
         gate = PermissionGate(factory=factory)
         record = gate.request(
+            ApprovalRequest(
                 requested_action="git_commit",
                 risk=Risk.MEDIUM,
                 scope="git:write:repo",
@@ -193,9 +194,7 @@ class TestNoCapabilityBypassesTheGate:
         with pytest.raises(NeedsApprovalError):
             execute_tool(tool, args, ctx)
 
-    def test_read_tier_capability_runs_without_a_grant(
-        self, factory: Any, tmp_path: Path
-    ) -> None:
+    def test_read_tier_capability_runs_without_a_grant(self, factory: Any, tmp_path: Path) -> None:
         """Read-tier tools are never gated — ``task_status`` reads real state
         without any approval record, where a mutating tool would be refused."""
         from agent_system.infra.db import session_scope

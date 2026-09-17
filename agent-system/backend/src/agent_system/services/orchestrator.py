@@ -117,9 +117,7 @@ class Supervisor:
         # Planner consults the Model Layer first (LLM DAG) with deterministic
         # fallback; the bus + factory let the model call be recorded with the
         # target session id for cost accounting.
-        plan = Planner(settings).plan(
-            goal, factory=factory, bus=self._bus, session_id=session_id
-        )
+        plan = Planner(settings).plan(goal, factory=factory, bus=self._bus, session_id=session_id)
         target_session = session_id or self.create_session(factory, goal)
         try:
             known = set(build_registry(settings).names()) if settings is not None else None
@@ -595,7 +593,11 @@ class Orchestrator:
                     task_id=task_id,
                     agent_run_id=run_id,
                     actor="verifier",
-                    payload={"passed": False, "reason": verification.reason, "mode": verification.mode},
+                    payload={
+                        "passed": False,
+                        "reason": verification.reason,
+                        "mode": verification.mode,
+                    },
                 ),
                 db,
             )

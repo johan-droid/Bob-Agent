@@ -188,21 +188,21 @@ def setup_telemetry(settings: Any | None = None, app: Any | None = None) -> Tele
 def _wire_otel(endpoint: str, app: Any | None) -> Metrics:
     """Build OTel-backed Metrics + auto-instrumentation (raises when unavailable)."""
     try:
-        from opentelemetry import metrics as _otel_metrics  # type: ignore[import-not-found]
+        from opentelemetry import metrics as _otel_metrics
         from opentelemetry import trace as _otel_trace
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (  # type: ignore[import-not-found]
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
             OTLPMetricExporter,
         )
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found]
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
-        from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-not-found]
-        from opentelemetry.sdk.metrics.export import (  # type: ignore[import-not-found]
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import (
             PeriodicExportingMetricReader,
         )
-        from opentelemetry.sdk.resources import Resource  # type: ignore[import-not-found]
-        from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-not-found]
-        from opentelemetry.sdk.trace.export import (  # type: ignore[import-not-found]
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import (
             BatchSpanProcessor,
         )
     except ImportError as exc:
@@ -251,7 +251,7 @@ def _instrument_app(app: Any) -> list[str]:
     """Best-effort FastAPI + SQLAlchemy + httpx auto-instrumentation."""
     warnings: list[str] = []
     try:
-        from opentelemetry.instrumentation.fastapi import (  # type: ignore[import-not-found]
+        from opentelemetry.instrumentation.fastapi import (
             FastAPIInstrumentor,
         )
 
@@ -259,7 +259,7 @@ def _instrument_app(app: Any) -> list[str]:
     except Exception as exc:
         warnings.append(f"fastapi instrumentation skipped: {exc}")
     try:
-        from opentelemetry.instrumentation.sqlalchemy import (  # type: ignore[import-not-found]
+        from opentelemetry.instrumentation.sqlalchemy import (
             SQLAlchemyInstrumentor,
         )
 
@@ -267,7 +267,7 @@ def _instrument_app(app: Any) -> list[str]:
     except Exception as exc:
         warnings.append(f"sqlalchemy instrumentation skipped: {exc}")
     try:
-        from opentelemetry.instrumentation.httpx import (  # type: ignore[import-not-found]
+        from opentelemetry.instrumentation.httpx import (
             HTTPXClientInstrumentor,
         )
 

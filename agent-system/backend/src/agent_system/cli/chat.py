@@ -772,9 +772,7 @@ def _one_shot(goal: str, watch: bool = False) -> None:
         state = ChatState(session_id=created["id"], session_goal=goal, cursor=0, running=True)
         try:
             api_request("POST", f"/api/v1/sessions/{created['id']}/plan")
-            tasks = api_request(
-                "GET", "/api/v1/tasks", params={"session_id": created["id"]}
-            )
+            tasks = api_request("GET", "/api/v1/tasks", params={"session_id": created["id"]})
             for task in tasks or []:
                 if task.get("state") in ("PENDING", "QUEUED", "FAILED"):
                     try:

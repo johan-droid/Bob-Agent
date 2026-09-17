@@ -89,9 +89,7 @@ class Verifier:
                     "strict mode: no verifiable artifact or judge available",
                     mode="strict",
                 )
-            return VerificationResult(
-                True, "no verifiable artifact; lenient pass", mode="lenient"
-            )
+            return VerificationResult(True, "no verifiable artifact; lenient pass", mode="lenient")
         except Exception as exc:  # verifier crash must not wedge execution
             if self.strict:
                 return VerificationResult(
@@ -128,9 +126,7 @@ class Verifier:
                 )
         status = str(result.get("status") or "").upper()
         if status in ("FAIL", "FAILED", "ERROR"):
-            return VerificationResult(
-                False, f"result status={status}", mode="deterministic"
-            )
+            return VerificationResult(False, f"result status={status}", mode="deterministic")
         return None  # no deterministic signal -> continue to QA / judge / lenient
 
     # -- QAAgent path ------------------------------------------------------
@@ -179,9 +175,7 @@ class Verifier:
                 from agent_system.infra.db import session_scope
                 from agent_system.infra.models import QAReport
 
-                row = qa_report_to_row(
-                    qa_result, task_id=task_id, code_file=str(source)
-                )
+                row = qa_report_to_row(qa_result, task_id=task_id, code_file=str(source))
                 with session_scope(factory) as db:
                     db.add(QAReport(**row))
         except Exception:
@@ -227,11 +221,11 @@ class Verifier:
             if router is None or factory is None:
                 return None
             model_id = self._resolve_model_id()
-            goal = str((task_input or {}).get("goal") or (task_input or {}).get("title") or "")[:2000]
+            goal = str((task_input or {}).get("goal") or (task_input or {}).get("title") or "")[
+                :2000
+            ]
             output = _json.dumps(result or {}, default=str)[:4000]
-            prompt = (
-                f"{JUDGE_SYSTEM_PROMPT}\n\nGoal:\n{goal}\n\nResult:\n{output}\n\nJSON:"
-            )
+            prompt = f"{JUDGE_SYSTEM_PROMPT}\n\nGoal:\n{goal}\n\nResult:\n{output}\n\nJSON:"
             invocation = router.invoke(
                 factory,
                 model_id,

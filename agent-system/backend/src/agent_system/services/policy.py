@@ -17,35 +17,38 @@ through :func:`evaluate_policy` which returns a :class:`PolicyDecision`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_system.config import get_settings
-from agent_system.domain.events import utcnow
-from agent_system.domain.ids import new_approval_id, new_policy_decision_id
+from agent_system.domain.ids import new_policy_decision_id
 from agent_system.services.permissions import (
+    DANGEROUS_SCOPES,
     ApprovalRecord,
     ApprovalRequest,
     CapabilityRisk,
     Decision,
-    DANGEROUS_SCOPES,
     Outcome,
     PermissionDecision,
     PermissionGate,
-    Policy as ApprovalPolicy,
     Risk,
     classify_risk,
-    gate_for,
     is_dangerous_scope,
-    require_capability,
 )
-from agent_system.services.sandbox import DockerSandbox, SandboxError, SandboxUnavailableError, SubprocessJail
+from agent_system.services.permissions import (
+    Policy as ApprovalPolicy,
+)
+from agent_system.services.sandbox import (
+    DockerSandbox,
+    SandboxUnavailableError,
+    SubprocessJail,
+)
 
 if TYPE_CHECKING:
-    from agent_system.services.tools.registry import Tool, ToolContext, ToolKind
+    from agent_system.services.tools.registry import Tool
 
 
 class SandboxBackend(StrEnum):
@@ -242,7 +245,7 @@ class PolicyDecision:
                 "is_dangerous_scope": self.risk.is_dangerous_scope,
                 "reason": self.risk.reason,
             },
-            "scope": {
+            "scope_eval": {
                 "scope": self.scope_eval.scope,
                 "is_dangerous": self.scope_eval.is_dangerous,
                 "is_default_deny": self.scope_eval.is_default_deny,
@@ -252,7 +255,9 @@ class PolicyDecision:
                 "outcome": self.approval.outcome.value,
                 "approval_id": self.approval.approval_id,
                 "policy": self.approval.policy.value if self.approval.policy else None,
-                "expires_at": self.approval.expires_at.isoformat() if self.approval.expires_at else None,
+                "expires_at": self.approval.expires_at.isoformat()
+                if self.approval.expires_at
+                else None,
                 "reason": self.approval.reason,
             },
             "sandbox": {
@@ -307,7 +312,7 @@ class PolicyContext(BaseModel):
 
     # Tool identification
     tool_name: str
-    tool: "Tool | None" = None
+    tool: Tool | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
 
     # Identity
@@ -379,7 +384,7 @@ class PolicyEngine:
     def _default_sandbox_provider(self) -> SandboxProvider | None:
         """Create the default sandbox provider based on settings."""
         if self._settings.heroku_jail:
-            return SubprocessJail()
+            return SubprocessJail()  # type: ignore[return-value]
         try:
             return DockerSandbox()
         except SandboxUnavailableError:
@@ -429,8 +434,11 @@ class PolicyEngine:
             scope=scope,
             is_dangerous=dangerous,
             is_default_deny=default_deny,
-            reason="dangerous scope (default-deny)" if dangerous else "destructive capability (default-deny)"
-            if default_deny else "allowed scope",
+            reason="dangerous scope (default-deny)"
+            if dangerous
+            else "destructive capability (default-deny)"
+            if default_deny
+            else "allowed scope",
         )
 
     def _evaluate_approval(
@@ -465,7 +473,11 @@ class PolicyEngine:
         if tool is not None:
             requires_approval = tool.permission_required(self._settings)
         elif ctx.capability_risk is not None:
-            tier = ctx.capability_risk if isinstance(ctx.capability_risk, CapabilityRisk) else CapabilityRisk.EXECUTE
+            tier = (
+                ctx.capability_risk
+                if isinstance(ctx.capability_risk, CapabilityRisk)
+                else CapabilityRisk.EXECUTE
+            )
             requires_approval = tier in (CapabilityRisk.WRITE, CapabilityRisk.EXECUTE)
 
         if not requires_approval:
@@ -510,7 +522,11 @@ class PolicyEngine:
         if tool is not None:
             requires_sandbox = tool.tier in (CapabilityRisk.EXECUTE, CapabilityRisk.DESTRUCTIVE)
         elif ctx.capability_risk is not None:
-            tier = ctx.capability_risk if isinstance(ctx.capability_risk, CapabilityRisk) else CapabilityRisk.EXECUTE
+            tier = (
+                ctx.capability_risk
+                if isinstance(ctx.capability_risk, CapabilityRisk)
+                else CapabilityRisk.EXECUTE
+            )
             requires_sandbox = tier in (CapabilityRisk.EXECUTE, CapabilityRisk.DESTRUCTIVE)
 
         # Shell tools always require sandbox
@@ -554,7 +570,9 @@ class PolicyEngine:
             memory_limit_mb=settings.max_container_memory_mb,
             pids_limit=128,
             network_allowed=ctx.network_required,
-            timeout_seconds=tool.timeout_seconds if tool and tool.timeout_seconds else settings.max_execution_time_seconds,
+            timeout_seconds=tool.timeout_seconds
+            if tool and tool.timeout_seconds
+            else settings.max_execution_time_seconds,
             workspace_path=ctx.workspace_path,
             reason=f"tier={risk_eval.capability_tier.value} requires sandbox",
         )
@@ -622,13 +640,17 @@ class PolicyEngine:
 
         # Approval TTL based on risk level
         from agent_system.services.permissions import RISK_TTL_MINUTES
+
         approval_ttl = RISK_TTL_MINUTES.get(risk_eval.level, 15)
 
         return TimeoutEvaluation(
             execution_timeout_seconds=execution_timeout,
             approval_ttl_minutes=approval_ttl,
             idle_timeout_seconds=None,  # Could be configured per-session
-            reason=f"risk={risk_eval.level.value} -> approval_ttl={approval_ttl}min, exec_timeout={execution_timeout}s",
+            reason=(
+                f"risk={risk_eval.level.value} -> "
+                f"approval_ttl={approval_ttl}min, exec_timeout={execution_timeout}s"
+            ),
         )
 
     # ------------------------------------------------------------------------
@@ -663,8 +685,14 @@ class PolicyEngine:
             denial_reasons.extend([f"resource limit exceeded: {r}" for r in resource_eval.exceeded])
 
         # Identity check for dangerous operations
-        if scope_eval.is_dangerous and identity_eval.tier in (IdentityTier.ANONYMOUS, IdentityTier.SESSION):
-            denial_reasons.append(f"dangerous scope requires authenticated agent (current: {identity_eval.tier.value})")
+        if scope_eval.is_dangerous and identity_eval.tier in (
+            IdentityTier.ANONYMOUS,
+            IdentityTier.SESSION,
+        ):
+            denial_reasons.append(
+                f"dangerous scope requires authenticated agent "
+                f"(current: {identity_eval.tier.value})"
+            )
 
         # Determine final verdict
         if denial_reasons:
@@ -688,7 +716,10 @@ class PolicyEngine:
         # Warnings
         if sandbox_eval.required and sandbox_eval.backend is SandboxBackend.SUBPROCESS_JAIL:
             warnings.append("running in subprocess jail (no container isolation)")
-        if approval_eval.outcome is Outcome.ALLOW and approval_eval.policy == ApprovalPolicy.ALLOW_ONCE:
+        if (
+            approval_eval.outcome is Outcome.ALLOW
+            and approval_eval.policy == ApprovalPolicy.ALLOW_ONCE
+        ):
             warnings.append("approval is single-use (ALLOW_ONCE)")
 
         return PolicyDecision(
@@ -713,7 +744,9 @@ class PolicyEngine:
             metadata=ctx.metadata or {},
         )
 
-    def evaluate_and_authorize(self, ctx: PolicyContext) -> tuple[PolicyDecision, ApprovalRecord | None]:
+    def evaluate_and_authorize(
+        self, ctx: PolicyContext
+    ) -> tuple[PolicyDecision, ApprovalRecord | None]:
         """Evaluate policy and, if allowed, return the granting approval record.
 
         Returns (decision, grant_record). If decision.allowed is False,
@@ -836,7 +869,9 @@ def get_policy_engine(
     """Get or create the global policy engine instance."""
     global _policy_engine
     if _policy_engine is None:
-        _policy_engine = PolicyEngine(factory=factory, sandbox_provider=sandbox_provider, settings=settings)
+        _policy_engine = PolicyEngine(
+            factory=factory, sandbox_provider=sandbox_provider, settings=settings
+        )
     return _policy_engine
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 
@@ -11,8 +11,10 @@ from agent_system.services.permissions import (
     CapabilityRisk,
     Outcome,
     PermissionGate,
-    Policy as ApprovalPolicy,
     Risk,
+)
+from agent_system.services.permissions import (
+    Policy as ApprovalPolicy,
 )
 from agent_system.services.policy import (
     IdentityTier,
@@ -20,9 +22,7 @@ from agent_system.services.policy import (
     PolicyDecision,
     PolicyEngine,
     PolicyVerdict,
-    RiskEvaluation,
     SandboxBackend,
-    ScopeEvaluation,
     evaluate_policy,
     get_policy_engine,
     reset_policy_engine,
@@ -42,7 +42,11 @@ class TestPolicyEngine:
         self.mock_tool = Tool(
             name="test_tool",
             description="A test tool",
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
             risk="write",
             handler=lambda args, ctx: {"result": "ok"},
             scope="test:scope",
@@ -282,6 +286,7 @@ class TestPolicyEngine:
         # Pre-approve via the permission gate - first request, then decide
         gate = PermissionGate(factory=None)
         from agent_system.services.permissions import ApprovalRequest, Risk
+
         req = ApprovalRequest(
             requested_action="write_tool test:write",
             risk=Risk.MEDIUM,
@@ -297,7 +302,7 @@ class TestPolicyEngine:
         )
 
         # Now evaluate - should be allowed (but note: the engine creates new requests each time)
-        decision = self.engine.evaluate(ctx)
+        _ = self.engine.evaluate(ctx)
         # The test is limited because the engine creates new requests with new IDs
         # The real test would need to match the exact request parameters
 
@@ -379,7 +384,11 @@ class TestPolicyEngine:
         ctx = self._make_context(tool=tool, arguments={})
         decision = self.engine.evaluate(ctx)
         # Backend will be DOCKER if available, SUBPROCESS_JAIL if heroku_jail, NONE otherwise
-        assert decision.sandbox.backend in (SandboxBackend.DOCKER, SandboxBackend.SUBPROCESS_JAIL, SandboxBackend.NONE)
+        assert decision.sandbox.backend in (
+            SandboxBackend.DOCKER,
+            SandboxBackend.SUBPROCESS_JAIL,
+            SandboxBackend.NONE,
+        )
 
     # ------------------------------------------------------------------------
     # Identity evaluation
@@ -429,9 +438,7 @@ class TestPolicyEngine:
 
     def test_resource_exceeded_flagged(self) -> None:
         """Exceeded resource limits are flagged."""
-        ctx = self._make_context(
-            metadata={"current_usage": {"concurrent_agents": 1000}}
-        )
+        ctx = self._make_context(metadata={"current_usage": {"concurrent_agents": 1000}})
         decision = self.engine.evaluate(ctx)
         assert "max_concurrent_agents" in decision.resource.exceeded
 
@@ -632,6 +639,7 @@ class TestPolicyEngineIntegration:
     def _make_settings(self) -> Any:
         """Create a proper settings object for testing."""
         from agent_system.config import Settings
+
         return Settings(
             tools_require_approval=True,
             heroku_jail=False,
@@ -667,7 +675,11 @@ class TestPolicyEngineIntegration:
         tool = Tool(
             name="read_tool",
             description="Read tool",
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
             risk="read",
             handler=lambda args, ctx: {"output": args["text"]},
             scope="test:read",
@@ -687,7 +699,11 @@ class TestPolicyEngineIntegration:
         tool = Tool(
             name="write_tool",
             description="Write tool",
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
             risk="write",
             handler=lambda args, ctx: {"output": args["text"]},
             scope="test:write",
@@ -709,7 +725,11 @@ class TestPolicyEngineIntegration:
         tool = Tool(
             name="destroy_tool",
             description="Destructive tool",
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
             risk="destructive",
             handler=lambda args, ctx: {"output": args["text"]},
             scope="test:destroy",

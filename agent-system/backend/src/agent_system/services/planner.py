@@ -345,9 +345,7 @@ class Planner:
             allowed = f" Allowed required_capabilities: {', '.join(names[:80])}."
         except Exception:
             pass
-        return (
-            f"{PLANNER_SYSTEM_PROMPT}{allowed}\n\nGoal:\n{goal[:2000]}\n\nJSON:"
-        )
+        return f"{PLANNER_SYSTEM_PROMPT}{allowed}\n\nGoal:\n{goal[:2000]}\n\nJSON:"
 
     def _parse_llm_plan(self, goal: str, output: str, model_id: str) -> TaskPlan | None:
         try:
@@ -375,13 +373,13 @@ class Planner:
             if not key or key in keys:
                 return None
             keys.add(key)
-            caps = tuple(
-                str(c) for c in (raw.get("required_capabilities") or []) if str(c).strip()
-            )
+            caps = tuple(str(c) for c in (raw.get("required_capabilities") or []) if str(c).strip())
             if known_caps is not None:
                 caps = tuple(c for c in caps if c in known_caps)
             deps = tuple(str(d) for d in (raw.get("depends_on") or []) if str(d).strip())
-            if any(d not in keys and d != key for d in deps if d not in [t.key for t in tasks] + [key]):
+            if any(
+                d not in keys and d != key for d in deps if d not in [t.key for t in tasks] + [key]
+            ):
                 # Forward/unknown refs are rejected; keep only already-seen keys.
                 deps = tuple(d for d in deps if d in keys)
             risk = str(raw.get("risk") or "LOW").upper()

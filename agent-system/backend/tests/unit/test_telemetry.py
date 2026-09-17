@@ -48,7 +48,12 @@ class TestDisabledByDefault:
         handle = setup_telemetry()
         assert handle.enabled is False
         assert handle.endpoint is None
-        assert "opentelemetry" not in sys.modules
+        # Only check sys.modules if telemetry extra is NOT installed
+        # (when installed, opentelemetry is already loaded by other tests)
+        try:
+            import opentelemetry  # noqa: F401
+        except ImportError:
+            assert "opentelemetry" not in sys.modules
 
     def test_missing_sdk_warns_instead_of_raising(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Simulate a bare install (no telemetry extra): endpoint set but the

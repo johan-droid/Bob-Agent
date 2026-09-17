@@ -520,9 +520,7 @@ def run_task(task_id: str, request: Request) -> TaskOut:
                 db,
             )
         elif current != TaskState.QUEUED:
-            raise HTTPException(
-                status_code=409, detail=f"cannot run task in state {current.value}"
-            )
+            raise HTTPException(status_code=409, detail=f"cannot run task in state {current.value}")
     try:
         from agent_system.services.task_runner import kick_task
 
