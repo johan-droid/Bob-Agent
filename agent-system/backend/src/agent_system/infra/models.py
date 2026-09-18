@@ -390,12 +390,7 @@ class WorkerAttempt(Base):
 
 
 class SwarmMember(Base):
-    """Bounded-swarm membership (Agentic Runtime v1, additive).
-
-    Child tasks remain ordinary rows in ``tasks`` (same lifecycle, same
-    permissions, same verifier); this table only records that a worker task
-    belongs to a master task, with its role and verification state.
-    """
+    """Swarm membership: master-verified bounded fan-out (Agentic Runtime v1)."""
 
     __tablename__ = "swarm_members"
 
@@ -558,3 +553,31 @@ class DeliveryOutbox(Base):
     claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = _ts()
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Telegram Gateway E2E linkage (additive): which task produced this
+    # message and which inbound message it replies to.
+    task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class TelegramGatewayMessage(Base):
+    """First-class Telegram gateway state for one inbound update (additive).
+
+    The durable pipeline: PERSIST the update -> ACK/PROCESS -> CREATE OR
+    RESUME TASK -> ... -> DELIVER. This table is the update -> session ->
+    task linkage that makes ingest idempotent (one Telegram update creates
+    exactly one Bob task) and lets recovery find what a crashed dyno left
+    half-done. ``telegram_updates`` (raw ingest ledger) remains untouched.
+    """
+
+    __tablename__ = "telegram_gateway_messages"
+    __table_args__ = (UniqueConstraint("telegram_update_id", name="uq_tgm_update_id"),)
+
+    id: Mapped[str] = _pk()
+    telegram_update_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    received_at: Mapped[datetime] = _ts()
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    processing_status: Mapped[str] = mapped_column(String(16), default="RECEIVED", nullable=False)

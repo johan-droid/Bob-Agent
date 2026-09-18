@@ -1,0 +1,553 @@
+"""Telegram Gateway Pipeline: durable relay between Telegram and Bob core.
+
+Pipeline (persist -> ack -> task -> execute -> persist result -> outbound ->
+deliver -> mark delivered):
+
+    Telegram Update
+      -> ``telegram_updates`` ledger (persist + idempotency gate)
+      -> :class:`GatewayExecutor` claims unprocessed rows
+      -> Session + master task via the normal Supervisor (durable)
+      -> "Task created: #id" ack (durable outbox)
+      -> ``drive_session`` (Agent Runtime: LLM router / skills / MCP / swarm)
+      -> ``task.completed`` / ``task.failed`` / ``approval.requested`` events
+         queued at emit-time and flushed by :class:`GatewayRelay`
+      -> ``DeliveryOutbox`` (persist result) -> Telegram API -> delivered
+
+Crash safety: every stage is durable. ``recover()`` re-drives sessions of
+unprocessed updates, replays relay-able events from the append-only event
+store, and the outbox re-delivers unsent messages — so "agent finished but
+Telegram never received it" self-heals after a dyno restart.
+
+Locking note: the EventBus fans subscribers out INSIDE the emitter's
+transaction. On SQLite a second-connection write at that point would wait on
+the emitter's write lock (callbacks block the commit -> busy-timeout loss).
+The relay therefore only queues in memory at emit-time and persists to the
+outbox in ``flush()`` — called by the executor after the drive loop returns
+and by ``recover()``. The event store remains the source of truth either way.
+
+Telegram is only an interface: no business logic lives here — the same Bob
+engine serves Telegram / Web / CLI / API.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import deque
+from typing import Any
+
+from agent_system.config import Settings
+from agent_system.domain.events import Event
+from agent_system.domain.ids import new_id
+from agent_system.infra.db import session_scope
+from agent_system.infra.event_bus import EventBus
+from agent_system.infra.models import (
+    Approval,
+    DeliveryOutbox,
+    EventRow,
+    Session,
+    Task,
+    TelegramGatewayMessage,
+    TelegramUpdate,
+)
+from agent_system.services.identity import Role
+
+_logger = logging.getLogger(__name__)
+
+KIND_TASK_ACK = "command_response"
+KIND_RESULT = "notification"
+
+RELAYED_EVENT_TYPES = ("task.completed", "task.failed", "approval.requested")
+
+
+def record_session_chat(factory: Any, session_id: str, chat_id: int) -> None:
+    """Durable chat<->session mapping (Telegram Gateway E2E, additive).
+
+    Called by the Telegram interface when a session is created from a chat.
+    Writes a ``telegram_gateway_messages`` row (no update id — this is the
+    session-level binding) so the result relay can find the chat even after a
+    restart, independent of the per-update ingest ledger. Idempotent: a
+    session is bound at most once per chat.
+    """
+    from agent_system.domain.events import utcnow
+
+    with session_scope(factory) as db:
+        existing = (
+            db.query(TelegramGatewayMessage.id)
+            .filter(
+                TelegramGatewayMessage.session_id == session_id,
+                TelegramGatewayMessage.chat_id == str(chat_id),
+            )
+            .first()
+        )
+        if existing is not None:
+            return
+        db.add(
+            TelegramGatewayMessage(
+                id=new_id("tgm"),
+                telegram_update_id=None,
+                chat_id=str(chat_id),
+                session_id=session_id,
+                received_at=utcnow(),
+                processing_status="DISPATCHED",
+            )
+        )
+
+
+class GatewayRelay:
+    """Event -> Telegram fan-out (acks out of scope; results + approvals).
+
+    Emit-time: queue only (no DB — see module locking note). Flush-time:
+    persist one outbound message per event, resolved chat-first: Task ->
+    Session.owner -> latest ingest row for that owner. Delivery itself goes
+    through the outbox so a Telegram API failure retries without losing the
+    message.
+    """
+
+    def __init__(self, factory: Any, outbox: Any, bus: EventBus) -> None:
+        self._factory = factory
+        self._outbox = outbox
+        self._bus = bus
+        self._active = False
+        self._pending: deque[Event] = deque()
+
+    def start(self) -> None:
+        if self._active:
+            return
+        for event_type in RELAYED_EVENT_TYPES:
+            self._bus.subscribe(event_type, self._on_event)
+        self._active = True
+
+    def stop(self) -> None:
+        self._active = False
+
+    # -- emit-time: queue only ------------------------------------------------
+
+    def _on_event(self, event: Event) -> None:
+        try:
+            if event.type == "approval.requested" or event.type in (
+                "task.completed",
+                "task.failed",
+            ):
+                self._pending.append(event)
+        except Exception:  # pragma: no cover - queueing cannot fail
+            _logger.exception("gateway relay queue failed for %s", event.type)
+
+    # -- flush-time: durable enqueue -------------------------------------------
+
+    def flush(self) -> int:
+        """Persist all queued events to the outbox. Returns rows enqueued."""
+        enqueued = 0
+        while self._pending:
+            event = self._pending.popleft()
+            try:
+                if self._relay(event):
+                    enqueued += 1
+            except Exception:
+                _logger.exception("gateway relay flush failed for %s", event.type)
+        return enqueued
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def _relay(self, event: Event) -> bool:
+        if event.type == "approval.requested":
+            return self._relay_approval(event)
+        return self._relay_result(event)
+
+    # -- chat resolution -------------------------------------------------------
+
+    def _chat_for_owner(self, owner: str | None) -> int | None:
+        """Bob user id -> provisioned Telegram chat (primary resolution).
+
+        ``owner_user_id`` is a Bob user id; the TelegramAccount link table is
+        the authoritative owner -> chat mapping (same resolution the legacy
+        broadcast path uses). Unknown/inactive/blocked owners get no chat.
+        """
+        if owner is None:
+            return None
+        from agent_system.infra.models import TelegramAccount, User
+
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramAccount)
+                .join(User, TelegramAccount.user_id == User.id)
+                .filter(
+                    TelegramAccount.user_id == str(owner),
+                    TelegramAccount.role != Role.BLOCKED.value,
+                    User.is_active.is_(True),
+                    TelegramAccount.chat_id.isnot(None),
+                )
+                .first()
+            )
+            if row is None or row.chat_id is None:
+                return None
+            try:
+                return int(row.chat_id)
+            except (TypeError, ValueError):
+                return None
+
+    def _chat_for_task(self, task_id: str) -> int | None:
+        """Resolve the Telegram chat that owns a task.
+
+        Gateway-state first (``telegram_gateway_messages``), then the
+        owner -> latest-ingest fallback so pre-gateway data keeps working.
+        """
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.task_id == task_id)
+                .order_by(TelegramGatewayMessage.received_at.desc())
+                .first()
+            )
+            if row is not None and row.chat_id is not None:
+                try:
+                    return int(row.chat_id)
+                except (TypeError, ValueError):
+                    pass
+            task = db.get(Task, task_id)
+            if task is None:
+                return None
+            session = db.get(Session, task.session_id)
+            owner = session.owner_user_id if session is not None else None
+        return self._chat_for_owner(owner)
+
+    def _chat_for_approval(self, approval_id: str) -> int | None:
+        with session_scope(self._factory) as db:
+            approval = db.get(Approval, approval_id)
+            if approval is None:
+                return None
+            owner = approval.owner_user_id
+            task_id = approval.task_id
+        if owner is not None:
+            chat = self._chat_for_owner(owner)
+            if chat is not None:
+                return chat
+        if not task_id:
+            return None
+        return self._chat_for_task(task_id)
+
+    # -- relay targets ---------------------------------------------------------
+
+    def _relay_result(self, event: Event) -> bool:
+        task_id = event.task_id
+        if not task_id:
+            return False
+        chat_id = self._chat_for_task(task_id)
+        if chat_id is None:
+            return False
+        if event.type == "task.completed":
+            output = str(event.payload.get("output") or "Task completed.")
+            text = f"✅ Task {task_id} completed\n\n{output[:3500]}"
+        else:
+            error = str(event.payload.get("error") or "unknown error")
+            text = f"❌ Task {task_id} failed\n\n{error[:3500]}"
+        self._outbox.enqueue(
+            kind=KIND_RESULT,
+            chat_id=int(chat_id),
+            text=text[:4000],
+            task_id=task_id,
+            event_id=event.event_id,
+        )
+        return True
+
+    def _relay_approval(self, event: Event) -> bool:
+        approval_id = str(event.payload.get("approval_id") or event.payload.get("id") or "")
+        if not approval_id:
+            return False
+        chat_id = self._chat_for_approval(approval_id)
+        if chat_id is None:
+            return False
+        action = str(
+            event.payload.get("requested_action") or event.payload.get("action") or "action"
+        )
+        self._outbox.enqueue(
+            kind="approval",
+            chat_id=int(chat_id),
+            text=(f"⚠️ Approval required\n\nWorker wants to:\n`{action[:600]}`")[:4000],
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Approve", "callback_data": f"approve:{approval_id}"},
+                        {"text": "Deny", "callback_data": f"deny:{approval_id}"},
+                    ]
+                ]
+            },
+            task_id=event.task_id,
+            event_id=event.event_id,
+        )
+        return True
+
+    # -- recovery: replay from the append-only event store ---------------------
+
+    def replay(self, within_minutes: int = 1440) -> int:
+        """Re-enqueue relay-able events missing an outbox row (restart path).
+
+        The event store is the source of truth: if the process died between a
+        task completing and its result reaching the outbox, ``replay()`` finds
+        the unrelayed events and enqueues them. Deduped by ``event_id``.
+        """
+        from datetime import timedelta
+
+        from agent_system.domain.events import utcnow
+
+        cutoff = utcnow() - timedelta(minutes=within_minutes)
+        enqueued = 0
+        with session_scope(self._factory) as db:
+            rows = (
+                db.query(EventRow)
+                .filter(EventRow.type.in_(RELAYED_EVENT_TYPES), EventRow.timestamp >= cutoff)
+                .order_by(EventRow.sequence)
+                .all()
+            )
+            candidates = [
+                Event(
+                    event_id=r.event_id,
+                    schema_version=r.schema_version,
+                    session_id=r.session_id,
+                    task_id=r.task_id,
+                    agent_run_id=r.agent_run_id,
+                    timestamp=r.timestamp,
+                    type=r.type,
+                    actor=r.actor,
+                    payload=r.payload or {},
+                )
+                for r in rows
+            ]
+        for event in candidates:
+            with session_scope(self._factory) as db:
+                # Dedup: skip events that already produced an outbox row.
+                has_outbox = (
+                    db.query(DeliveryOutbox.id)
+                    .filter(DeliveryOutbox.event_id == event.event_id)
+                    .first()
+                    is not None
+                )
+            if has_outbox:
+                continue
+            try:
+                if self._relay(event):
+                    enqueued += 1
+            except Exception:
+                _logger.exception("gateway replay failed for %s", event.event_id)
+        return enqueued
+
+
+class GatewayExecutor:
+    """Durable update -> task executor (works without a bot token).
+
+    Claims unprocessed rows from the ``telegram_updates`` ledger, creates
+    exactly one durable Session + master task per goal, acknowledges via the
+    outbox, drives the session through the normal Bob runtime, flushes relayed
+    results, and marks the update processed only after execution. Re-running
+    is safe: processed rows are skipped, so a retried update never duplicates
+    a task.
+    """
+
+    def __init__(self, settings: Settings, factory: Any, bus: EventBus) -> None:
+        self._settings = settings
+        self._factory = factory
+        self._bus = bus
+        from agent_system.services.outbox import Outbox
+
+        self._outbox = Outbox(factory, settings)
+        self._relay = GatewayRelay(factory, self._outbox, bus)
+
+    @property
+    def relay(self) -> GatewayRelay:
+        return self._relay
+
+    @property
+    def outbox(self) -> Any:
+        return self._outbox
+
+    def start(self) -> None:
+        self._relay.start()
+
+    def stop(self) -> None:
+        self._relay.stop()
+
+    # -- chat resolution (executor side) ---------------------------------------
+
+    def _owner_and_chat(
+        self, update_id: int
+    ) -> tuple[str | None, int | None, str | None, int | None, str]:
+        """Owner account id + chat id + user id + message id + goal text."""
+        with session_scope(self._factory) as db:
+            row = db.get(TelegramUpdate, update_id)
+            if row is None:
+                return None, None, None, None, ""
+            payload = row.payload_json or {}
+            message = payload.get("message") or {}
+            text = str(message.get("text") or "").strip()
+            chat_raw = row.chat_id or (message.get("chat") or {}).get("id")
+            account_id = row.account_id
+            from_user = message.get("from") or {}
+            if account_id is None:
+                account_id = str(from_user.get("id")) if from_user.get("id") else None
+            user_id = str(from_user.get("id")) if from_user.get("id") else None
+            message_id = message.get("message_id")
+            try:
+                chat_id = int(chat_raw) if chat_raw is not None else None
+            except (TypeError, ValueError):
+                chat_id = None
+            try:
+                message_id = int(message_id) if message_id is not None else None
+            except (TypeError, ValueError):
+                message_id = None
+            return account_id, chat_id, user_id, message_id, text
+
+    # -- pipeline stages --------------------------------------------------------
+
+    def process_pending(self, limit: int = 20) -> int:
+        """Claim and execute unprocessed updates. Returns count processed."""
+        with session_scope(self._factory) as db:
+            pending = (
+                db.query(TelegramUpdate.update_id)
+                .filter(TelegramUpdate.processed_at.is_(None))
+                .order_by(TelegramUpdate.update_id)
+                .limit(limit)
+                .all()
+            )
+        processed = 0
+        for (update_id,) in pending:
+            try:
+                self._process_one(int(update_id))
+                processed += 1
+            except Exception:
+                _logger.exception("gateway executor failed for update %s", update_id)
+        return processed
+
+    def _resolve_owner(self, account_id: str | None) -> str | None:
+        """Authenticate the ledger account: TelegramAccount -> active Bob user.
+
+        The telegram user id in an update payload is identity, never
+        authorization — it is re-verified server-side at execution time.
+        Unknown, inactive or blocked accounts are never executed (deny by
+        default, no oracle to probing senders).
+        """
+        if not account_id:
+            return None
+        from agent_system.infra.models import TelegramAccount, User
+
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramAccount.user_id, User.is_active, User.role)
+                .join(User, TelegramAccount.user_id == User.id)
+                .filter(TelegramAccount.telegram_user_id == str(account_id))
+                .one_or_none()
+            )
+            if row is None or not row.is_active or row.role == Role.BLOCKED.value:
+                return None
+            return str(row.user_id)
+
+    # -- gateway state (telegram_gateway_messages) -------------------------------
+
+    def _gateway_begin(
+        self, update_id: int, chat_id: int, user_id: str | None, message_id: int | None
+    ) -> None:
+        """PERSIST stage: first-class gateway state for the inbound update."""
+        from agent_system.domain.events import utcnow
+
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.telegram_update_id == update_id)
+                .one_or_none()
+            )
+            if row is None:
+                db.add(
+                    TelegramGatewayMessage(
+                        id=new_id("tgm"),
+                        telegram_update_id=update_id,
+                        chat_id=str(chat_id),
+                        user_id=user_id,
+                        message_id=message_id,
+                        received_at=utcnow(),
+                        processing_status="RECEIVED",
+                    )
+                )
+
+    def _gateway_bound(self, update_id: int, session_id: str, task_id: str | None) -> None:
+        """UPDATE stage: the session/task this update created (idempotency link)."""
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.telegram_update_id == update_id)
+                .one_or_none()
+            )
+            if row is not None:
+                row.session_id = session_id
+                row.task_id = task_id
+                row.processing_status = "DISPATCHED"
+
+    def _gateway_done(self, update_id: int) -> None:
+        """COMPLETED stage: execution finished (success or not) for this update."""
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.telegram_update_id == update_id)
+                .one_or_none()
+            )
+            if row is not None and row.processing_status != "COMPLETED":
+                row.processing_status = "COMPLETED"
+
+    def _process_one(self, update_id: int) -> None:
+        account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
+        owner = self._resolve_owner(account_id)
+        if not text or chat_id is None or owner is None:
+            self._mark_processed(update_id)
+            return
+        # Durable ack + exactly one master task, via the normal runtime seams.
+        from agent_system.services.cloud import drive_session, ensure_session_tasks
+        from agent_system.services.orchestrator import Supervisor
+
+        self._gateway_begin(update_id, chat_id, user_id, message_id)
+        supervisor = Supervisor(self._bus)
+        session_id = supervisor.create_session(self._factory, text, owner_user_id=owner)
+        task_ids = ensure_session_tasks(self._factory, self._bus, session_id)
+        master_task_id = task_ids[0] if task_ids else None
+        self._outbox.enqueue(
+            kind=KIND_TASK_ACK,
+            chat_id=chat_id,
+            text=f"Task created: {master_task_id or session_id}\nGoal: {text[:200]}",
+            task_id=master_task_id,
+        )
+        self._gateway_bound(update_id, session_id, master_task_id)
+        try:
+            drive_session(self._factory, self._bus, session_id)
+        finally:
+            # Results reach the outbox here (event subscribers only queued —
+            # the emit happens inside the orchestrator's transaction). The
+            # finally keeps the ack/result path alive even on drive failure.
+            self._relay.flush()
+            self._gateway_done(update_id)
+            self._mark_processed(update_id)
+
+    def _mark_processed(self, update_id: int) -> None:
+        from agent_system.domain.events import utcnow
+
+        with session_scope(self._factory) as db:
+            row = db.get(TelegramUpdate, update_id)
+            if row is not None and row.processed_at is None:
+                row.processed_at = utcnow()
+
+    # -- recovery ----------------------------------------------------------------
+
+    def recover(self) -> dict[str, int]:
+        """Restart recovery: resume undelivered work.
+
+        - relay replay: events that completed but never reached the outbox
+        - outbox drain: undelivered messages retried at the Telegram API
+        - ledger: re-drive updates that never reached processed (crash window)
+        """
+        replayed = self._relay.replay()
+        self._relay.flush()
+        redelivered = self._outbox.drain()
+        self._outbox.reap_stuck()
+        redriven = self.process_pending()
+        return {
+            "events_replayed": replayed,
+            "outbox_redelivered": redelivered,
+            "updates_redriven": redriven,
+        }

@@ -147,12 +147,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             def recover_tasks() -> None:
                 recovery_orchestrator.recover_orphans(recovery_factory)
                 sweep_backlog(recovery_factory, recovery_bus)
-                # Drain the Telegram delivery outbox alongside recovery (every
-                # polling cycle), so durable messages are delivered even in the
-                # single-dyno cloud path without a separate worker. (spec §16)
+                # Telegram gateway pipeline recovery: replay relay-able events
+                # that never reached the outbox, redrive ledger rows that never
+                # reached processed (dyno died mid-task), then drain the
+                # delivery outbox. (Telegram Gateway E2E spec)
                 try:
+                    from agent_system.services.gateway import GatewayExecutor
                     from agent_system.services.outbox import Outbox
 
+                    executor = GatewayExecutor(settings, recovery_factory, recovery_bus)
+                    executor.recover()
                     Outbox(recovery_factory, settings).drain()
                 except Exception:
                     pass

@@ -57,6 +57,8 @@ class Outbox:
         text: str,
         reply_markup: dict[str, Any] | None = None,
         event_id: str | None = None,
+        task_id: str | None = None,
+        reply_to_message_id: int | None = None,
     ) -> str | None:
         if chat_id is None:
             return None
@@ -71,6 +73,8 @@ class Outbox:
                 text=text,
                 reply_markup_json=reply_markup,
                 event_id=event_id,
+                task_id=task_id,
+                reply_to_message_id=reply_to_message_id,
                 state="PENDING",
                 attempts=0,
                 next_attempt_at=utcnow(),
@@ -91,7 +95,11 @@ class Outbox:
             rows = (
                 db.query(DeliveryOutbox)
                 .filter(
-                    DeliveryOutbox.state == "PENDING",
+                    # RETRY included: a row that already failed once (state
+                    # RETRY, next_attempt_at scheduled) must be re-claimed
+                    # after its backoff elapses, otherwise a single Telegram
+                    # API failure would permanently drop the message.
+                    DeliveryOutbox.state.in_(("PENDING", "RETRY")),
                     DeliveryOutbox.next_attempt_at <= now,
                 )
                 .order_by(DeliveryOutbox.next_attempt_at)
@@ -129,13 +137,20 @@ class Outbox:
         if own_client:
             client = httpx.Client(timeout=30.0)
         try:
+            payload: dict[str, Any] = {
+                "chat_id": int(row.chat_id),
+                "text": row.text,
+                "reply_markup": row.reply_markup_json or {},
+            }
+            reply_to = row.reply_to_message_id
+            if reply_to is not None:
+                payload["reply_parameters"] = {
+                    "message_id": int(reply_to),
+                    "allow_sending_without_reply": True,
+                }
             resp = client.post(  # type: ignore[union-attr]
                 TELEGRAM_API.format(token=token),
-                json={
-                    "chat_id": int(row.chat_id),
-                    "text": row.text,
-                    "reply_markup": row.reply_markup_json or {},
-                },
+                json=payload,
                 headers={"Content-Type": "application/json"},
             )
             resp.raise_for_status()
@@ -156,7 +171,9 @@ class Outbox:
                 db.query(DeliveryOutbox)
                 .filter(
                     DeliveryOutbox.id == row.id,
-                    DeliveryOutbox.state == "PENDING",
+                    # RETRY included: a row reclaimed after a failure and
+                    # delivered on retry must still be markable as delivered.
+                    DeliveryOutbox.state.in_(("PENDING", "RETRY")),
                 )
                 .update(
                     {

@@ -361,9 +361,16 @@ class TelegramService:
             self._seen_updates.add(key)
             return True
         from_chat = update.get("message", {}).get("chat", {}).get("id")
+        from_user = (
+            (update.get("message") or {}).get("from")
+            or (update.get("callback_query") or {}).get("from")
+            or {}
+        )
+        account_id = str(from_user.get("id")) if from_user.get("id") else None
         with session_scope(self._factory) as db:
             row = TelegramUpdate(
                 update_id=key,
+                account_id=account_id,
                 chat_id=str(from_chat) if from_chat else None,
                 payload_json=update,
             )
@@ -377,7 +384,8 @@ class TelegramService:
                     return False
                 # Crash-window retry: re-deliver while the previous attempt
                 # never reached COMPLETED.
-                existing.chat_id = str(from_chat) if from_chat else None
+                existing.account_id = existing.account_id or account_id
+                existing.chat_id = existing.chat_id or (str(from_chat) if from_chat else None)
                 existing.payload_json = update
                 return True
             return True
@@ -514,6 +522,14 @@ class TelegramService:
         except Exception as exc:
             await self._send(chat_id, f"Failed to create session: {exc}")
             return
+        # Durable chat<->session mapping: lets the terminal-result relay find
+        # this chat after a restart (Telegram Gateway E2E, additive).
+        try:
+            from agent_system.services.gateway import record_session_chat
+
+            record_session_chat(self._factory, session_id, int(chat_id))
+        except Exception:
+            _logger.exception("telegram: session-chat mapping failed (session %s)", session_id)
         await self._send(
             chat_id,
             f"Session created: {session_id}\nGoal: {goal[:200]}",

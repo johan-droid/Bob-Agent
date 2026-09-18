@@ -54,6 +54,12 @@ agent-system/backend/data/*.db
 # =============================================
 # Bob Agent Dynamic Directories
 # =============================================
+
+# Gateway-specific patterns (added for Telegram integration)
+*.telegram
+*.tg
+gateway_*.json
+
 agent-system/workspaces/*
 !agent-system/workspaces/.gitkeep
 !agent-system/workspaces/README.md
