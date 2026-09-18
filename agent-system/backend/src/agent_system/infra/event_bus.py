@@ -100,6 +100,18 @@ class EventBus:
         """
         validate_event_type(event.type)
         event = event.model_copy(update={"payload": redact_payload(event.payload)})
+        if session is None:
+            # Memory / mock event bus emit when session is omitted
+            self._sequence += 1
+            event = event.with_sequence(self._sequence)
+            callbacks = list(self._global_subscribers) + list(self._subscribers[event.type])
+            for callback in callbacks:
+                try:
+                    callback(event)
+                except Exception:
+                    pass
+            return event
+
         if session.get_bind().dialect.name == "postgresql":
             # Serialize ALL event mints across processes/connections (READ
             # COMMITTED would otherwise let two finishers mint MAX+1 twice).

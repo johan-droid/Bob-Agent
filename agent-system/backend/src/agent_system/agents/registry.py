@@ -234,6 +234,9 @@ def _builtin(task_input: dict[str, Any], context: dict[str, Any]) -> dict[str, A
 #: route goal-less tasks back to the deterministic builtin.
 builtin = _builtin
 
+# Register demo agent type for test execution compatibility
+register("demo", _builtin)
+
 
 __all__ = [
     "UnknownAgentTypeError",

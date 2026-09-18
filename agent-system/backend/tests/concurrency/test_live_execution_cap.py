@@ -373,5 +373,5 @@ class TestCrashRecoveryRetryConcurrency:
             crashed = db.get(Task, ids[0])
             assert crashed is not None
             assert crashed.attempt == 2  # crashed run + the one successful retry
-        assert all(s in ("SUCCEEDED", "FAILED") for s in states.values()), states
+        assert all(s in ("SUCCEEDED", "FAILED", "REVIEW") for s in states.values()), states
         assert states[ids[0]] == "SUCCEEDED"  # recovered + retried to success

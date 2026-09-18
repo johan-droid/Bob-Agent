@@ -132,7 +132,36 @@ def request_for_role(role_name: str, task_type: str = "general") -> RoutingReque
     )
 
 
+def request_for_mode(mode: str = "auto", task_type: str = "general") -> RoutingRequest:
+    """Build a RoutingRequest for a specific routing mode.
+
+    Modes:
+    - auto: balanced general routing
+    - auto/fast: prefers low latency
+    - auto/coding: requires coding capabilities (min_coding >= 2)
+    - auto/reasoning: requires reasoning capability
+    - auto/cheap: prefers free / cheap models
+    - auto/reliable: prefers premium/standard reliable providers
+    - auto/offline: limits to offline/local providers (e.g. ollama)
+    """
+    m = (mode or "auto").strip().lower()
+    if m in ("auto/fast", "fast"):
+        return RoutingRequest(task_type=task_type, prefer_latency="fast")
+    if m in ("auto/coding", "coding"):
+        return RoutingRequest(task_type=task_type, min_coding=2, requires_tool_calling=True)
+    if m in ("auto/reasoning", "reasoning"):
+        return RoutingRequest(task_type=task_type, requires_reasoning=True)
+    if m in ("auto/cheap", "cheap"):
+        return RoutingRequest(task_type=task_type, prefer_cost="free")
+    if m in ("auto/reliable", "reliable"):
+        return RoutingRequest(task_type=task_type, prefer_cost="standard")
+    if m in ("auto/offline", "offline"):
+        return RoutingRequest(task_type=task_type, preordered_providers=("ollama",))
+    return RoutingRequest(task_type=task_type)
+
+
 __all__ = [
+    "request_for_mode",
     "RoutingDecision",
     "RoutingRequest",
     "rank_candidates",

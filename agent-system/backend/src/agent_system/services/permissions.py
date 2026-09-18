@@ -426,6 +426,33 @@ class PermissionGate:
 
     # -- requests & decisions ------------------------------------------------
 
+    def request_approval(
+        self,
+        requested_action: str,
+        risk: Risk | str = Risk.HIGH,
+        scope: str = "custom",
+        requester: str = "agent",
+        task_id: str | None = None,
+        agent_run_id: str | None = None,
+        session_id: str | None = None,
+        workspace_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        owner_user_id: str | None = None,
+    ) -> ApprovalRecord:
+        req = ApprovalRequest(
+            requested_action=requested_action,
+            risk=Risk(risk) if isinstance(risk, str) else risk,
+            scope=scope,
+            requester=requester,
+            task_id=task_id,
+            agent_run_id=agent_run_id,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            context=context or {},
+            owner_user_id=owner_user_id,
+        )
+        return self.request(req)
+
     def request(self, req: ApprovalRequest) -> ApprovalRecord:
         """Create an approval request. Dangerous scopes are denied on the spot."""
         if is_dangerous_scope(req.scope):

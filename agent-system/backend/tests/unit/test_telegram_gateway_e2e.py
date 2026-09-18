@@ -34,7 +34,6 @@ from agent_system.services.gateway import GatewayExecutor, GatewayRelay
 from agent_system.services.outbox import Outbox
 from agent_system.services.permissions import PermissionGate
 
-
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -75,7 +74,7 @@ def _provision(factory: Any, tg_user_id: str, chat_id: int, role: str = "owner")
                 role=role,
             )
         )
-        db.flush()
+        db.commit()
         return str(user.id)
 
 
@@ -98,6 +97,7 @@ def _ingest(factory: Any, update_id: int, chat_id: int, tg_user: str, text: str)
                 },
             )
         )
+        db.commit()
 
 
 def _outbox_rows(factory: Any) -> list[tuple[str, str, str | None]]:
@@ -164,6 +164,7 @@ def test_executor_authenticates_identity_deny_by_default(tmp_path: Any) -> None:
     with factory() as db:
         acct = db.query(TelegramAccount).filter_by(telegram_user_id="888").one()
         acct.role = "blocked"
+        db.commit()
         db.add(
             User(
                 id=new_id("usr"),
@@ -369,6 +370,7 @@ def test_progress_notification_reaches_task_chat(tmp_path: Any) -> None:
                 processing_status="DISPATCHED",
             )
         )
+        db.commit()
         task_id = task.id
     relay = GatewayRelay(factory, Outbox(factory, settings), bus)
     assert relay._relay(
@@ -433,6 +435,7 @@ def test_telegram_api_failure_leaves_message_queued_for_retry(tmp_path: Any) -> 
         # RETRY is re-claimable after backoff — the message survives restarts.
         row.next_attempt_at = utcnow() - timedelta(seconds=1)
         row.state = "RETRY"
+        db.commit()
     assert len(outbox.claim_batch(worker_id="test")) == 1  # retryable
 
 
@@ -469,19 +472,22 @@ def test_restart_replays_undelivered_results(tmp_path: Any) -> None:
                 processing_status="DISPATCHED",
             )
         )
+        db.commit()
         task_id = task.id
     # The event reached the store, then the dyno died before the outbox row.
-    bus.emit(
-        Event(
-            event_id=new_id("evt"),
-            session_id=session.id if False else "ses_n",
-            task_id=task_id,
-            type="task.completed",
-            actor="runner",
-            payload={"output": "the final report"},
-        ),
-        None,
-    )
+    with factory() as db:
+        bus.emit(
+            Event(
+                event_id=new_id("evt"),
+                session_id=session.id,
+                task_id=task_id,
+                type="task.completed",
+                actor="runner",
+                payload={"output": "the final report"},
+            ),
+            db,
+        )
+        db.commit()
 
     # New process, new executor: recovery must find and enqueue the result.
     executor = GatewayExecutor(settings, factory, EventBus())

@@ -432,12 +432,19 @@ class GatewayExecutor:
 
         with session_scope(self._factory) as db:
             row = (
-                db.query(TelegramAccount.user_id, User.is_active, User.role)
+                db.query(
+                TelegramAccount.user_id,
+                TelegramAccount.role.label("acct_role"),
+                User.is_active,
+                User.role.label("user_role"),
+            )
                 .join(User, TelegramAccount.user_id == User.id)
                 .filter(TelegramAccount.telegram_user_id == str(account_id))
                 .one_or_none()
             )
-            if row is None or not row.is_active or row.role == Role.BLOCKED.value:
+            if row is None or not row.is_active:
+                return None
+            if row.user_role == Role.BLOCKED.value or row.acct_role == Role.BLOCKED.value:
                 return None
             return str(row.user_id)
 
