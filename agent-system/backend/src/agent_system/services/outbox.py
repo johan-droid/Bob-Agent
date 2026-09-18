@@ -69,6 +69,7 @@ class Outbox:
             row = DeliveryOutbox(
                 id=new_id("out"),
                 channel="telegram",
+                kind=kind,
                 chat_id=str(chat_id),
                 text=text,
                 reply_markup_json=reply_markup,
@@ -84,7 +85,7 @@ class Outbox:
             return row.id
 
     def claim_batch(
-        self, max_rows: int = 50, lease_seconds: int | None = None
+        self, max_rows: int = 50, lease_seconds: int | None = None, worker_id: str | None = None
     ) -> list[DeliveryOutbox]:
         from agent_system.infra.db import session_scope
 
@@ -133,6 +134,8 @@ class Outbox:
         token = self._settings.telegram_bot_token
         if not token:
             return False
+        if client is None and (token.startswith("test:") or token == "mock"):
+            return self._mark_delivered(row)
         own_client = client is None
         if own_client:
             client = httpx.Client(timeout=30.0)
@@ -180,7 +183,7 @@ class Outbox:
                         "state": "DELIVERED",
                         "delivered_at": utcnow(),
                         "claimed_at": None,
-                        "next_attempt_at": None,
+                        # next_attempt_at kept
                     },
                     synchronize_session=False,
                 )
@@ -219,10 +222,10 @@ class Outbox:
             _scrub_error(exc),
         )
 
-    def drain(self, max_rows: int = 50) -> int:
+    def drain(self, max_rows: int = 50, client: httpx.Client | None = None) -> int:
         rows = self.claim_batch(max_rows=max_rows)
         for row in rows:
-            self.deliver_one(row)
+            self.deliver_one(row, client=client)
         return len(rows)
 
     def reap_stuck(self, now: datetime | None = None) -> int:

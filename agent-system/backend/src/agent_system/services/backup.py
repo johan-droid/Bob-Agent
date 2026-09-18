@@ -242,7 +242,10 @@ class BackupService:
                 target = root / rel
                 if not str(target.resolve()).startswith(str(root.resolve()) + "/"):
                     continue
-                tar.extract(member, root)
+                try:
+                    tar.extract(member, root, filter="fully_trusted")
+                except (TypeError, AttributeError):
+                    tar.extract(member, root)
                 restored.append(member.name)
         return restored
 

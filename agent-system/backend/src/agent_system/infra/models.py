@@ -539,6 +539,9 @@ class DeliveryOutbox(Base):
 
     id: Mapped[str] = _pk()
     channel: Mapped[str] = mapped_column(String(20), default="telegram", nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(
+        String(30), default="notification", nullable=False, index=True
+    )
     chat_id: Mapped[str] = mapped_column(String(40), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     reply_markup_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)
@@ -546,8 +549,8 @@ class DeliveryOutbox(Base):
     state: Mapped[str] = mapped_column(String(12), default="PENDING", nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    next_attempt_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=True, index=True
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)

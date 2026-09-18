@@ -95,6 +95,7 @@ def upgrade() -> None:
         "delivery_outbox",
         sa.Column("id", sa.String(length=40), nullable=False),
         sa.Column("channel", sa.String(length=20), nullable=False, server_default="telegram"),
+        sa.Column("kind", sa.String(length=30), nullable=False, server_default="notification"),
         sa.Column("chat_id", sa.String(length=40), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("reply_markup_json", sa.JSON(), nullable=True),
@@ -105,7 +106,7 @@ def upgrade() -> None:
         sa.Column(
             "next_attempt_at",
             sa.DateTime(timezone=True),
-            nullable=False,
+            nullable=True,
             server_default=sa.func.now(),
         ),
         sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),

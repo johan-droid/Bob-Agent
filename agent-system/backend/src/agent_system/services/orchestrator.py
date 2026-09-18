@@ -819,7 +819,7 @@ class Orchestrator:
             if task is None:
                 return False
             state = TaskState(task.state)
-            if state == TaskState.QUEUED:
+            if state in (TaskState.QUEUED, TaskState.PENDING, TaskState.PLANNING):
                 validate_transition(state, TaskState.CANCELLED)
                 task.state = TaskState.CANCELLED.value
                 self._bus.emit(Event(type="task.cancelled", task_id=task_id, actor="user"), db)
