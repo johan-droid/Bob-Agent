@@ -117,6 +117,9 @@ EXPECTED_WIRE: dict[str, dict[str, Any]] = {
     "huggingface": _OPENAI_NATIVE_PAYLOAD,
     "freellmapi": _OPENAI_NATIVE_PAYLOAD,
     "tokenrouter": _OPENAI_NATIVE_PAYLOAD,
+    "nim": _OPENAI_NATIVE_PAYLOAD,
+    "ollama_cloud": _OPENAI_NATIVE_PAYLOAD,
+    "opencode": _OPENAI_NATIVE_PAYLOAD,
     # Native transports.
     "gemini": _GEMINI_NATIVE_PAYLOAD,
     "anthropic": _ANTHROPIC_NATIVE_PAYLOAD,

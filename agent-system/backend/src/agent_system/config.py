@@ -193,6 +193,14 @@ class Settings(BaseSettings):
     verifier_enabled: bool = True
     verifier_use_llm_judge: bool = False
     verifier_strict: bool = False
+    # Agentic Runtime v1 (additive layer on the frozen task/permission/
+    # execution contracts): provider capability catalog + health.
+    nim_api_key: str | None = None
+    nim_base_url: str = "https://integrate.api.nvidia.com/v1"
+    ollama_cloud_api_key: str | None = None
+    ollama_cloud_base_url: str = "https://ollama.com/v1"
+    opencode_api_key: str | None = None
+    opencode_base_url: str = "https://opencode.ai/api/v1"
     # Extra headers sent with every provider call, as JSON:
     #   PROVIDER_EXTRA_HEADERS='{"X-API-Key":"...","User-Agent":"bob-agent/0.1"}'
     provider_extra_headers: str = "{}"
@@ -275,6 +283,7 @@ class Settings(BaseSettings):
 
     def provider_api_key(self, provider: str) -> str | None:
         """Return the configured API key for a provider name, if any."""
+        key = (provider or "").strip().lower()
         return {
             "anthropic": self.anthropic_api_key,
             "openai": self.openai_api_key,
@@ -287,7 +296,10 @@ class Settings(BaseSettings):
             "huggingface": self.huggingface_api_key,
             "freellmapi": self.freellmapi_api_key,
             "tokenrouter": self.tokenrouter_api_key,
-        }.get(provider)
+            "nim": self.nim_api_key,
+            "ollama_cloud": self.ollama_cloud_api_key,
+            "opencode": self.opencode_api_key,
+        }.get(key)
 
 
 @_lru_cache(maxsize=1)

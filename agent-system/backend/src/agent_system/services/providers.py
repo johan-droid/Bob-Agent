@@ -142,6 +142,34 @@ PROVIDERS: dict[str, ProviderSpec] = {
         free_tier=True,
         models=("gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"),
     ),
+    "nim": ProviderSpec(
+        key="nim",
+        label="NVIDIA NIM",
+        base_url="https://integrate.api.nvidia.com/v1",
+        default_model="meta/llama-3.3-70b-instruct",
+        auth="bearer",
+        description="Coding/reasoning models via NVIDIA NIM (OpenAI-compatible).",
+        models=("meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1"),
+    ),
+    "ollama_cloud": ProviderSpec(
+        key="ollama_cloud",
+        label="Ollama Cloud",
+        base_url="https://ollama.com/v1",
+        default_model="llama3.3",
+        auth="bearer",
+        description="Hosted open models via Ollama Cloud (OpenAI-compatible).",
+        models=("llama3.3", "qwen2.5-coder"),
+    ),
+    "opencode": ProviderSpec(
+        key="opencode",
+        label="OpenCode",
+        base_url="https://opencode.ai/api/v1",
+        default_model="opencode/free-coding",
+        auth="bearer",
+        description="Free/open coding-oriented workloads (OpenAI-compatible).",
+        free_tier=True,
+        models=("opencode/free-coding",),
+    ),
     "deepseek": ProviderSpec(
         key="deepseek",
         label="DeepSeek",
@@ -188,6 +216,29 @@ _KEYLESS_PROVIDERS = frozenset({"ollama"})
 
 def provider_spec(provider: str) -> ProviderSpec | None:
     return PROVIDERS.get(provider)
+
+
+def provider_base_url(provider: str, settings: Settings) -> str | None:
+    """Settings-overridable base URL for a provider (additive helper)."""
+    spec = provider_spec(provider)
+    if spec is None:
+        return None
+    overrides = {
+        "groq": settings.groq_base_url,
+        "ollama": settings.ollama_base_url,
+        "openrouter": settings.openrouter_base_url,
+        "together": settings.together_base_url,
+        "mistral": settings.mistral_base_url,
+        "gemini": settings.gemini_base_url,
+        "deepseek": settings.deepseek_base_url,
+        "huggingface": settings.huggingface_base_url,
+        "freellmapi": settings.freellmapi_base_url,
+        "tokenrouter": settings.tokenrouter_base_url,
+        "nim": settings.nim_base_url,
+        "ollama_cloud": settings.ollama_cloud_base_url,
+        "opencode": settings.opencode_base_url,
+    }
+    return overrides.get(provider, spec.base_url) or spec.base_url
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +721,9 @@ ADAPTER_CLASSES: dict[str, type[Any]] = {
     "huggingface": OpenAICompatibleAdapter,
     "freellmapi": OpenAICompatibleAdapter,
     "tokenrouter": OpenAICompatibleAdapter,
+    "nim": OpenAICompatibleAdapter,
+    "ollama_cloud": OpenAICompatibleAdapter,
+    "opencode": OpenAICompatibleAdapter,
     "gemini": GeminiAdapter,
     "anthropic": AnthropicAdapter,
 }
@@ -677,10 +731,15 @@ ADAPTER_CLASSES: dict[str, type[Any]] = {
 
 def build_adapter(provider: str, settings: Settings, api_key: str | None = None) -> Any | None:
     """Construct the right adapter for a provider (None if unsupported)."""
+    from dataclasses import replace
+
     spec = provider_spec(provider)
     cls = ADAPTER_CLASSES.get(provider)
     if spec is None or cls is None:
         return None
+    base_url = provider_base_url(provider, settings) or spec.base_url
+    if base_url != spec.base_url:
+        spec = replace(spec, base_url=base_url)
     extra = build_extra_headers(settings)
     if provider == "openrouter":
         extra.setdefault("HTTP-Referer", settings.openrouter_site_url)
@@ -721,7 +780,7 @@ def configured_providers(settings: Settings) -> list[dict[str, Any]]:
                 "label": spec.label,
                 "configured": key_present,
                 "needs_key": True,
-                "base_url": spec.base_url,
+                "base_url": provider_base_url(key, settings) or spec.base_url,
                 "default_model": spec.default_model,
                 "free_tier": spec.free_tier,
                 "description": spec.description,
