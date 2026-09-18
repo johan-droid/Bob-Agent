@@ -120,6 +120,11 @@ COST_EVENTS = (
     "cost.alert",
 )
 INSIGHT_EVENTS = ("insight.generated",)
+ROUTER_EVENTS = (
+    "router.selected",
+    "router.fallback",
+    "router.exhausted",
+)
 
 EVENT_TYPES: tuple[str, ...] = (
     SESSION_EVENTS
@@ -136,6 +141,7 @@ EVENT_TYPES: tuple[str, ...] = (
     + COST_EVENTS
     + INSIGHT_EVENTS
     + CONTEXT_EVENTS
+    + ROUTER_EVENTS
 )
 
 # ---------------------------------------------------------------------------

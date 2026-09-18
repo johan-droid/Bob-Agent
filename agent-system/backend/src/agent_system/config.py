@@ -194,13 +194,15 @@ class Settings(BaseSettings):
     verifier_use_llm_judge: bool = False
     verifier_strict: bool = False
     # Agentic Runtime v1 (additive layer on the frozen task/permission/
-    # execution contracts): provider capability catalog + health.
+    # execution contracts): capability-aware routing + bounded swarm +
+    # provider fallback with a durable attempt ledger.
     nim_api_key: str | None = None
     nim_base_url: str = "https://integrate.api.nvidia.com/v1"
     ollama_cloud_api_key: str | None = None
     ollama_cloud_base_url: str = "https://ollama.com/v1"
     opencode_api_key: str | None = None
     opencode_base_url: str = "https://opencode.ai/api/v1"
+    llm_provider_order: str = ""
     # Extra headers sent with every provider call, as JSON:
     #   PROVIDER_EXTRA_HEADERS='{"X-API-Key":"...","User-Agent":"bob-agent/0.1"}'
     provider_extra_headers: str = "{}"

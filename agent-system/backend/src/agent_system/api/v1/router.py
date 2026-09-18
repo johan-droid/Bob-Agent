@@ -1450,3 +1450,49 @@ def delete_template(template_id: str, request: Request) -> None:
         archive.unlink()
     if meta.exists():
         meta.unlink()
+
+
+@authenticated.get("/router/catalog")
+def router_catalog(request: Request) -> list[dict[str, Any]]:
+    from agent_system.services.llm_catalog import DEFAULT_CATALOG
+
+    return DEFAULT_CATALOG.to_json()
+
+
+@authenticated.get("/router/roles")
+def router_roles(request: Request) -> list[dict[str, Any]]:
+    from agent_system.services.worker_roles import list_roles
+
+    return [r.to_json() for r in list_roles()]
+
+
+class RoutePreview(BaseModel):
+    worker_role: str = ""
+    task_type: str = "general"
+    requires_tool_calling: bool = False
+    min_context: int = 0
+    requires_vision: bool = False
+    min_coding: int = 0
+
+
+@authenticated.post("/router/preview")
+def router_preview(body: RoutePreview, request: Request) -> dict[str, Any]:
+    from agent_system.services.llm_catalog import DEFAULT_CATALOG
+    from agent_system.services.llm_router import RoutingRequest, rank_candidates
+
+    req = RoutingRequest(
+        task_type=body.task_type,
+        worker_role=body.worker_role,
+        requires_tool_calling=body.requires_tool_calling,
+        min_context=body.min_context,
+        requires_vision=body.requires_vision,
+        min_coding=body.min_coding,
+    )
+    ranked = rank_candidates(req, DEFAULT_CATALOG, None, None)
+    return {
+        "candidates": [
+            {"provider": c.provider, "model_id": c.model_id, "reason": reason}
+            for c, reason in ranked[:8]
+        ],
+        "total": len(ranked),
+    }
