@@ -200,6 +200,33 @@ per call; HTTP creates a session, replays `Mcp-Session-Id`, and closes after
 the call. An explicit entry named `openconnector` overrides the implicit
 OpenConnector server.
 
+### Shipped server: the Obsidian vault (`bob-vault-mcp`)
+
+Bob ships one MCP server of its own — `bob-vault-mcp` — so the vault keeps
+updating itself without a bespoke code path. Attach it like any other server:
+
+```jsonc
+[{"name": "vault", "command": "uv", "args": ["run", "bob-vault-mcp"],
+  "cwd": "agent-system/backend"}]
+```
+
+It exposes six tools (all reached through `mcp_list`/`mcp_call`, so every call
+is approval-gated on `mcp:vault:<tool>` and audit-logged):
+
+| Tool | What it does |
+|---|---|
+| `vault_write_note` | Write one memory-layer note (frontmatter + wiki-links) |
+| `vault_append_daily` | Append a timestamped line to `daily/<YYYY-MM-DD>.md` |
+| `vault_record` | Update the dedicated **Bob Agent record** (`records/bob-agent.md`) |
+| `vault_read_record` | Read that record: counters + newest entries |
+| `vault_recall` | Keyword-rank the vault's memory notes |
+| `vault_status` | Vault root, per-layer counts, record path |
+
+Every write reuses the vault contract already used by the memory subsystem
+(write-time secret scrubbing, the note-size bound, atomic replace), so the MCP
+path and the internal path cannot drift. The vault root comes from `VAULT_PATH`;
+run the server standalone with `uv run bob-vault-mcp --help`.
+
 ## Scheduler
 
 `SCHEDULER_ENABLED=true` runs the APScheduler loop inside the API server;

@@ -505,6 +505,22 @@ HTTP (`McpHttpClient`). The HTTP client speaks JSON-RPC over `POST`, parses **bo
 server** (see §8.7); an explicit entry named `openconnector` wins. Tools exposed to the
 ReAct loop: `mcp_list` (discover) + `mcp_call` (invoke).
 
+Bob also ships one MCP *server*: `agent_system/mcp_servers/vault.py` (console
+script `bob-vault-mcp`, `uv run bob-vault-mcp --vault <path>`). It speaks
+newline-delimited JSON-RPC 2.0 on stdin/stdout and exposes
+`vault_write_note`, `vault_append_daily`, `vault_record`, `vault_read_record`,
+`vault_recall`, `vault_status`. It exists so the vault keeps updating itself
+through the *same* seam as any external capability: Bob attaches it with a
+`MCP_SERVERS` entry and reaches it via `mcp_call`, so each write is
+approval-gated on `mcp:vault:<tool>` and event-logged. Vault semantics are not
+re-implemented — the server calls `services/memory.py` (scrubbing, size bound,
+frontmatter) and `services/memory_hooks.py` (`recall_recent`). The dedicated
+Bob Agent record (`<vault>/records/bob-agent.md`, `type: agent-record`) is
+updated in place: `events` counter + `updated` stamp advance and one entry is
+appended, with the activity log capped at `MAX_RECORD_EVENTS`. Writes are
+atomic (temp file + `os.replace`) and every failure is returned as an MCP
+`isError` result — a broken vault can never crash the transport loop.
+
 ### 8.7 OpenConnector (SaaS connector gateway)
 
 `services/openconnector.py` — self-hosted Pipedream/Composio alternative
@@ -951,10 +967,10 @@ Base path `/api/v1`. All **authenticated** routes require `Authorization: Bearer
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | none | `{"status":"ok"}` |
-| GET | `/ready` | none | `{"status","checks":{"database":bool}}` |
-| GET | `/ready-dependency-check` | Auth | dependency wiring probe (hidden) |
-| POST | `/auth/token` | none | `{session_secret}` → `{token}` (HMAC compare to `AGENT_BOOTSTRAP_SECRET`) |
+| GET | `/api/v1/health` | none | `{"status":"ok"}` |
+| GET | `/api/v1/ready` | none | `{"status","checks":{"database":bool}}` |
+| GET | `/api/v1/ready-dependency-check` | Auth | dependency wiring probe (hidden) |
+| POST | `/api/v1/auth/token` | none | `{session_secret}` → `{token}` (HMAC compare to `AGENT_BOOTSTRAP_SECRET`) |
 
 ### 9.2 Sessions
 

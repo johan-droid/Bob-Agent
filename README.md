@@ -20,6 +20,7 @@ After the initial CLI setup, you can choose to stick with the CLI or switch to t
 - **Tool Registry** — Shell, file operations, web fetch, memory recall/remember, task inspection, OpenConnector SaaS actions, and MCP servers.
 - **OpenConnector Integration** — Self-hosted connector gateway with 1,000+ SaaS providers and 10,000+ actions via HTTP Runtime API and implicit MCP-over-HTTP server.
 - **MCP Client** — Connect to stdio servers (npx/uvx/local binaries) and streamable HTTP endpoints with session-id replay.
+- **Vault MCP Server** — Bob ships `bob-vault-mcp`, an MCP server that keeps the Obsidian vault updated (notes, daily log, recall) and maintains a dedicated Bob Agent record (`records/bob-agent.md`). Attach it with one `MCP_SERVERS` entry; every call is approval-gated like any other capability.
 - **Pluggable Skills** — Pluggable instruction packs users and agents can create, import, enable, and configure.
 - **SOUL.md Identity** — The agent's character, injected into every model call. Edit one file to change who Bob is.
 - **Approvals + Permission Gate** — Risky actions pause for explicit approval, never slip through silently.

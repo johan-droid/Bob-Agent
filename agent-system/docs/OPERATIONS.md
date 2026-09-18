@@ -109,7 +109,10 @@ The dashboard uses an `EventPoller` class (`web/src/lib/api.ts`) that:
       `agentctl settings set OPENCONNECTOR_BASE_URL http://localhost:3000`.
       Verify with `/tools` in the chat.
     - **MCP servers** — `agentctl settings set MCP_SERVERS '<json>'`
-      (see [Configuration](CONFIGURATION.md) §MCP), verify with `/tools`.
+      (see [Configuration](CONFIGURATION.md) §MCP), verify with `/tools`. Bob's
+      own vault server (`bob-vault-mcp`) is the one entry that needs no external
+      service:
+      `[{"name":"vault","command":"uv","args":["run","bob-vault-mcp"],"cwd":"agent-system/backend"}]`.
     - **A2A delegation** — off by default (`A2A_ENABLED=false` → `503`);
       enable via `agentctl settings set A2A_ENABLED true`, then delegate with
       `POST /api/v1/a2a/delegate` (each delegation needs a fresh per-target approval).

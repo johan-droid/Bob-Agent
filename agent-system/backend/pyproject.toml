@@ -41,6 +41,9 @@ telemetry = [
 
 [project.scripts]
 agentctl = "agent_system.cli.main:entrypoint"
+# MCP server shipped with Bob: keeps the Obsidian vault updated and maintains
+# the dedicated Bob Agent record. Attach via MCP_SERVERS (see docs/CONFIGURATION.md).
+bob-vault-mcp = "agent_system.mcp_servers.vault:main"
 
 [dependency-groups]
 dev = [

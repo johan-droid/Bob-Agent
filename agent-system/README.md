@@ -65,7 +65,7 @@ are labeled as such — no fake "LLM did it" claims.
 | 🌐 **12 LLM providers + offline mode** | OpenAI, Anthropic, Groq, Ollama, OpenRouter, Together, Mistral, Gemini, DeepSeek, HuggingFace, FreeLLMAPI, TokenRouter. Boots with zero keys configured |
 | 🧰 **Tool registry** | `shell`, `file_read/write/list`, `web_fetch`, `memory_recall/remember`, `tasks_inspect`, `openconnector_execute/list`, `mcp_call`, `mcp_list`. Shell runs sandboxed by default; execute tools demand live approval when `TOOLS_REQUIRE_APPROVAL` is set |
 | 🔌 **OpenConnector integration** | Self-hosted connector gateway (`oomol-lab/open-connector`) — 1,000+ SaaS providers / 10,000+ actions via its HTTP Runtime API and, automatically, as an implicit MCP-over-HTTP server (`POST /mcp`) |
-| 🧩 **MCP client (two transports)** | stdio (`npx`/`uvx`/local binaries) and streamable HTTP (JSON + SSE, `Mcp-Session-Id` replay). Configure via `MCP_SERVERS` JSON |
+| 🧩 **MCP client (two transports)** | stdio (`npx`/`uvx`/local binaries) and streamable HTTP (JSON + SSE, `Mcp-Session-Id` replay). Configure via `MCP_SERVERS` JSON. Ships with its own **vault server** (`bob-vault-mcp`) that keeps the Obsidian vault updated and maintains a dedicated Bob Agent record |
 | 📦 **Pluggable skills** | `SKILL.md` instruction packs that users *and agents* can create, import, enable, and configure |
 | 🎭 **SOUL.md identity** | The agent's character, injected into every model call as the `<identity>` block. Edit one file to change who Bob is |
 | 💻 **CLI-first operations** | `agentctl` manages sessions, tasks, approvals, workspaces, events, skills, soul, tools, memory, and *every* setting |
@@ -284,6 +284,19 @@ model can react to — never silent.
 streamable-HTTP endpoints (SSE + JSON, session-id replay) via `MCP_SERVERS`
 JSON. Tools: `mcp_list` (discover) + `mcp_call` (invoke). `/tools` in the chat
 lists every configured server live.
+
+Bob also ships one server of its own, `bob-vault-mcp`
+(`agent_system/mcp_servers/vault.py`, console script `bob-vault-mcp`): it keeps
+the Obsidian vault updated — notes, daily log, recall — and maintains a
+dedicated Bob Agent record at `records/bob-agent.md`. Attach it with:
+
+```bash
+agentctl settings set MCP_SERVERS \
+  '[{"name":"vault","command":"uv","args":["run","bob-vault-mcp"],"cwd":"agent-system/backend"}]'
+```
+
+Because it is reached through `mcp_call`, every vault write is approval-gated
+(`mcp:vault:<tool>`) and audit-logged like any other capability.
 
 ### OpenConnector
 

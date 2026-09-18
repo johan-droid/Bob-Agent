@@ -62,7 +62,7 @@ git subtree push --prefix agent-system/backend heroku main
 # 3. The release phase runs `alembic upgrade head` automatically.
 #    Verify:
 heroku run 'python -c "import agent_system.api.main; print(\"boot ok\")"' --app <app-name>
-curl https://<app-name>.herokuapp.com/health
+curl https://<app-name>.herokuapp.com/api/v1/health
 
 # 4. Set secrets (never in git)
 heroku config:set --app <app-name> \
@@ -139,7 +139,7 @@ code changes needed.
 
 ## Verification checklist
 
-- [ ] `GET /health` → ok, `GET /ready` → database true (Postgres).
+- [ ] `GET /api/v1/health` → ok, `GET /api/v1/ready` → database true (Postgres).
 - [ ] `POST /sessions` + Telegram goal → task SUCCEEDED, events present.
 - [ ] Execute tool without approval → `NeedsApprovalError` + approval id.
 - [ ] `/approve <id>` + `/retry <task_id>` → runs with approval present.
