@@ -4,9 +4,12 @@ Heroku Basic runs a single web dyno: there is no worker dyno and no Redis,
 so RQ-based background execution (``worker.py``) cannot run. This module
 drives sessions **in-process** with the ``Orchestrator`` instead:
 
-- ``ensure_session_tasks`` — a goal session with zero tasks gets a single
-  ``llm`` task carrying ``{"goal": ...}`` (planned QUEUED).
+- ``ensure_session_tasks`` — a goal session with zero tasks gets planned;
+  a goal that cannot be planned gets a single ``llm`` task carrying the
+  goal, with the planner's inferred risk preserved (never silently lowered
+  to LOW — the fallback must not reduce the security posture, INV-014).
 - ``drive_session`` — installs the ReAct handler (like the RQ worker does),
+  reclaims work orphaned by a crashed/restarted dyno (``recover_orphans``),
   then runs ready tasks to quiescence (bounded rounds).
 - ``retry_task_queued`` — explicit operator retry ``FAILED -> QUEUED``
   (same transition the REST ``/tasks/{id}/retry`` endpoint allows).
@@ -17,14 +20,57 @@ Local behavior is unchanged: all three are only invoked when
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agent_system.domain.tasks import TaskState, validate_transition
 from agent_system.infra.db import session_scope
 from agent_system.infra.models import Session, Task
+from agent_system.services.planner import (
+    HIGH_RISK_PATTERNS,
+    PlannedTask,
+    Planner,
+    PlanningError,
+    TaskPlan,
+)
 
 #: Hard stop on drive rounds (each round runs every currently-ready task).
 MAX_DRIVE_ROUNDS = 25
+
+
+def _fallback_plan(goal: str) -> TaskPlan:
+    """Single generic ``llm`` task for an unplannable goal — risk preserved.
+
+    INV-014: fallback execution never lowers the security posture. The
+    planner's own high-risk classifier runs on the raw goal, so "rotate
+    production credentials and deploy them" degrades to a HIGH-risk generic
+    task, never a LOW one.
+    """
+    risk = "HIGH" if any(re.search(p, goal.lower()) for p in HIGH_RISK_PATTERNS) else "LOW"
+    return TaskPlan(
+        goal=goal,
+        intent="generic",
+        risk=risk,
+        tasks=(
+            PlannedTask(
+                key="task_1",
+                title=(goal[:80] or "cloud goal"),
+                task_type="llm",
+                agent_type="llm",
+                input={"goal": goal},
+                expected_outputs=("result",),
+                risk=risk,
+            ),
+        ),
+        notes=(
+            "goal was not plannable by the deterministic planner; "
+            f"single generic task at inferred risk {risk}",
+        ),
+    )
+
+
+#: Public alias — the test suite pins the risk-preservation contract on this.
+fallback_plan = _fallback_plan
 
 
 def ensure_session_tasks(
@@ -38,7 +84,6 @@ def ensure_session_tasks(
     zero work — the failure is recorded on the session, not hidden.
     """
     from agent_system.services.orchestrator import Supervisor
-    from agent_system.services.planner import PlannedTask, Planner, PlanningError, TaskPlan
 
     supervisor = Supervisor(bus)
     with session_scope(factory) as db:
@@ -56,22 +101,8 @@ def ensure_session_tasks(
     try:
         plan = Planner(settings).plan(goal)
     except PlanningError:
-        plan = TaskPlan(
-            goal=goal,
-            intent="generic",
-            risk="LOW",
-            tasks=(
-                PlannedTask(
-                    key="task_1",
-                    title=(goal[:80] or "cloud goal"),
-                    task_type="llm",
-                    agent_type="llm",
-                    input={"goal": goal},
-                    expected_outputs=("result",),
-                ),
-            ),
-            notes=("goal was not plannable by the deterministic planner; single generic task",),
-        )
+        # INV-014: fallback execution never lowers the security posture.
+        plan = _fallback_plan(goal)
     from agent_system.services.tools.registry import build_registry
 
     task_ids = supervisor.apply_plan(
@@ -93,6 +124,15 @@ def drive_session(
     Orchestrator is strict by design (unknown types fail cleanly), so
     cloud tasks — always created as ``llm`` by ``ensure_session_tasks`` —
     need their handler composed here, mirroring the RQ worker's install.
+
+    Restart recovery (INV-011): orphans from a crashed/restarted dyno
+    (RUNNING with an expired lease) are reclaimed first, so accepted work is
+    retried instead of stranded; tasks under a live lease are never touched.
+
+    The summary reports ``unfinished`` > 0 whenever the bounded drive stopped
+    with work it could not finish — round bound reached, or a task wedged
+    under a live lease — so a safety-bound stop never masquerades as ordinary
+    completion.
     """
     from agent_system.agents import react_agent
     from agent_system.services.orchestrator import Orchestrator
@@ -103,6 +143,7 @@ def drive_session(
         pass
     orch = Orchestrator(bus)
     orch.register_handler("llm", react_agent.llm_react_handler)
+    orch.recover_orphans(factory)
     ensure_session_tasks(factory, bus, session_id)
     for _ in range(max(1, max_rounds)):
         started = orch.run_ready_tasks(factory, session_id)
@@ -116,17 +157,19 @@ def drive_session(
             states = [r.state for r in rows]
         if not started and queued == 0:
             break
-    succeeded = sum(1 for s in states if s == TaskState.SUCCEEDED.value)
-    failed = sum(1 for s in states if s == TaskState.FAILED.value)
+    unfinished = sum(
+        1 for s in states if s not in (TaskState.SUCCEEDED.value, TaskState.FAILED.value)
+    )
     failed_ids = [
         r.id for r in db_query_tasks(factory, session_id) if r.state == TaskState.FAILED.value
     ]
     return {
         "session_id": session_id,
-        "succeeded": succeeded,
-        "failed": failed,
+        "succeeded": states.count(TaskState.SUCCEEDED.value),
+        "failed": states.count(TaskState.FAILED.value),
         "total": len(states),
         "failed_task_ids": failed_ids,
+        "unfinished": unfinished,
     }
 
 
@@ -167,5 +210,6 @@ __all__ = [
     "db_query_tasks",
     "drive_session",
     "ensure_session_tasks",
+    "fallback_plan",
     "retry_task_queued",
 ]

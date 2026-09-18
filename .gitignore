@@ -193,4 +193,11 @@ profilis-dashboard/
 .profilis-test/
 test-profilis/
 
+# =============================================
+# Local agent skill installs (npx skills add)
+# =============================================
+.agents/
+.claude/
+skills-lock.json
+
 # ---------------------------------------------------------------------------

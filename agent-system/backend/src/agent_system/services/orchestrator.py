@@ -12,6 +12,8 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import func, select
+
 from agent_system.domain import ids
 from agent_system.domain.events import Event, utcnow
 from agent_system.domain.lifecycles import AgentState
@@ -26,6 +28,66 @@ AgentHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 LEASE_TTL_SECONDS = 30
 MAX_TASKS_PER_SESSION = 100
 MAX_AGENT_SPAWN_PER_TASK = 5
+
+
+def _concurrency_limit() -> int:
+    """Configured task concurrency cap, never below 1.
+
+    Read per claim (not cached at import) so tests and settings changes take
+    effect without process restarts.
+    """
+    try:
+        from agent_system.config import get_settings
+
+        return max(1, int(get_settings().max_concurrent_tasks))
+    except Exception:
+        return 1
+
+
+#: States that hold a live execution slot (RUNNING, plus REVIEW which still
+#: carries the handler result and heartbeat lease until _finish releases it).
+_LIVE_SLOT_STATES = (TaskState.RUNNING.value, TaskState.REVIEW.value)
+
+
+def claim_queued_task(db: Any, task_id: str) -> bool:
+    """Atomically claim one QUEUED task for execution iff under the cap.
+
+    Resource enforcement (INV-010): the concurrency guard and the
+    ``QUEUED -> RUNNING`` transition are a single conditional UPDATE —
+    ``UPDATE task SET state='RUNNING' ... WHERE id=:id AND state='QUEUED'
+    AND (SELECT COUNT(*) FROM task WHERE state IN ('RUNNING','REVIEW')) < :limit``
+    — so racing drivers cannot exceed the limit via check-then-act: the loser's
+    WHERE fails and its task stays QUEUED for a later round/sweep. This is the
+    one claim seam shared by the in-process orchestrator and the RQ worker.
+
+    ``ponytail:`` SQLite serializes writers so the guard is exact; on Postgres
+    concurrent claims of DIFFERENT tasks can overshoot by the width of the
+    statement race window (self-correcting on the next sweep). Upgrade to
+    advisory locks only if multi-writer overshoot ever measurably matters.
+    """
+    running_sq = (
+        select(func.count())
+        .select_from(Task)
+        .where(Task.state.in_(_LIVE_SLOT_STATES))
+        .scalar_subquery()
+    )
+    claimed: int = (
+        db.query(Task)
+        .filter(
+            Task.id == task_id,
+            Task.state == TaskState.QUEUED.value,
+            running_sq < _concurrency_limit(),
+        )
+        .update(
+            {
+                "state": TaskState.RUNNING.value,
+                "started_at": utcnow(),
+                "attempt": Task.attempt + 1,
+            },
+            synchronize_session=False,
+        )
+    )
+    return claimed > 0
 
 
 class CycleError(ValueError):
@@ -412,30 +474,17 @@ class Orchestrator:
     def _run_task(self, factory: Any, task_id: str) -> bool:
         """Execute one task synchronously with a full agent run lifecycle."""
         with session_scope(factory) as db:
-            task = db.get(Task, task_id)
-            if task is None or task.state != TaskState.QUEUED.value:
-                return False
-            # Conditional claim: concurrent drivers (threads, cloud drive, a
-            # second API process) serialize here — exactly one claimant moves
-            # QUEUED -> RUNNING and counts the attempt.
+            # Guarded claim FIRST — it must be the session's first statement so
+            # its snapshot (and the cap subquery) is fresh. Exactly one claimant
+            # moves QUEUED -> RUNNING, under the concurrency cap (INV-010).
             # attempt counts "times execution started" — incremented on every
             # entry into RUNNING (worker, API transition, and this in-process
             # path). Requeue/recovery paths must NOT increment.
-            claimed: int = (
-                db.query(Task)
-                .filter(Task.id == task_id, Task.state == TaskState.QUEUED.value)
-                .update(
-                    {
-                        "state": TaskState.RUNNING.value,
-                        "started_at": utcnow(),
-                        "attempt": Task.attempt + 1,
-                    },
-                    synchronize_session=False,
-                )
-            )
-            if claimed == 0:
+            if not claim_queued_task(db, task_id):
                 return False
-            db.refresh(task)
+            task = db.get(Task, task_id)
+            if task is None:
+                return False
             run_id = ids.new_agent_run_id()
             agent_type = task.agent_type or task.task_type
             db.add(

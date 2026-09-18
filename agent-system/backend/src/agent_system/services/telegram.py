@@ -539,11 +539,18 @@ class TelegramService:
         ok = summary["succeeded"]
         total = summary["total"]
         failed = summary["failed"]
+        unfinished = summary.get("unfinished", 0)
         if failed:
             ids = ", ".join(summary["failed_task_ids"][:5])
             self._send_sync(
                 chat_id,
                 f"Session {session_id}: {ok}/{total} succeeded, {failed} failed ({ids}).",
+            )
+        elif unfinished:
+            self._send_sync(
+                chat_id,
+                f"Session {session_id}: {ok}/{total} succeeded, "
+                f"{unfinished} unfinished (drive safety limit); /retry or ask again.",
             )
         else:
             self._send_sync(chat_id, f"Session {session_id}: all {total} succeeded.")
