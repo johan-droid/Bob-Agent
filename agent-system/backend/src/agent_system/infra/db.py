@@ -6,8 +6,10 @@ keys ON, busy timeout set, all writes transactional.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -33,11 +35,35 @@ def _normalize_url(database_url: str) -> str:
     return database_url
 
 
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    """Create the parent directory of a file-based SQLite database.
+
+    Fresh installations start without ``data/`` (it is not tracked in git),
+    and a relative ``sqlite:///data/agent_system.db`` URL then fails every
+    connection with "unable to open database file" — breaking migrations and
+    API startup alike. This runs in the single engine choke point used by the
+    API, worker, Alembic, and CLI so the documented install just works.
+    Absolute paths whose parent already exists are untouched; ``:memory:`` and
+    URI-style URLs are ignored.
+    """
+    if database_url.startswith("sqlite") and not database_url.startswith(
+        ("sqlite:///:memory:", "sqlite://?", "file:")
+    ):
+        # sqlite:///relative/path.db  |  sqlite:////absolute/path.db
+        _, _, rest = database_url.partition("sqlite:///")
+        if rest and not rest.startswith(":memory:"):
+            db_path = Path(rest if database_url.startswith("sqlite:////") else Path.cwd() / rest)
+            parent = db_path.parent
+            if str(parent) not in ("", "."):
+                os.makedirs(parent, exist_ok=True)
+
+
 def make_engine(database_url: str) -> Engine:
     """Create an engine; apply required pragmas to every SQLite connection."""
     database_url = _normalize_url(database_url)
     is_sqlite = database_url.startswith("sqlite")
     if is_sqlite:
+        _ensure_sqlite_parent_dir(database_url)
         engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},

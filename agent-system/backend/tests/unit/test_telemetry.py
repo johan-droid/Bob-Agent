@@ -141,6 +141,10 @@ class TestElapsedSeconds:
 
 class TestOtelSmoke:
     def test_enabled_flow_with_collector_packages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # This smoke requires the optional `telemetry` extra. Without it the
+        # production behavior under test is "stay disabled with a warning",
+        # which TestDisabledByDefault already covers — skip rather than fail.
+        pytest.importorskip("opentelemetry.sdk.metrics", reason="telemetry extra not installed")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
         handle = setup_telemetry()
         assert handle.enabled is True

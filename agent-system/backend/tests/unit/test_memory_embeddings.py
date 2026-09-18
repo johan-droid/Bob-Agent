@@ -85,6 +85,10 @@ class TestLocalProvider:
     def test_local_beats_hash_on_paraphrase_fixture(
         self, vault: ObsidianVaultWriter, tmp_path: Path
     ) -> None:
+        # Requires the optional `memory` extra (sentence-transformers). The
+        # no-extra behavior (fail-closed MemoryError) is covered by
+        # test_local_missing_dep_error_mentions_extra — skip when absent.
+        pytest.importorskip("sentence_transformers", reason="memory extra not installed")
         hash_store = MemoryStore(vault, HashEmbedding())
         local_store = MemoryStore(
             ObsidianVaultWriter(tmp_path / "vault2"), LocalEmbeddingProvider()
