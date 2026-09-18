@@ -440,9 +440,7 @@ class PermissionGate:
         # for backward compatibility.
         if record.owner_user_id is not None and decided_by_user_id is not None:
             if record.owner_user_id != decided_by_user_id:
-                raise ValueError(
-                    f"approval '{approval_id}' belongs to a different owner"
-                )
+                raise ValueError(f"approval '{approval_id}' belongs to a different owner")
         record.decision = Decision.APPROVED if approve else Decision.DENIED
         record.policy = policy
         record.decided_by = decided_by

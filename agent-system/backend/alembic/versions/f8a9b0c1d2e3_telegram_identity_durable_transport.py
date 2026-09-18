@@ -52,7 +52,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
     )
-    op.create_index(op.f("ix_users_created_at"), "users", ["created_at"], unique=False)
 
     op.create_table(
         "telegram_accounts",
@@ -63,7 +62,10 @@ def upgrade() -> None:
         sa.Column("role", sa.String(length=20), nullable=False, server_default="member"),
         sa.Column("linked_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], name=op.f("fk_telegram_accounts_user_id_users")
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_telegram_accounts_user_id_users"),
+            ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_telegram_accounts")),
         sa.UniqueConstraint("telegram_user_id", name="uq_telegram_accounts_tg_user_id"),
@@ -153,5 +155,4 @@ def downgrade() -> None:
         op.f("ix_telegram_accounts_telegram_user_id"), table_name="telegram_accounts"
     )
     op.drop_table("telegram_accounts")
-    op.drop_index(op.f("ix_users_created_at"), table_name="users")
     op.drop_table("users")

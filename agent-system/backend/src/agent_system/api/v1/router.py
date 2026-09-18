@@ -134,7 +134,7 @@ class SessionOut(BaseModel):
 
 @authenticated.post("/sessions", status_code=201)
 def create_session(
-    body: SessionCreate, request: Request, principal: Any = Depends(get_principal)
+    body: SessionCreate, request: Request, principal: Annotated[Any, Depends(get_principal)]
 ) -> SessionOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
@@ -163,16 +163,15 @@ def create_session(
 @authenticated.get("/sessions")
 def list_sessions(
     request: Request,
-    principal: Any = Depends(get_principal),
+    principal: Annotated[Any, Depends(get_principal)],
     limit: int = 50,
     offset: int = 0,
 ) -> list[SessionOut]:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
         query = db.query(Session)
-        if getattr(principal, "mode", None) is not None and getattr(
-            principal, "mode", None
-        ).value != "local":
+        mode = getattr(principal, "mode", None)
+        if mode is not None and mode.value != "local":
             uid = getattr(principal, "user_id", None)
             if uid is not None:
                 query = query.filter(Session.owner_user_id == uid)
@@ -182,7 +181,7 @@ def list_sessions(
 
 @authenticated.get("/sessions/{session_id}")
 def get_session(
-    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+    session_id: str, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> SessionOut:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
@@ -197,7 +196,10 @@ class SessionUpdate(BaseModel):
 
 @authenticated.patch("/sessions/{session_id}")
 def update_session(
-    session_id: str, body: SessionUpdate, request: Request, principal: Any | None = Depends(get_principal)
+    session_id: str,
+    body: SessionUpdate,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> SessionOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
@@ -230,7 +232,7 @@ class PlanOut(BaseModel):
 
 @authenticated.post("/sessions/{session_id}/plan", status_code=201)
 def plan_session(
-    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+    session_id: str, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> PlanOut:
     """Plan a session's goal into a task DAG and persist it as tasks.
 
@@ -273,7 +275,7 @@ def plan_session(
 
 @authenticated.delete("/sessions/{session_id}", status_code=204)
 def delete_session(
-    session_id: str, request: Request, principal: Any | None = Depends(get_principal)
+    session_id: str, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> None:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
@@ -355,7 +357,7 @@ def _fresh_task_out(factory: Any, task_id: str) -> TaskOut | None:
 
 @authenticated.post("/tasks", status_code=201)
 def create_task(
-    body: TaskCreate, request: Request, principal: Any | None = Depends(get_principal)
+    body: TaskCreate, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> TaskOut:
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
@@ -427,7 +429,7 @@ def list_tasks(
 
 @authenticated.get("/tasks/{task_id}")
 def get_task(
-    task_id: str, request: Request, principal: Any | None = Depends(get_principal)
+    task_id: str, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> TaskOut:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
@@ -442,7 +444,10 @@ class TaskTransition(BaseModel):
 
 @authenticated.post("/tasks/{task_id}/transition")
 def transition_task(
-    task_id: str, body: TaskTransition, request: Request, principal: Any | None = Depends(get_principal)
+    task_id: str,
+    body: TaskTransition,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> TaskOut:
     """Explicit, validated state transition — invalid ones are rejected (v3.1 §7).
 
@@ -514,7 +519,10 @@ def transition_task(
 
 @authenticated.post("/tasks/{task_id}/retry", status_code=202)
 def retry_task(
-    task_id: str, request: Request, response: Response, principal: Any | None = Depends(get_principal)
+    task_id: str,
+    request: Request,
+    response: Response,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> TaskOut:
     """Retry a failed task: FAILED -> QUEUED + execution kickoff.
 
@@ -578,7 +586,7 @@ def retry_task(
 
 @authenticated.post("/tasks/{task_id}/run", status_code=202)
 def run_task(
-    task_id: str, request: Request, principal: Any | None = Depends(get_principal)
+    task_id: str, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> TaskOut:
     """Explicit execution trigger: queue (if needed) + run in-process.
 
@@ -682,7 +690,7 @@ def _approval_out(rec: Any) -> ApprovalOut:
 
 @authenticated.post("/approvals", status_code=202)
 def request_approval(
-    body: ApprovalCreate, request: Request, principal: Any | None = Depends(get_principal)
+    body: ApprovalCreate, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> ApprovalOut:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
@@ -723,12 +731,13 @@ def request_approval(
 @authenticated.get("/approvals")
 def list_approvals(
     request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
     pending_only: bool = True,
-    principal: Any | None = Depends(get_principal),
 ) -> list[ApprovalOut]:
     gate: PermissionGate = request.app.state.gate
     records = gate.list_pending() if pending_only else gate.list_all()
-    if getattr(principal, "mode", None) is not None and getattr(principal, "mode", None).value != "local":
+    mode = getattr(principal, "mode", None)
+    if mode is not None and mode.value != "local":
         uid = getattr(principal, "user_id", None)
         if uid is not None:
             records = [r for r in records if r.owner_user_id == uid or r.owner_user_id is None]
@@ -737,7 +746,10 @@ def list_approvals(
 
 @authenticated.post("/approvals/{approval_id}/decision")
 def decide_approval(
-    approval_id: str, body: ApprovalDecision, request: Request, principal: Any | None = Depends(get_principal)
+    approval_id: str,
+    body: ApprovalDecision,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> ApprovalOut:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus
@@ -788,7 +800,7 @@ def decide_approval(
 
 @authenticated.post("/approvals/sweep")
 def sweep_approvals(
-    request: Request, principal: Any | None = Depends(get_principal)
+    request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> dict[str, object]:
     gate: PermissionGate = request.app.state.gate
     bus: EventBus = request.app.state.event_bus

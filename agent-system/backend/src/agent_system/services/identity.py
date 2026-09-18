@@ -46,11 +46,11 @@ class Role(StrEnum):
 
 
 ROLE_POWER: dict[Role, frozenset[Role]] = {
-    Role.OWNER: {Role.OWNER, Role.ADMIN, Role.MEMBER, Role.GUEST},
-    Role.ADMIN: {Role.ADMIN, Role.MEMBER, Role.GUEST},
-    Role.MEMBER: {Role.MEMBER},
-    Role.GUEST: {Role.GUEST},
-    Role.BLOCKED: set(),
+    Role.OWNER: frozenset({Role.OWNER, Role.ADMIN, Role.MEMBER, Role.GUEST}),
+    Role.ADMIN: frozenset({Role.ADMIN, Role.MEMBER, Role.GUEST}),
+    Role.MEMBER: frozenset({Role.MEMBER}),
+    Role.GUEST: frozenset({Role.GUEST}),
+    Role.BLOCKED: frozenset(),
 }
 
 ROLE_CAPABILITIES: dict[Role, frozenset[str]] = {

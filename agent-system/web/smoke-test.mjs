@@ -56,15 +56,46 @@ const check = (name, cond, detail = "") => {
   if (!cond) failures.push(name);
 };
 
+// Fresh-checkout reproducibility: the harness must not depend on a pre-seeded
+// database or on secrets. We migrate a scratch DB, use a non-default bootstrap
+// secret (the web proxy deliberately refuses the dev default), and force the
+// offline echo provider so the live task checks never depend on a real model.
+const bootstrapSecret = process.env.AGENT_BOOTSTRAP_SECRET || `bob-smoke-${process.pid}-${Date.now()}`;
+const smokeDb = `sqlite:////tmp/bob-smoke-${process.pid}.db`;
+const run = (cmd, args, opts = {}) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: "pipe", ...opts });
+    child.once("error", reject);
+    child.once("exit", (code) =>
+      code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`)),
+    );
+  });
+const backendEnv = {
+  ...process.env,
+  DATABASE_URL: smokeDb,
+  AGENT_BOOTSTRAP_SECRET: bootstrapSecret,
+  DEFAULT_PROVIDER: "echo",
+  DEFAULT_MODEL: "",
+};
+
 let backend, frontend;
 try {
+  await run("../backend/.venv/bin/alembic", ["upgrade", "head"], {
+    cwd: "../backend",
+    env: backendEnv,
+  });
   backend = spawn(".venv/bin/python", ["-m", "uvicorn", "agent_system.api.main:app", "--port", "8123"], {
     cwd: "../backend",
     stdio: "pipe",
+    env: backendEnv,
   });
   frontend = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-p", "3100"], {
     stdio: "pipe",
-    env: { ...process.env, AGENT_SYSTEM_API_URL: "http://127.0.0.1:8123" },
+    env: {
+      ...process.env,
+      AGENT_SYSTEM_API_URL: "http://127.0.0.1:8123",
+      AGENT_BOOTSTRAP_SECRET: bootstrapSecret,
+    },
   });
 
   await wait(8123);
@@ -90,7 +121,7 @@ try {
   const invalid = await get(3100, "/api/v1/sessions", { Authorization: "Bearer invalid" });
   check("proxy does not replace invalid explicit credentials", invalid.status === 401);
   const tokenRes = await post(8123, "/api/v1/auth/token", {
-    session_secret: process.env.AGENT_BOOTSTRAP_SECRET,
+    session_secret: bootstrapSecret,
   });
   check("auth token minted via bootstrap secret", tokenRes.status === 200 && !!JSON.parse(tokenRes.body).token, `status=${tokenRes.status}`);
   const token = JSON.parse(tokenRes.body).token;

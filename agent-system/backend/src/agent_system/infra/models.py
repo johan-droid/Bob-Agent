@@ -454,9 +454,7 @@ class TelegramAccount(Base):
     role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)
     linked_at: Mapped[datetime] = _ts()
 
-    __table_args__ = (
-        UniqueConstraint("telegram_user_id", name="uq_telegram_accounts_tg_user_id"),
-    )
+    __table_args__ = (UniqueConstraint("telegram_user_id", name="uq_telegram_accounts_tg_user_id"),)
 
 
 class TelegramUpdate(Base):
