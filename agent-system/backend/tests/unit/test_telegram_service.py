@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from agent_system.config import Settings
+from agent_system.infra.db import make_engine, make_session_factory, session_scope
 from agent_system.infra.event_bus import EventBus
+from agent_system.infra.models import Base, TelegramUpdate
 from agent_system.services.permissions import (
     ApprovalRequest,
     Decision,
@@ -130,6 +133,117 @@ class TestUpdateDispatch:
                 },
             }
         )
+
+
+class TestDurableLedger:
+    """Crash-safe ingest ledger semantics (at-least-once work).
+
+    INV-007: a retried delivery must be safe. An update is logged to
+    ``telegram_updates`` before processing and marked COMPLETED
+    (``processed_at``) only after processing succeeds. A redelivery whose row
+    is still ``processed_at IS NULL`` (the crash window) must be re-processed,
+    never dropped.
+    """
+
+    def _factory(self, tmp_path: Path) -> Any:
+        engine = make_engine(f"sqlite:///{tmp_path / 'tg_ledger.db'}")
+        Base.metadata.create_all(engine)
+        return make_session_factory(engine)
+
+    def _svc(self, factory: Any) -> TelegramService:
+        settings = _settings()  # token set, allowlist {111, 222}
+        return TelegramService(settings, factory, PermissionGate(), EventBus())
+
+    def _update(self, update_id: int = 1) -> dict[str, Any]:
+        return {
+            "update_id": update_id,
+            "message": {"chat": {"id": 111}, "from": {"id": 111}, "text": "/status"},
+        }
+
+    async def _deliver(self, svc: TelegramService, update: dict[str, Any]) -> int:
+        """Deliver once; return how many dispatches happened."""
+        calls: list[str] = []
+
+        async def spy(principal: Any, chat_id: int, text: str) -> None:  # noqa: ARG001
+            calls.append(text)
+
+        original = svc._dispatch_command  # noqa: SLF001
+        svc._dispatch_command = spy  # type: ignore[method-assign]  # noqa: SLF001
+        try:
+            await svc.handle_update(update)
+        finally:
+            svc._dispatch_command = original  # type: ignore[method-assign]  # noqa: SLF001
+        return len(calls)
+
+    @pytest.mark.asyncio
+    async def test_fresh_update_is_processed_and_marked_completed(self, tmp_path: Path) -> None:
+        factory = self._factory(tmp_path)
+        svc = self._svc(factory)
+        update = self._update(1)
+
+        dispatches = await self._deliver(svc, update)
+
+        assert dispatches == 1
+        with session_scope(factory) as db:
+            row = db.get(TelegramUpdate, 1)
+            assert row is not None
+            assert row.processed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_crash_after_persist_redelivery_is_reclaimed(self, tmp_path: Path) -> None:
+        """The mandatory P0 regression: ingest -> crash -> redeliver -> process.
+
+        Simulate the on-disk state left by a crash that happened between the
+        ingest INSERT and completing processing: a row whose ``processed_at``
+        is still NULL. Delivering the same update again must process it exactly
+        once (not skip it) and then mark it COMPLETED.
+        """
+        factory = self._factory(tmp_path)
+        svc = self._svc(factory)
+        update = self._update(1)
+        # Crash window: first delivery ingested + persisted, then the process
+        # died before any processing side effect or COMPLETED marker.
+        with session_scope(factory) as db:
+            db.add(TelegramUpdate(update_id=1, chat_id="111", payload_json=update))
+
+        dispatches = await self._deliver(svc, update)
+
+        assert dispatches == 1, "crash-window retry must be re-processed, not dropped"
+        with session_scope(factory) as db:
+            row = db.get(TelegramUpdate, 1)
+            assert row is not None
+            assert row.processed_at is not None, "retry must now be marked COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_completed_duplicate_delivery_is_skipped(self, tmp_path: Path) -> None:
+        """A fully processed update (processed_at set) is at-most-once: a
+        redelivery is skipped and cannot double-dispatch."""
+        factory = self._factory(tmp_path)
+        svc = self._svc(factory)
+        update = self._update(1)
+
+        first = await self._deliver(svc, update)
+        assert first == 1
+        # Redelivery AFTER COMPLETED must be dropped.
+        second = await self._deliver(svc, update)
+
+        assert second == 0
+        with session_scope(factory) as db:
+            row = db.get(TelegramUpdate, 1)
+            assert row.processed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_retry_layer_does_not_embed_processed_rows(self, tmp_path: Path) -> None:
+        """After the reclaim path runs, the ledger must not double-mark or
+        re-process on a second redelivery."""
+        factory = self._factory(tmp_path)
+        svc = self._svc(factory)
+        update = self._update(7)
+        with session_scope(factory) as db:
+            db.add(TelegramUpdate(update_id=7, chat_id="111", payload_json=update))
+
+        assert await self._deliver(svc, update) == 1  # reclaimed
+        assert await self._deliver(svc, update) == 0  # now COMPLETED -> skipped
 
 
 class TestSend:

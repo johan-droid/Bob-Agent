@@ -7,9 +7,12 @@ Hardening over the legacy gateway:
 - Identity: Telegram user id -> IdentityService -> Bob User + Role. A
   Telegram principal is identity, never authorization (spec §9).
 - Dedup: every inbound update is logged to ``telegram_updates`` by primary
-  key ``update_id`` BEFORE processing. A retried Telegram delivery loses the
-  INSERT race and is skipped — exactly-once across worker/web dyno restarts
-  (spec §3, §30).
+  key ``update_id`` BEFORE processing (crash-safe ingest). A retried delivery
+  loses the INSERT race, but is only dropped once the row is marked COMPLETED
+  (``processed_at`` written after processing succeeds). A retry whose row is
+  still ``processed_at IS NULL`` — the crash window — is re-processed, so a
+  crash between ingest and completion cannot silently delete a user request
+  (at-least-once work, at-most-once completion marker; spec §3, §30).
 - Delivery: outbound messages are persisted to the delivery outbox
   (persist-first, retryable, survives restarts) when a DB factory is wired.
   Falls back to direct httpx when no factory is available (tests, local
@@ -38,6 +41,7 @@ import httpx
 from sqlalchemy.exc import IntegrityError
 
 from agent_system.config import Settings
+from agent_system.domain.events import utcnow
 from agent_system.infra.db import session_scope
 from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import TelegramUpdate
@@ -311,33 +315,47 @@ class TelegramService:
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Process a single raw Telegram update (shared by polling + webhook).
 
-        De-duplicates via the ``telegram_updates`` ledger, resolves the
-        principal, and routes messages vs. callback queries.
+        Crash-safe ingest: the update is logged to the ledger BEFORE any side
+        effect, so a re-delivered webhook can be de-duplicated. The ledger row
+        is marked COMPLETED (``processed_at``) only after processing finishes;
+        a crash mid-processing leaves the row unprocessed, so Telegram's retry
+        re-processes it instead of dropping the user's request.
         """
         if not self.is_configured():
             return
         # Idempotency gate: log the update BEFORE any side effects.
         if not self._log_update(update):
-            # Already seen this update_id — skip silently (Telegram retry).
+            # Already completed (at-most-once) — skip silently. A crash-window
+            # retry (row exists but `processed_at IS NULL`) is reclaimed here
+            # and processed now.
             return
+        update_id = update.get("update_id")
         message = update.get("message")
+        callback = update.get("callback_query")
         if message:
             await self._handle_message(message)
-            return
-        callback = update.get("callback_query")
-        if callback:
+        elif callback:
             await self._handle_callback(callback)
+        # No message/callback payload still counts as handled (no-op).
+        if update_id is not None:
+            self._mark_processed(int(update_id))
 
     def _log_update(self, update: dict[str, Any]) -> bool:
-        """Record the update in the ingest ledger. Returns False if duplicate.
+        """Record the update in the ingest ledger. Returns True to process.
 
-        Without a DB factory (tests), falls back to an in-memory set.
+        A brand-new update inserts the ledger row (durable payload buffer) and
+        returns True. A duplicate is only skipped when the previous ingestion
+        reached COMPLETED (``processed_at`` set). A duplicate whose row is
+        still ``processed_at IS NULL`` means the first attempt ingested the
+        update but never finished — the retry refreshes the payload buffer and
+        returns True so the request is processed at-least-once, never dropped.
         """
         update_id = update.get("update_id")
         if update_id is None:
             return True
+        key = int(update_id)
         if self._factory is None:
-            key = int(update_id)
+            # In-memory fallback (no DB factory): de-dup within the process.
             if key in self._seen_updates:
                 return False
             self._seen_updates.add(key)
@@ -345,7 +363,7 @@ class TelegramService:
         from_chat = update.get("message", {}).get("chat", {}).get("id")
         with session_scope(self._factory) as db:
             row = TelegramUpdate(
-                update_id=int(update_id),
+                update_id=key,
                 chat_id=str(from_chat) if from_chat else None,
                 payload_json=update,
             )
@@ -354,8 +372,29 @@ class TelegramService:
                 db.flush()
             except IntegrityError:
                 db.rollback()
-                return False
+                existing = db.get(TelegramUpdate, key)
+                if existing is None or existing.processed_at is not None:
+                    return False
+                # Crash-window retry: re-deliver while the previous attempt
+                # never reached COMPLETED.
+                existing.chat_id = str(from_chat) if from_chat else None
+                existing.payload_json = update
+                return True
             return True
+
+    def _mark_processed(self, update_id: int) -> None:
+        """Write the durable COMPLETED marker for a handled update.
+
+        A row with ``processed_at`` set is never re-processed on a later
+        delivery. The marker is written only after processing succeeded, so the
+        ``processed_at IS NULL`` state remains the reclaimable crash window.
+        """
+        if self._factory is None:
+            return
+        with session_scope(self._factory) as db:
+            row = db.get(TelegramUpdate, update_id)
+            if row is not None and row.processed_at is None:
+                row.processed_at = utcnow()
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         chat = message.get("chat", {})

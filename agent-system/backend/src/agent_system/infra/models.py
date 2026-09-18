@@ -461,10 +461,12 @@ class TelegramUpdate(Base):
     """Ingest ledger + durable payload buffer for Telegram updates.
 
     One row per Telegram ``update_id``. The UNIQUE primary key is the
-    idempotency gate: a retried webhook/poll delivery loses the INSERT race
-    and the loser re-processes the winner's stored payload (exactly-once
-    processing even across worker restarts). ``processed_at IS NULL`` marks
-    an ingested-but-not-yet-executed update.
+    idempotency gate: a retried webhook/poll delivery loses the INSERT race.
+    ``processed_at IS NULL`` marks an ingested-but-not-yet-executed update —
+    the reclaimable crash window. A retried delivery whose row is still
+    ``processed_at IS NULL`` is re-processed (at-least-once work); a completed
+    row (``processed_at`` set) is skipped. ``processed_at`` is written only
+    after processing succeeds.
     """
 
     __tablename__ = "telegram_updates"
