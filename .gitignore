@@ -185,6 +185,10 @@ profilis-cache/
 .profilis-dashboard/
 profilis-dashboard/
 
+# Profilis config — local per-machine profiler settings, never commit
+.profilic
+**/.profilic
+
 # Profilis test/scratch artifacts
 .profilis-test/
 test-profilis/
