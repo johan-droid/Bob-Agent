@@ -116,15 +116,22 @@ class TemplateManager:
         restored: list[str] = []
         target.mkdir(parents=True, exist_ok=True)
         with tarfile.open(src, "r:gz") as tar:
+            safe_members: list[tarfile.TarInfo] = []
             for member in tar.getmembers():
                 # Safe extraction: reject absolute paths and traversal (v3.1 §14).
                 if member.name.startswith("/") or ".." in Path(member.name).parts:
                     continue
                 if is_secret_path(member.name):
                     continue  # defense in depth: never restore secrets
-                dest = target / member.name
-                if not str(dest.resolve()).startswith(str(target.resolve()) + "/"):
+                dest = (target / member.name).resolve()
+                if dest != target.resolve() and target.resolve() not in dest.parents:
                     continue
-                tar.extract(member, target)
-                restored.append(member.name)
+                safe_members.append(member)
+            # The explicit filter protects against traversal and other unsafe
+            # metadata even for members that pass the path check.
+            try:
+                tar.extractall(target, members=safe_members, filter="data")
+            except (tarfile.TarError, OSError):
+                return restored
+            restored = [member.name for member in safe_members]
         return restored

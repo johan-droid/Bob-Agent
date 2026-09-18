@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from agent_system.domain import ids
 from agent_system.domain.events import Event, utcnow
@@ -28,6 +28,11 @@ AgentHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 LEASE_TTL_SECONDS = 30
 MAX_TASKS_PER_SESSION = 100
 MAX_AGENT_SPAWN_PER_TASK = 5
+
+#: Fixed advisory-lock key that serializes all task claims on PostgreSQL
+#: (any two 63-bit-signed-int constants work; a task-scoped key would NOT
+#: serialize claims of different tasks, which is exactly the overshoot).
+_PG_CLAIM_LOCK_KEY = 721834917563402
 
 
 def _concurrency_limit() -> int:
@@ -53,18 +58,38 @@ def claim_queued_task(db: Any, task_id: str) -> bool:
     """Atomically claim one QUEUED task for execution iff under the cap.
 
     Resource enforcement (INV-010): the concurrency guard and the
-    ``QUEUED -> RUNNING`` transition are a single conditional UPDATE —
-    ``UPDATE task SET state='RUNNING' ... WHERE id=:id AND state='QUEUED'
-    AND (SELECT COUNT(*) FROM task WHERE state IN ('RUNNING','REVIEW')) < :limit``
+    ``QUEUED -> RUNNING`` transition are one critical section —
+    ``UPDATE tasks SET state='RUNNING' ... WHERE id=:id AND state='QUEUED'
+    AND (SELECT COUNT(*) FROM tasks WHERE state IN ('RUNNING','REVIEW')) < :limit``
     — so racing drivers cannot exceed the limit via check-then-act: the loser's
     WHERE fails and its task stays QUEUED for a later round/sweep. This is the
     one claim seam shared by the in-process orchestrator and the RQ worker.
 
-    ``ponytail:`` SQLite serializes writers so the guard is exact; on Postgres
-    concurrent claims of DIFFERENT tasks can overshoot by the width of the
-    statement race window (self-correcting on the next sweep). Upgrade to
-    advisory locks only if multi-writer overshoot ever measurably matters.
+    Cross-process serialization: on PostgreSQL the cap subquery is a separate
+    read from the write, so two sessions on DIFFERENT tasks can interleave in
+    READ COMMITTED and both pass a stale guard. The claim therefore takes a
+    transaction-scoped advisory lock (``pg_advisory_xact_lock``) first: every
+    claimant of any task serializes on the same lock key, making the
+    count-then-write pair atomic across processes. On SQLite the lock is a
+    no-op (writers already serialize); on other backends the guarded UPDATE
+    alone applies.
     """
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        # Transaction-scoped lock: released automatically at commit/rollback.
+        # A single fixed key serializes all claims — contention here is the
+        # point (it is what makes the cap exact) and claim statements are
+        # sub-millisecond.
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PG_CLAIM_LOCK_KEY})
+    elif bind.dialect.name == "sqlite":
+        # Take the main-database write lock NOW (BEGIN IMMEDIATE equivalent):
+        # SQLite defers the write lock to the first main-DB write, and a busy
+        # timeout does not cover a lock UPGRADE mid-statement — the guarded
+        # UPDATE both reads (cap subquery) and writes, so starting it without
+        # the lock can fail with SQLITE_BUSY on 6+ concurrent claims. A write
+        # that touches a real table takes the lock and then releases it again
+        # within this same transaction; the UPDATE below then runs lock-held.
+        db.execute(text("UPDATE tasks SET updated_at = updated_at WHERE id = ''"))
     running_sq = (
         select(func.count())
         .select_from(Task)

@@ -68,9 +68,9 @@ jobs:
       - name: Build QA sandbox image
         run: |
           docker build \
-            -t agent-system/qa-sandbox:latest \
-            -f backend/docker/qa-sandbox.Dockerfile \
-            backend/docker
+            --tag agent-system/qa-sandbox:latest \
+            --file agent-system/backend/docker/qa-sandbox.Dockerfile \
+            agent-system/backend/docker
 
       # Redis-backed tests self-skip when no broker is present; the QA sandbox
       # test runs for real now that its image was built above.
@@ -177,12 +177,14 @@ jobs:
 
       - name: Install headless Chromium (Playwright)
         working-directory: agent-system/web
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
         run: |
           npm install --no-save playwright-core
           npx playwright-core install --with-deps chromium || npx playwright-core install chromium
 
       - name: Web smoke test (backend + built UI proxy)
         working-directory: agent-system/web
-        run: node smoke-test.mjs
         env:
-          PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
+          PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+        run: node smoke-test.mjs
