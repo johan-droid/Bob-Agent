@@ -29,7 +29,7 @@ import tempfile
 import urllib.request
 
 DEFAULT_REPO_URL = os.environ.get(
-    "BOB_REPO_URL", "https://github.com/bob-agent/bob-agent.git"
+    "BOB_REPO_URL", "https://github.com/johan-droid/Bob-Agent.git"
 )
 MIN_PYTHON = (3, 12)
 

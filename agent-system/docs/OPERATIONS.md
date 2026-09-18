@@ -198,7 +198,7 @@ npm run dev          # Restart development server
 
 3. **Clone the repository:**
    ```powershell
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 
@@ -255,7 +255,7 @@ npm run dev          # Restart development server
 
 2. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 
@@ -329,7 +329,7 @@ sudo zypper install -y python312 nodejs npm git curl docker docker-compose
 **Common Steps:**
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 

@@ -1,6 +1,6 @@
 # Bob Agent one-liner installer (Windows PowerShell).
 #
-#   irm https://YOUR-HOST/bootstrap/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.ps1 | iex
 #
 # Override the download base with $env:BOB_BOOTSTRAP_BASE.
 # From a local checkout this script just runs .\bootstrap\bootstrap.py.
@@ -164,7 +164,7 @@ function Test-Git {
 # ---------------------------------------------------------------------------
 Write-PlatformNotes
 
-$Base = if ($env:BOB_BOOTSTRAP_BASE) { $env:BOB_BOOTSTRAP_BASE } else { "https://raw.githubusercontent.com/bob-agent/bob-agent/main/agent-system/bootstrap" }
+$Base = if ($env:BOB_BOOTSTRAP_BASE) { $env:BOB_BOOTSTRAP_BASE } else { "https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap" }
 
 # Check for local checkout
 $Local = $null

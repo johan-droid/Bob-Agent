@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Bob Agent one-liner installer (Linux / macOS).
 #
-#   curl -fsSL https://YOUR-HOST/bootstrap/install.sh | bash
-#   curl -fsSL https://YOUR-HOST/bootstrap/install.sh | bash -s -- --yes --skip-setup
+#   curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash -s -- --yes --skip-setup
 #
 # Override the download base (e.g. a pinned release) with BOB_BOOTSTRAP_BASE.
 # From a local checkout this script just runs ./bootstrap/bootstrap.py.
@@ -22,7 +22,7 @@ detect_platform() {
 }
 
 PLATFORM="$(detect_platform)"
-BASE="${BOB_BOOTSTRAP_BASE:-https://raw.githubusercontent.com/bob-agent/bob-agent/main/agent-system/bootstrap}"
+BASE="${BOB_BOOTSTRAP_BASE:-https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap}"
 
 # ---------------------------------------------------------------------------
 # Error handling

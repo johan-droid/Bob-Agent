@@ -38,15 +38,19 @@ After the initial CLI setup, you can choose to stick with the CLI or switch to t
 - **Python 3.12+** — Required for the backend
 - **Node.js 18+** — Required for the web dashboard
 - **Git** — For cloning the repository
-- **Redis** — For task queuing (can be installed via Docker)
+- **Redis** *(optional)* — Only needed for the background RQ worker (durable task queueing, scheduled jobs, Telegram/insights processing). The CLI, API, and web dashboard run without it. `make up` starts Redis + OpenConnector via Docker.
 
 ### Windows
 
-#### Option 1: Using the Installer (Recommended)
+#### Option 1: One-Line Installer (Recommended)
 
-1. Download the latest installer (`BobAgent-Setup.exe`) from the [releases page](https://github.com/your-org/bob-agent/releases).
-2. Run the installer and follow the on-screen instructions.
-3. The installer will set up the CLI and create a desktop shortcut for the web dashboard.
+```powershell
+irm https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.ps1 | iex
+```
+
+The installer checks prerequisites and runs the bootstrapper. A packaged
+`BobAgent-Setup.exe` release is not published yet; use Option 2 (From Source)
+if the one-liner is unavailable.
 
 #### Option 2: From Source
 
@@ -54,7 +58,7 @@ After the initial CLI setup, you can choose to stick with the CLI or switch to t
 2. Install [Git](https://git-scm.com/download/win).
 3. Clone the repository:
    ```powershell
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 4. Run the bootstrapper:
@@ -64,12 +68,15 @@ After the initial CLI setup, you can choose to stick with the CLI or switch to t
 
 ### macOS
 
-#### Option 1: Using Homebrew (Recommended)
+#### Option 1: One-Line Installer (Recommended)
 
 ```bash
-brew tap your-org/bob-agent
-brew install bob-agent
+curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash
 ```
+
+The installer checks prerequisites and runs the bootstrapper. A Homebrew tap
+is not published yet; use Option 2 (From Source) if the one-liner is
+unavailable.
 
 #### Option 2: From Source
 
@@ -79,7 +86,7 @@ brew install bob-agent
    ```
 2. Clone the repository:
    ```bash
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 3. Run the bootstrapper:
@@ -89,22 +96,15 @@ brew install bob-agent
 
 ### Linux
 
-#### Option 1: Using the Package Manager
+#### Option 1: One-Line Installer (Recommended)
 
-**Debian/Ubuntu:**
 ```bash
-curl -fsSL https://install.bob-agent.dev | bash
+curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash
 ```
 
-**RHEL/CentOS/Fedora:**
-```bash
-curl -fsSL https://install.bob-agent.dev | bash
-```
-
-**Arch Linux:**
-```bash
-yay -S bob-agent
-```
+The installer checks prerequisites and runs the bootstrapper. No distro
+packages (`bob-agent`) exist yet; use Option 2 (From Source) if the one-liner
+is unavailable.
 
 #### Option 2: From Source
 
@@ -121,7 +121,7 @@ yay -S bob-agent
    ```
 2. Clone the repository:
    ```bash
-   git clone https://github.com/your-org/bob-agent.git
+   git clone https://github.com/johan-droid/Bob-Agent.git
    cd BobAgent
    ```
 3. Run the bootstrapper:
@@ -258,7 +258,7 @@ Bob Agent can be configured in multiple ways:
 |----------|-----|-------------|
 | **Core** | `DEFAULT_PROVIDER` | LLM provider (echo, openai, anthropic, groq, etc.) |
 | **Core** | `API_PORT` | Backend HTTP port (default: 8000) |
-| **Core** | `REDIS_URL` | Redis connection URL |
+| **Core** | `REDIS_URL` | Redis connection URL (only used by the background worker) |
 | **Auth** | `AGENT_BOOTSTRAP_SECRET` | Secret for API authentication |
 | **Tools** | `TOOLS_REQUIRE_APPROVAL` | Require approval for risky actions |
 | **Tools** | `TOOLS_SHELL_MODE` | Shell execution mode (sandbox/local/off) |
