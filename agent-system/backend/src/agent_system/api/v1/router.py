@@ -1496,3 +1496,38 @@ def router_preview(body: RoutePreview, request: Request) -> dict[str, Any]:
         ],
         "total": len(ranked),
     }
+
+
+@authenticated.get("/tasks/{task_id}/attempts")
+def task_attempts(
+    task_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> list[dict[str, Any]]:
+    factory = request.app.state.session_factory
+    with session_scope(factory) as db:
+        enforce_task_visible(db, task_id, principal)
+        try:
+            from agent_system.infra.models import WorkerAttempt
+
+            rows = (
+                db.query(WorkerAttempt)
+                .filter(WorkerAttempt.task_id == task_id)
+                .order_by(WorkerAttempt.attempt_no)
+                .all()
+            )
+        except Exception:
+            return []
+        return [
+            {
+                "attempt_no": r.attempt_no,
+                "worker_id": r.worker_id,
+                "provider": r.provider,
+                "model_id": r.model_id,
+                "status": r.status,
+                "error": r.error,
+                "latency_ms": r.latency_ms,
+                "tool_calls_made": r.tool_calls_made,
+            }
+            for r in rows
+        ]

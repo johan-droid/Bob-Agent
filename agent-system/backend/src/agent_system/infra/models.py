@@ -362,6 +362,33 @@ class FeedbackLog(Base):
     created_at: Mapped[datetime] = _ts()
 
 
+class WorkerAttempt(Base):
+    """Durable fallback ledger (Agentic Runtime v1, additive).
+
+    One row per provider attempt under the SAME task/worker. A provider
+    switch changes only provider/model/attempt — the task id, worker id,
+    tool state and memory stay put, so executed tool calls are never
+    repeated just because the LLM changed.
+    """
+
+    __tablename__ = "worker_attempts"
+
+    id: Mapped[str] = _pk()
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    worker_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="started", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_calls_made: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = _ts()
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Insight(Base):
     __tablename__ = "insights"
 

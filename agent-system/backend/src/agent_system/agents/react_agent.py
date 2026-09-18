@@ -92,6 +92,85 @@ def install() -> None:
     _installed = True
 
 
+def _provider_for_model(settings: Any, model_id: str) -> str:
+    """Provider that owns ``model_id`` (router adapter key or default)."""
+    try:
+        from agent_system.services.providers import provider_spec
+
+        for key in (
+            "groq",
+            "gemini",
+            "nim",
+            "ollama_cloud",
+            "ollama",
+            "openrouter",
+            "openai",
+            "anthropic",
+            "deepseek",
+            "together",
+            "mistral",
+            "huggingface",
+            "freellmapi",
+            "tokenrouter",
+            "opencode",
+        ):
+            spec = provider_spec(key)
+            if spec is not None and model_id in spec.models:
+                return key
+    except Exception:
+        pass
+    return str(getattr(settings, "default_provider", "echo") or "echo")
+
+
+def _fallback_candidates(
+    settings: Any, task_input: dict[str, Any], model_id: str
+) -> list[tuple[str, str]]:
+    """Ordered (provider, model) candidates for one worker execution.
+
+    Single-provider setups return one candidate (zero behavior change).
+    Multi-provider setups rank by capability requirements of the worker
+    role (tool calling never falls back to a non-tool model).
+    """
+    primary_provider = _provider_for_model(settings, model_id)
+    primary: tuple[str, str] = (primary_provider, model_id)
+    try:
+        from agent_system.services.llm_catalog import DEFAULT_CATALOG
+        from agent_system.services.llm_router import (
+            rank_candidates,
+            request_for_role,
+        )
+        from agent_system.services.provider_health import ProviderHealthTracker
+        from agent_system.services.providers import configured_providers
+
+        role = str(task_input.get("worker_role") or task_input.get("role") or "")
+        request = request_for_role(role, str(task_input.get("task_type") or ""))
+        if role == "" and "goal" in task_input:
+            request.requires_tool_calling = True
+        configured = [p["key"] for p in configured_providers(settings) if p["configured"]]
+        if primary_provider not in configured:
+            configured = [primary_provider, *configured]
+        order_raw = str(getattr(settings, "llm_provider_order", "") or "")
+        order = tuple(p.strip() for p in order_raw.split(",") if p.strip())
+        if order:
+            request.preordered_providers = order
+        else:
+            role_order = tuple(request.preordered_providers or ())
+            merged = (primary_provider, *[p for p in role_order if p != primary_provider])
+            request.preordered_providers = merged
+        ranked = rank_candidates(request, DEFAULT_CATALOG, None, configured)
+        candidates = [(c.provider, c.model_id) for c, _ in ranked]
+        if primary not in candidates:
+            candidates.insert(0, primary)
+        else:
+            candidates.remove(primary)
+            candidates.insert(0, primary)
+        max_attempts = int(getattr(settings, "llm_max_fallback_attempts", 3) or 3)
+        _ = ProviderHealthTracker
+        return candidates[: max(1, max_attempts)]
+    except Exception:
+        return [primary]
+
+
 def _extract_goal(task_input: dict[str, Any]) -> str | None:
     """First non-empty goal-ish key, else the whole input as JSON, else None."""
     for key in _GOAL_KEYS:
@@ -211,6 +290,7 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
 
     router = _build_router(settings, bus)
     model_id = str(task_input.get("model") or default_model_id(settings))
+    candidates = _fallback_candidates(settings, task_input, model_id)
 
     def invoke(prompt: str) -> dict[str, Any]:
         def _on_token(delta: str) -> None:
@@ -219,7 +299,27 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             # chat REPL render them live; model.completed still closes the call.
             emit("model.token", {"model_id": model_id, "delta": delta})
 
-        if hasattr(router, "invoke_streaming"):
+        active_model = model_id
+        if len(candidates) > 1:
+            from agent_system.services.fallback import invoke_with_fallback
+
+            result = invoke_with_fallback(
+                router,
+                factory,
+                candidates,
+                prompt,
+                task_id=task_id,
+                worker_id=run_id or task_id,
+                session_id=session_id,
+                agent_run_id=run_id,
+                agent_type=agent_type,
+                max_attempts=int(getattr(settings, "llm_max_fallback_attempts", 3) or 3),
+                bus=bus,
+            )
+            if result is None:
+                raise RuntimeError("model invocation failed: no candidates")
+            active_model = str(getattr(result, "model_id", model_id))
+        elif hasattr(router, "invoke_streaming"):
             result = router.invoke_streaming(
                 factory,
                 model_id,
@@ -247,11 +347,14 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             "output_tokens": int(result.tokens_out or 0),
             "cached_tokens": int(result.tokens_cached or 0),
         }
-        return {
+        out: dict[str, Any] = {
             "output": result.output or "",
             "usage": usage,
             "tool_calls": result.tool_calls or [],
         }
+        if active_model != model_id:
+            out["model"] = active_model
+        return out
 
     tool_registry = build_registry(settings)
     # Capabilities resolve permissions through the shared gate: same durable
