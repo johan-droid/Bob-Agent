@@ -55,6 +55,7 @@ dev = [
     { name = "coverage" },
     { name = "httpx" },
     { name = "mypy" },
+    { name = "profilis" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -101,6 +102,7 @@ dev = [
     { name = "coverage", specifier = ">=7.16.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.10" },
+    { name = "profilis", specifier = "==1.0.0" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.5" },
@@ -1880,6 +1882,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "profilis"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/48/25/e855444ec059a9daa50d1f63b476feeab868d2932f10f0f5bac756df515e/profilis-1.0.0.tar.gz", hash = "sha256:4d382e896fd1767c79d90c609561cec07490e8a51afa8a488aec9f3ea431d93b", size = 67545, upload-time = "2026-03-12T08:13:30.378Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/bf/2ecb5f68ed0f502ce83fa0a301d59f677cd5b74c1f9fb829137c7008af8e/profilis-1.0.0-py3-none-any.whl", hash = "sha256:cb34a298780d1a22bfc0746ebaa6e71096662688aaabb103565ec8d7fee49cca", size = 55325, upload-time = "2026-03-12T08:13:25.545Z" },
 ]
 
 [[package]]
