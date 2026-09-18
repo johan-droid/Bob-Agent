@@ -80,3 +80,29 @@ select = ["E", "F", "I", "W", "UP", "B"]
 python_version = "3.12"
 strict = true
 plugins = []
+
+# These modules belong to the optional `memory` / `telemetry` extras and are
+# imported behind a runtime ImportError guard in src/. mypy still analyzes the
+# guarded import sites, so without the extras a clean CI checkout reports
+# import-not-found. Suppress only the synthesis failure for these modules (the
+# runtime never relies on them unconditionally); if an extra is installed the
+# types are still fully checked. Runtime imports depend on a try/except
+# ImportError that raises with install instructions when the extra is absent.
+[[tool.mypy.overrides]]
+module = [
+    "opentelemetry",
+    "opentelemetry.metrics",
+    "opentelemetry.trace",
+    "opentelemetry.exporter.otlp.proto.http.metric_exporter",
+    "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+    "opentelemetry.sdk.metrics",
+    "opentelemetry.sdk.metrics.export",
+    "opentelemetry.sdk.resources",
+    "opentelemetry.sdk.trace",
+    "opentelemetry.sdk.trace.export",
+    "opentelemetry.instrumentation.fastapi",
+    "opentelemetry.instrumentation.sqlalchemy",
+    "opentelemetry.instrumentation.httpx",
+    "sentence_transformers",
+]
+ignore_missing_imports = true

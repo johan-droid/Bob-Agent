@@ -209,7 +209,7 @@ try {
       try {
         const page = await browser.newPage();
         await page.goto("http://127.0.0.1:3100/", { waitUntil: "domcontentloaded" });
-        const toggle = page.getByRole("button", { name: /theme/i });
+        const toggle = page.getByRole("button", { name: /theme/i }).first();
         await toggle.waitFor({ timeout: 10000 });
         const before = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
         await toggle.click();
