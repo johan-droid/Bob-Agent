@@ -229,15 +229,20 @@ def execute_with_policy(
     engine = engine or get_policy_engine(
         factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None)
     )
+
+    # Untrusted model arguments are schema-validated FIRST (INV-002): malformed
+    # arguments produce a deterministic ToolValidationError and never reach
+    # policy evaluation, scope derivation, an approval record, or the handler.
+    errors = validate_arguments(tool.name, tool.parameters, args)
+    if errors:
+        raise ToolValidationError(tool.name, errors)
+
+    # NORMALIZED ARGUMENTS -> SCOPE DERIVATION -> POLICY -> APPROVAL -> EXECUTION.
+    # Policy evaluation happens on arguments that already passed the schema.
     policy_ctx = _build_policy_context(tool, args, ctx)
 
     # Full policy evaluation; raises NeedsApprovalError when a grant is missing.
     decision, _grant = engine.evaluate_and_authorize(policy_ctx)
-
-    # Validate arguments (still required)
-    errors = validate_arguments(tool.name, tool.parameters, args)
-    if errors:
-        raise ToolValidationError(tool.name, errors)
 
     # Delegate execution to the single handler seam. The engine already
     # authorized (and consumed an ALLOW_ONCE grant if one was used), so the
@@ -260,13 +265,29 @@ def execute_request_with_policy(
     engine = engine or get_policy_engine(
         factory=getattr(ctx, "factory", None), settings=getattr(ctx, "settings", None)
     )
+    metadata = CapabilityMetadata.from_tool(tool, getattr(ctx, "settings", None))
+
+    # Untrusted model arguments are schema-validated FIRST (INV-002). A
+    # malformed call is refused deterministically before policy evaluation,
+    # scope derivation, an approval record, or the handler can see it.
+    errors = validate_arguments(tool.name, tool.parameters, request.arguments)
+    if errors:
+        exec_decision = ExecutionDecision.invalid(
+            metadata, tuple(errors), reason="arguments failed schema validation"
+        )
+        return ExecutionResult.refuse(
+            request,
+            exec_decision,
+            error=ToolValidationError(tool.name, errors).payload(),
+        )
+
+    # NORMALIZED ARGUMENTS -> SCOPE DERIVATION -> POLICY -> APPROVAL -> EXECUTION.
     policy_ctx = _build_policy_context(tool, request.arguments, ctx)
 
     # Evaluate policy (pure, no side effects)
     decision = engine.evaluate(policy_ctx)
 
     # Map PolicyDecision to ExecutionDecision for compatibility
-    metadata = CapabilityMetadata.from_tool(tool, getattr(ctx, "settings", None))
     if decision.verdict is PolicyVerdict.DENY:
         exec_decision = ExecutionDecision.deny(
             metadata, "; ".join(decision.denial_reasons), scope=decision.scope
