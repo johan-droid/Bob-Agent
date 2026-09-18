@@ -47,6 +47,10 @@ No job failed for environmental reasons; every failure was a real repo defect.
 | `14f6e9f` | **Repaired baseline gates**: migration model-parity (`ondelete="CASCADE"`, removed `ix_users_created_at`); ruff B008 → `Annotated[Any \| None, Depends(get_principal)]` × 14; E501 wraps; `list_approvals` param reorder; `.value` mypy fixes; `identity.py` ROLE_POWER `frozenset`; `ruff format`; **self-contained `web/smoke-test.mjs`** (scratch-DB migrate, non-default bootstrap secret, forced `DEFAULT_PROVIDER=echo`, `DEFAULT_MODEL=""`). |
 | `0b28c98` | **INV-002 validation-before-policy** for `execute_with_policy` (deterministic `ToolValidationError`) and `execute_request_with_policy` (refused `ExecutionResult`, `ExecutionDecision.invalid`, `error="invalid_arguments"`), validation strictly before policy eval / scope derivation / handler. **+36 adversarial contract tests** (16 malformed payload shapes × 2 entry points with spy engine + spy scope, plus valid read/write/approval regression pins). |
 | `4594ac4` | **Install/doc contradictions**: all placeholder URLs → `johan-droid/Bob-Agent` (README, OPERATIONS.md, bootstrap.py/install.sh/install.ps1); README package-manager/Homebrew/.exe/`install.bob-agent.dev` options that don't exist repointed at the real one-line installers that do; Redis re-scoped as optional (worker-only). |
+| `cc7e7fe` | **This evidence doc** (`AUDIT_VERIFICATION.md`) with claim table, baseline table, and remaining-items list. Pushed by owner → `origin/main`. |
+| `2b23563` | **CI-only fixes** found by re-running the real GitHub Actions on `cc7e7fe` (run `35318552017`, 4/5 jobs failing): (1) `mypy src` failed on a pristine checkout because the optional extras (`sentence_transformers`, `opentelemetry.*`) are absent in CI → `[[tool.mypy.overrides]] ignore_missing_imports` for those modules in `pyproject.toml`; (2) web smoke failed strict-mode because `ThemeToggle` renders in both `Header.tsx` and `Sidebar.tsx` → `.first()` in `smoke-test.mjs`. Both verified in a pristine CI-like clone. |
+| `aa5b917` | **P0#1 — Telegram durable retry**: `handle_update` persisted the ledger row before processing and skipped ANY redelivery, so a crash between ingest and completion silently dropped the user's request (spec §3/§30 at-most-once). Now the row is marked COMPLETED (`processed_at`) only after processing succeeds; a redelivery whose row is `processed_at IS NULL` is re-processed (at-least-once work, at-most-once completion marker). Regression tests: ingest→crash→redeliver→processed exactly once; completed duplicates stay skipped. |
+| `P0#7/P0#2` (next commit) | **Policy `evaluate()` is now pure**: `PermissionGate.peek()` (read-only; synthesizes non-persisted `pending-*` records via the new pure `_build()`), explicit `PermissionGate.consume()` backed by an atomic conditional `UPDATE ... WHERE consumed=0` in `DbApprovalStore.mark_consumed()`, and `PolicyEngine` materializers (`evaluate_and_authorize`/`evaluate_and_materialize`) that persist durable records and spend ALLOW_ONCE grants only when actually authorizing. `execution.py` request path uses `evaluate_and_materialize` so approval ids stay real/decision-able. Proves P0#7 (no side effects on evaluation) and P0#2 (exactly one `consume()` winner under a 12-thread race, `tests/unit/test_policy_purity.py`). |
 
 ## 4. Fresh baseline evidence (local, at `4594ac4`)
 
@@ -77,8 +81,16 @@ inside `agent-system/backend`; web: `npm run …` inside `agent-system/web`):
 
 ## 5. Remaining items
 
-1. **Push** the four commits to GitHub and **watch CI**: re-running the 5
-   jobs on the new `main` HEAD is the authoritative green evidence. Not done
-   here (requires a push; left to the repo owner).
-2. Re-run the security/static workflows (bandit/semgrep if configured) on the
-   repaired tree — present in workflow but not executed locally.
+1. **Drive CI green on `main`**: CI has, in fact, run — on `cc7e7fe` (run
+   `35318552017`) 4/5 jobs failed: (a) `mypy src` (root cause fixed in
+   `2b23563`, verified in a pristine clone), (b) web smoke (root cause fixed in
+   `2b23563`, verified with a real browser), (c) `docker build qa-sandbox`
+   (passes locally — log required), (d) `tests/security` (66 passed in a
+   pristine clone — log required). Getting the two unexplained jobs' logs and
+   pushing still requires `gh auth login` / `GH_TOKEN` on the owner machine.
+2. **Fresh authoritative baseline**: `uv run pytest -q` now reports
+   **1001 passed** (988 at `cc7e7fe` + 4 Telegram-retry + 9 policy-purity/
+   atomic-consume) with `ruff`, `ruff format`, and strict `mypy` all clean.
+3. Remaining audit P0s to prove next: object-level multi-user isolation,
+   concurrency/resource enforcement, cloud (re)start recovery, planner
+   semantic validation + risk-preserving safe fallback.

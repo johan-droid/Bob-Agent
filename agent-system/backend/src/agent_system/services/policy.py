@@ -16,7 +16,7 @@ through :func:`evaluate_policy` which returns a :class:`PolicyDecision`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
@@ -27,6 +27,7 @@ from agent_system.config import get_settings
 from agent_system.domain.ids import new_policy_decision_id
 from agent_system.services.permissions import (
     DANGEROUS_SCOPES,
+    EPHEMERAL_APPROVAL_PREFIX,
     ApprovalRecord,
     ApprovalRequest,
     CapabilityRisk,
@@ -444,9 +445,16 @@ class PolicyEngine:
     def _evaluate_approval(
         self, ctx: PolicyContext, risk_eval: RiskEvaluation, scope_eval: ScopeEvaluation
     ) -> ApprovalEvaluation:
-        """Evaluate approval dimension using the PermissionGate."""
+        """Evaluate approval dimension using the PermissionGate.
+
+        PURITY INVARIANT (P0): evaluation never persists anything. The gate is
+        consulted in read-only mode (:meth:`PermissionGate.peek`) — no approval
+        records are created, no ALLOW_ONCE grant is consumed. Durable records
+        are materialized only by the explicit authorize steps
+        (:meth:`evaluate_and_authorize`, :meth:`evaluate_and_materialize`).
+        """
         if scope_eval.is_default_deny:
-            # Default-deny: create a denied record and return DENY
+            # Default-deny: synthesize a denied verdict (nothing persisted).
             req = ApprovalRequest(
                 requested_action=f"{ctx.tool_name} {risk_eval.scope}",
                 risk=risk_eval.level,
@@ -457,11 +465,11 @@ class PolicyEngine:
                 session_id=ctx.session_id,
                 workspace_id=ctx.workspace_id,
             )
-            denied = self._permission_gate.request(req)
+            denied = self._permission_gate.peek(req)
             return ApprovalEvaluation(
                 outcome=Outcome.DENY,
                 approval_id=denied.approval_id,
-                record=denied,
+                record=denied.record,
                 policy=None,
                 expires_at=None,
                 reason="default-deny scope or destructive capability",
@@ -501,7 +509,7 @@ class PolicyEngine:
             session_id=ctx.session_id,
             workspace_id=ctx.workspace_id,
         )
-        decision = self._permission_gate.authorize(req)
+        decision = self._permission_gate.peek(req)
 
         return ApprovalEvaluation(
             outcome=decision.outcome,
@@ -744,6 +752,56 @@ class PolicyEngine:
             metadata=ctx.metadata or {},
         )
 
+    def _materialize_approval(self, decision: PolicyDecision) -> PolicyDecision:
+        """Turn a pure-evaluation decision's approval into a durable record.
+
+        Idempotent: only synthesized (``pending-*``) approval records produced
+        by :meth:`PermissionGate.peek` are persisted; decisions already backed
+        by a real grant or record pass through untouched. AWAIT_APPROVAL and
+        denied verdicts become durable PENDING/DENIED records so any later
+        ``decide()``, audit query, or notification works by a real approval id.
+        """
+        approval = decision.approval
+        record = approval.record
+        if record is None or not record.approval_id.startswith(EPHEMERAL_APPROVAL_PREFIX):
+            return decision
+        if approval.outcome not in (Outcome.DENY, Outcome.WAIT):
+            return decision
+        req = ApprovalRequest(
+            requested_action=record.requested_action,
+            risk=record.risk,
+            scope=record.scope,
+            requester=record.requester,
+            task_id=record.task_id,
+            agent_run_id=record.agent_run_id,
+            session_id=record.session_id,
+            workspace_id=record.workspace_id,
+            owner_user_id=record.owner_user_id,
+            context=record.context,
+        )
+        durable = self._permission_gate.request(req)
+        return replace(
+            decision,
+            approval=ApprovalEvaluation(
+                outcome=approval.outcome,
+                approval_id=durable.approval_id,
+                record=durable,
+                policy=durable.policy,
+                expires_at=durable.expires_at,
+                reason=approval.reason,
+            ),
+        )
+
+    def evaluate_and_materialize(self, ctx: PolicyContext) -> PolicyDecision:
+        """Evaluate (pure) then persist the durable approval record if needed.
+
+        Use this where a real approval id must be returned to the caller (UI /
+        supervisor flows that subsequently ``decide()`` it), but the ALLOW_ONCE
+        grant is NOT consumed here — consumption happens only on the execution
+        path (:meth:`evaluate_and_authorize`).
+        """
+        return self._materialize_approval(self.evaluate(ctx))
+
     def evaluate_and_authorize(
         self, ctx: PolicyContext
     ) -> tuple[PolicyDecision, ApprovalRecord | None]:
@@ -751,10 +809,27 @@ class PolicyEngine:
 
         Returns (decision, grant_record). If decision.allowed is False,
         grant_record is None. Raises NeedsApprovalError if approval is needed.
+
+        Side effects: an ALLOW backed by an ALLOW_ONCE grant consumes the
+        grant atomically (:meth:`PermissionGate.consume`) — at most once per
+        grant across processes. An AWAIT/DENIED approval materializes its
+        durable record so the raised error carries a real approval id.
         """
         from agent_system.services.tool_errors import NeedsApprovalError
 
         decision = self.evaluate(ctx)
+        # Spend an ALLOW_ONCE grant exactly once. If the consume loses a race
+        # (another process already spent it), re-evaluate (pure) and fall
+        # through to the approval-required path — never double-spend.
+        for _ in range(2):
+            grant = decision.approval.record if decision.allowed else None
+            if grant is None or grant.policy is not ApprovalPolicy.ALLOW_ONCE:
+                break
+            if self._permission_gate.consume(grant.approval_id):
+                break
+            decision = self.evaluate(ctx)
+
+        decision = self._materialize_approval(decision)
 
         if not decision.allowed:
             if decision.verdict is PolicyVerdict.AWAIT_APPROVAL:
@@ -764,7 +839,8 @@ class PolicyEngine:
                     denied=False,
                     reason=decision.approval.reason,
                 )
-            # For other denials, raise with denied=True
+            # For other denials, raise with denied=True. Approval-driven
+            # denials already carry a durable (materialized) record.
             raise NeedsApprovalError(
                 approval_id=decision.approval.approval_id or "",
                 action=decision.tool_name,

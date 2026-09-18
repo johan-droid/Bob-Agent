@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, Field
 
@@ -91,6 +91,14 @@ CAPABILITY_RISK_TO_RISK: dict[CapabilityRisk, Risk] = {
     CapabilityRisk.EXECUTE: Risk.HIGH,
     CapabilityRisk.DESTRUCTIVE: Risk.CRITICAL,
 }
+
+
+#: Prefix for records synthesized by :meth:`PermissionGate.peek` during pure
+#: evaluation. Such records are NEVER persisted; they only carry request
+#: metadata until an explicit :meth:`PolicyEngine` authorize step materializes
+#: a real, durable record. The prefix makes "not actually in the store" cheap
+#: to detect without a lookup.
+EPHEMERAL_APPROVAL_PREFIX = "pending-"
 
 
 # Default-deny scopes (v3.1 §13) — cannot be pre-approved via ALLOW_ALWAYS.
@@ -221,6 +229,8 @@ class ApprovalStore(Protocol):
 
     def grants_for(self, scope: str) -> list[ApprovalRecord]: ...
 
+    def mark_consumed(self, approval_id: str, now: datetime) -> bool: ...
+
 
 class MemoryApprovalStore:
     """Process-local store (tests, detached gates). Semantics identical."""
@@ -244,6 +254,19 @@ class MemoryApprovalStore:
         return [
             r for r in self.records.values() if r.scope == scope and r.decision is Decision.APPROVED
         ]
+
+    def mark_consumed(self, approval_id: str, now: datetime) -> bool:
+        """Atomically consume an ALLOW_ONCE grant. True only for the winner.
+
+        The conditional check-and-set is a single critical section in the
+        process-local store, so concurrent ``consume`` calls yield exactly one
+        winner — matching the DB-backed store's conditional UPDATE.
+        """
+        record = self.records.get(approval_id)
+        if record is None or record.consumed or record.is_expired(now):
+            return False
+        record.consumed = True
+        return True
 
 
 def _record_to_row(record: ApprovalRecord) -> Any:
@@ -354,6 +377,32 @@ class DbApprovalStore:
                 .all()
             )
             return [_row_to_record(r) for r in rows]
+
+    def mark_consumed(self, approval_id: str, now: datetime) -> bool:
+        """Atomically consume an ALLOW_ONCE grant; True only for the winner.
+
+        A single conditional ``UPDATE ... WHERE consumed=0 AND not expired``
+        runs under the store's write lock, so concurrent processes racing for
+        one grant yield exactly one winner. This is the cross-process guard
+        behind :meth:`PermissionGate.consume` (v3.1 §12 ALLOW_ONCE).
+        """
+        from sqlalchemy import or_
+        from sqlalchemy import update as sa_update
+
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import Approval as ApprovalRow
+
+        with session_scope(self._factory) as db:
+            result = db.execute(
+                sa_update(ApprovalRow)
+                .where(
+                    ApprovalRow.id == approval_id,
+                    ApprovalRow.consumed.is_(False),
+                    or_(ApprovalRow.expires_at.is_(None), ApprovalRow.expires_at > now),
+                )
+                .values(consumed=True)
+            )
+            return (cast(Any, result).rowcount or 0) > 0
 
 
 class PermissionGate:
@@ -518,6 +567,72 @@ class PermissionGate:
             reason="awaiting approval",
         )
 
+    def peek(self, req: ApprovalRequest) -> PermissionDecision:
+        """Pure, read-only evaluation — same verdict logic as :meth:`authorize`.
+
+        P0 invariant: evaluation must be side-effect-free so policy can be
+        re-run freely (previews, previews, idempotency and replay) without
+        mutating durable state. ``peek`` creates NO records, consumes NO
+        grants, and writes NOTHING. Result records that do not exist in the
+        store are synthesized with an ``pending-*`` id (see
+        ``EPHEMERAL_APPROVAL_PREFIX``); materialize them with
+        :meth:`consume`/an explicit authorize step only when executing.
+        """
+        if is_dangerous_scope(req.scope):
+            denied = self._build(
+                req, Decision.DENIED, decided_by="gate", reason="default-deny scope"
+            )
+            denied.approval_id = f"{EPHEMERAL_APPROVAL_PREFIX}{denied.approval_id}"
+            return PermissionDecision(
+                outcome=Outcome.DENY,
+                scope=req.scope,
+                risk=denied.risk,
+                approval_id=denied.approval_id,
+                record=denied,
+                reason="default-deny scope",
+            )
+        now = utcnow()
+        for record in self._store.grants_for(req.scope):
+            if record.is_expired(now) or record.consumed:
+                continue
+            if record.policy is Policy.ALLOW_SESSION and record.session_id != req.session_id:
+                continue
+            if record.policy is Policy.ALLOW_WORKSPACE and record.workspace_id != req.workspace_id:
+                continue
+            return PermissionDecision(
+                outcome=Outcome.ALLOW,
+                scope=req.scope,
+                risk=record.risk,
+                approval_id=record.approval_id,
+                record=record,
+                reason="existing grant",
+            )
+        pending = self._build(req, Decision.PENDING, decided_by=None, reason=None)
+        pending.approval_id = f"{EPHEMERAL_APPROVAL_PREFIX}{pending.approval_id}"
+        return PermissionDecision(
+            outcome=Outcome.WAIT,
+            scope=req.scope,
+            risk=pending.risk,
+            approval_id=pending.approval_id,
+            record=pending,
+            reason="awaiting approval",
+        )
+
+    def consume(self, approval_id: str) -> bool:
+        """Atomically consume an ALLOW_ONCE grant. True only for the winner.
+
+        Idempotent for the winner, a defensive no-op for everyone else:
+        already-consumed or expired grants return False. This is the only
+        place an ALLOW_ONCE grant is spent, and it is called at execution
+        time — never during evaluation.
+        """
+        spent = self._store.mark_consumed(approval_id, utcnow())
+        stored = self._store.get(approval_id)
+        if stored is not None:
+            # Keep the process-local view coherent with the store.
+            self._records[stored.approval_id] = stored
+        return spent
+
     # -- lifecycle ----------------------------------------------------------
 
     def sweep_expired(self) -> list[str]:
@@ -561,10 +676,11 @@ class PermissionGate:
         self._store.update(record)
         self._records[record.approval_id] = record
 
-    def _make(
-        self, req: ApprovalRequest, decision: Decision, decided_by: str, reason: str
+    def _build(
+        self, req: ApprovalRequest, decision: Decision, decided_by: str | None, reason: str | None
     ) -> ApprovalRecord:
-        record = ApprovalRecord(
+        """Pure record constructor — no store writes (used by :meth:`peek`)."""
+        return ApprovalRecord(
             approval_id=new_approval_id(),
             requested_action=req.requested_action,
             risk=req.risk,
@@ -583,6 +699,11 @@ class PermissionGate:
             decided_at=utcnow(),
             expires_at=utcnow(),
         )
+
+    def _make(
+        self, req: ApprovalRequest, decision: Decision, decided_by: str | None, reason: str | None
+    ) -> ApprovalRecord:
+        record = self._build(req, decision, decided_by, reason)
         self._store.add(record)
         self._records[record.approval_id] = record
         return record

@@ -284,8 +284,9 @@ def execute_request_with_policy(
     # NORMALIZED ARGUMENTS -> SCOPE DERIVATION -> POLICY -> APPROVAL -> EXECUTION.
     policy_ctx = _build_policy_context(tool, request.arguments, ctx)
 
-    # Evaluate policy (pure, no side effects)
-    decision = engine.evaluate(policy_ctx)
+    # Evaluate policy (pure). Durable approval records are materialized so the
+    # decision carries a real approval id the caller can decide/notify on.
+    decision = engine.evaluate_and_materialize(policy_ctx)
 
     # Map PolicyDecision to ExecutionDecision for compatibility
     if decision.verdict is PolicyVerdict.DENY:
