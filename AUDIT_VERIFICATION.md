@@ -50,7 +50,8 @@ No job failed for environmental reasons; every failure was a real repo defect.
 | `cc7e7fe` | **This evidence doc** (`AUDIT_VERIFICATION.md`) with claim table, baseline table, and remaining-items list. Pushed by owner → `origin/main`. |
 | `2b23563` | **CI-only fixes** found by re-running the real GitHub Actions on `cc7e7fe` (run `35318552017`, 4/5 jobs failing): (1) `mypy src` failed on a pristine checkout because the optional extras (`sentence_transformers`, `opentelemetry.*`) are absent in CI → `[[tool.mypy.overrides]] ignore_missing_imports` for those modules in `pyproject.toml`; (2) web smoke failed strict-mode because `ThemeToggle` renders in both `Header.tsx` and `Sidebar.tsx` → `.first()` in `smoke-test.mjs`. Both verified in a pristine CI-like clone. |
 | `aa5b917` | **P0#1 — Telegram durable retry**: `handle_update` persisted the ledger row before processing and skipped ANY redelivery, so a crash between ingest and completion silently dropped the user's request (spec §3/§30 at-most-once). Now the row is marked COMPLETED (`processed_at`) only after processing succeeds; a redelivery whose row is `processed_at IS NULL` is re-processed (at-least-once work, at-most-once completion marker). Regression tests: ingest→crash→redeliver→processed exactly once; completed duplicates stay skipped. |
-| `P0#7/P0#2` (next commit) | **Policy `evaluate()` is now pure**: `PermissionGate.peek()` (read-only; synthesizes non-persisted `pending-*` records via the new pure `_build()`), explicit `PermissionGate.consume()` backed by an atomic conditional `UPDATE ... WHERE consumed=0` in `DbApprovalStore.mark_consumed()`, and `PolicyEngine` materializers (`evaluate_and_authorize`/`evaluate_and_materialize`) that persist durable records and spend ALLOW_ONCE grants only when actually authorizing. `execution.py` request path uses `evaluate_and_materialize` so approval ids stay real/decision-able. Proves P0#7 (no side effects on evaluation) and P0#2 (exactly one `consume()` winner under a 12-thread race, `tests/unit/test_policy_purity.py`). |
+| `P0#7/P0#2` (`00b4776`) | **Policy `evaluate()` is now pure**: `PermissionGate.peek()` (read-only; synthesizes non-persisted `pending-*` records via the new pure `_build()`), explicit `PermissionGate.consume()` backed by an atomic conditional `UPDATE ... WHERE consumed=0` in `DbApprovalStore.mark_consumed()`, and `PolicyEngine` materializers (`evaluate_and_authorize`/`evaluate_and_materialize`) that persist durable records and spend ALLOW_ONCE grants only when actually authorizing. `execution.py` request path uses `evaluate_and_materialize` so approval ids stay real/decision-able. Proves P0#7 (no side effects on evaluation) and P0#2 (exactly one `consume()` winner under a 12-thread race, `tests/unit/test_policy_purity.py`). |
+| `P0#3` (next commit) | **Object-level isolation**: hoisted the approval ownership gate to the top of `PermissionGate.decide()` (a different identified user is refused even for already-decided records — closing the "first-decision-sticks" leak); the `decide_approval` REST endpoint now refuses a non-owner before the non-PENDING short-circuit reveals the record; the Telegram `/approve`+`/deny` path now forwards `decided_by_user_id` so the gate's ownership check actually fires; Telegram `/cancel`+`/retry` refuse tasks owned by another user. Ownerless objects and UID-less principals keep legacy behaviour. Adversarial matrix in `tests/unit/test_object_isolation.py` (6 tests). |
 
 ## 4. Fresh baseline evidence (local, at `4594ac4`)
 
@@ -89,8 +90,11 @@ inside `agent-system/backend`; web: `npm run …` inside `agent-system/web`):
    pristine clone — log required). Getting the two unexplained jobs' logs and
    pushing still requires `gh auth login` / `GH_TOKEN` on the owner machine.
 2. **Fresh authoritative baseline**: `uv run pytest -q` now reports
-   **1001 passed** (988 at `cc7e7fe` + 4 Telegram-retry + 9 policy-purity/
-   atomic-consume) with `ruff`, `ruff format`, and strict `mypy` all clean.
-3. Remaining audit P0s to prove next: object-level multi-user isolation,
-   concurrency/resource enforcement, cloud (re)start recovery, planner
-   semantic validation + risk-preserving safe fallback.
+   **1007 passed** (988 at `cc7e7fe` + 4 Telegram-retry + 9 policy-purity/
+   atomic-consume + 6 object-isolation) with `ruff`, `ruff format`, and strict
+   `mypy` all clean.
+3. Remaining audit P0s to prove next: concurrency/resource enforcement,
+   cloud (re)start recovery, planner semantic validation + risk-preserving
+   safe fallback. Documented-but-untouched (product posture, not this
+   iteration): NULL-owner records, unauthenticated `GET /tasks`, ownerless
+   workspaces/artifacts/events (see `tests/unit/test_object_isolation.py` docstring).

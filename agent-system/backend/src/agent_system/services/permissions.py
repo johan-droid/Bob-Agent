@@ -467,6 +467,16 @@ class PermissionGate:
         record = self._store.get(approval_id)
         if record is None:
             raise ValueError(f"approval '{approval_id}' not found")
+        # Ownership gate FIRST (P0#3 object isolation): a different identified
+        # user must not learn the outcome or contents of an approval they do
+        # not own — including already-decided records (the first-decision-sticks
+        # early return below would otherwise leak the full record).
+        if (
+            record.owner_user_id is not None
+            and decided_by_user_id is not None
+            and record.owner_user_id != decided_by_user_id
+        ):
+            raise ValueError(f"approval '{approval_id}' belongs to a different owner")
         if record.decision is not Decision.PENDING:
             return record
         if record.is_expired():
@@ -483,13 +493,6 @@ class PermissionGate:
             record.decided_at = utcnow()
             self._persist(record)
             return record
-        # Ownership gate: only the owner (or an admin) may decide a
-        # tenant-bound approval.  When no owner is set (legacy / local mode)
-        # or no decider identity is supplied we allow the decision to proceed
-        # for backward compatibility.
-        if record.owner_user_id is not None and decided_by_user_id is not None:
-            if record.owner_user_id != decided_by_user_id:
-                raise ValueError(f"approval '{approval_id}' belongs to a different owner")
         record.decision = Decision.APPROVED if approve else Decision.DENIED
         record.policy = policy
         record.decided_by = decided_by

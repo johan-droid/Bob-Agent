@@ -757,6 +757,15 @@ def decide_approval(
     current = gate.get(approval_id)
     if current is None:
         raise HTTPException(status_code=404, detail=f"approval '{approval_id}' not found")
+    # Ownership gate BEFORE any content is revealed: a caller must never learn
+    # the contents of an approval owned by someone else — including already
+    # decided ones (the first-decision-sticks early return below leaks the
+    # full record and must not run for a non-owner).
+    uid = principal.user_id if principal is not None else None
+    if current.owner_user_id is not None and uid is not None and current.owner_user_id != uid:
+        raise HTTPException(
+            status_code=403, detail=f"approval '{approval_id}' belongs to a different owner"
+        )
     if current.decision is not Decision.PENDING:
         # Redelivery: the first decision sticks — report it without emitting
         # a second decision event for the same logical decision.

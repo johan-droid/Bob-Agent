@@ -489,11 +489,11 @@ class TelegramService:
 
     async def _cmd_cancel(self, principal: Principal, chat_id: int, *args: str) -> None:
         task_id = args[0] if args else ""
-        await self._cancel_task(chat_id, task_id)
+        await self._cancel_task(principal, chat_id, task_id)
 
     async def _cmd_retry(self, principal: Principal, chat_id: int, *args: str) -> None:
         task_id = args[0] if args else ""
-        await self._retry_task(chat_id, task_id)
+        await self._retry_task(principal, chat_id, task_id)
 
     async def _cmd_approve(self, principal: Principal, chat_id: int, *args: str) -> None:
         approval_id = args[0] if args else ""
@@ -548,7 +548,36 @@ class TelegramService:
         else:
             self._send_sync(chat_id, f"Session {session_id}: all {total} succeeded.")
 
-    async def _retry_task(self, chat_id: int, task_id: str) -> None:
+    def _task_owned_by_another(self, task_id: str, principal: Principal) -> bool:
+        """True only when a task is owned by a DIFFERENT user than the principal.
+
+        Object-level isolation for Telegram task control (/cancel, /retry).
+        Semantics mirror the approval ownership gate: the guard only fires when
+        BOTH sides are identified (task has an owner AND the principal has a
+        user id), so local/single-user and legacy ownerless flows are
+        unaffected. Mismatched owners are hard-denied with a not-found-style
+        message (no oracle).
+        """
+        uid = getattr(principal, "user_id", None)
+        if uid is None or self._factory is None:
+            return False
+        try:
+            from agent_system.infra.db import session_scope
+            from agent_system.infra.models import Task as TaskRow
+
+            with session_scope(self._factory) as db:
+                row = db.get(TaskRow, task_id)
+                if row is None or row.owner_user_id is None:
+                    return False
+                return row.owner_user_id != str(uid)
+        except Exception:
+            # Cannot read the task to prove ownership: keep today's behaviour.
+            return False
+
+    async def _retry_task(self, principal: Principal, chat_id: int, task_id: str) -> None:
+        if self._task_owned_by_another(task_id, principal):
+            await self._send(chat_id, f"Task {task_id} not found or not authored by you.")
+            return
         try:
             from agent_system.services.cloud import retry_task_queued
 
@@ -592,6 +621,12 @@ class TelegramService:
                 approve=approve,
                 policy=Policy.ALLOW_ONCE,
                 decided_by=str(principal.user_id or "local"),
+                # Pass the real identity so the ownership gate in decide()
+                # actually fires: a principal must not decide an approval owned
+                # by another user (P0#3 object isolation).
+                decided_by_user_id=(
+                    str(principal.user_id) if principal.user_id is not None else None
+                ),
             )
         except Exception as exc:
             await self._send(chat_id, f"Decision failed: {exc}")
@@ -604,7 +639,10 @@ class TelegramService:
                 "Approval is no longer pending (expired or already decided).",
             )
 
-    async def _cancel_task(self, chat_id: int, task_id: str) -> None:
+    async def _cancel_task(self, principal: Principal, chat_id: int, task_id: str) -> None:
+        if self._task_owned_by_another(task_id, principal):
+            await self._send(chat_id, f"Task {task_id} not found or not authored by you.")
+            return
         try:
             from agent_system.services.orchestrator import Orchestrator
 
