@@ -1,4 +1,4 @@
-"""Agentic Runtime v1 tests: catalog + health + router + durable fallback."""
+"""Agentic Runtime v1 tests: routing + fallback + swarm (additive layer)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from agent_system.services.provider_health import (
     is_provider_failure,
     never_fallback_reason,
 )
+from agent_system.services.swarm import estimate_complexity, plan_swarm
 from agent_system.services.worker_roles import WORKER_ROLES, role_for
 
 
@@ -106,6 +107,91 @@ def test_all_worker_roles_present() -> None:
         assert role_for(role) is not None
     assert role_for("nope") is None
     assert WORKER_ROLES["CODER"].requires_tool_calling is True
+
+
+def test_simple_goal_is_single_agent() -> None:
+    decision = plan_swarm("Fix my README typo")
+    assert decision.use_swarm is False
+    assert decision.worker_count == 1
+    assert decision.specs == []
+
+
+def test_medium_goal_is_two_workers() -> None:
+    decision = plan_swarm("Research caching options and implement Redis caching for the API")
+    assert decision.use_swarm is True
+    assert len(decision.specs) == 2
+
+
+def test_huge_goal_is_bounded_by_default_cap() -> None:
+    goal = (
+        "Audit this repository, fix security issues, test everything "
+        "and prepare a release with docs and migration and refactor"
+    )
+    decision = plan_swarm(goal)
+    assert decision.use_swarm is True
+    assert len(decision.specs) <= 4
+    decision2 = plan_swarm(goal, max_workers=8)
+    assert len(decision2.specs) <= 8
+    decision3 = plan_swarm(goal, max_workers=500)
+    assert len(decision3.specs) <= 12
+
+
+def test_complexity_estimator() -> None:
+    level, _ = estimate_complexity("Fix a typo")
+    assert level == "LOW"
+    _, streams = estimate_complexity("do A and do B and do C and do D and do E")
+    assert streams >= 5
+
+
+def _swarm_env(tmp_path: Any) -> Any:
+    from pathlib import Path
+
+    import pytest
+    from alembic import command
+    from alembic.config import Config
+
+    backend_root = Path(__file__).resolve().parents[2]
+    url = f"sqlite:///{tmp_path / 'swarm.db'}"
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", url)
+    # alembic/env.py prefers DATABASE_URL over sqlalchemy.url, so point it at
+    # the swarm db explicitly (conftest set it to the shared per-test copy).
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("DATABASE_URL", url)
+        command.upgrade(config, "head")
+    from agent_system.infra.db import make_engine as _make_engine
+    from agent_system.infra.db import make_session_factory as _make_factory
+
+    engine = _make_engine(url)
+    return _make_factory(engine)
+
+
+def test_create_swarm_uses_real_lifecycle(tmp_path: Any) -> None:
+    from agent_system.infra.db import session_scope
+    from agent_system.infra.models import Session, SwarmMember
+    from agent_system.services.orchestrator import Supervisor
+    from agent_system.services.swarm import create_swarm, plan_swarm, verify_swarm
+
+    factory = _swarm_env(tmp_path)
+    bus = EventBus()
+    supervisor = Supervisor(bus)
+    session_id = supervisor.create_session(factory, "release the thing")
+    with session_scope(factory) as db:
+        db.add(Session(id="ses_master", goal="master goal", status="ACTIVE"))
+    # add_task opens its own transaction, so the Session row must be committed first.
+    master_id = supervisor.add_task(factory, "ses_master", task_type="general", title="master")
+    goal = "Audit this repository and fix security issues and test everything and prepare a release"
+    decision = plan_swarm(goal, max_workers=4)
+    assert decision.use_swarm
+    worker_ids = create_swarm(bus, factory, "ses_master", master_id, decision, supervisor)
+    assert 2 <= len(worker_ids) <= 4
+    with session_scope(factory) as db:
+        members = db.query(SwarmMember).filter(SwarmMember.master_task_id == master_id).all()
+        assert len(members) == len(worker_ids)
+    summary = verify_swarm(factory, bus, master_id, session_id="ses_master")
+    assert summary["total"] == len(worker_ids)
+    assert summary["passed"] is False  # workers still pending
+    assert session_id != "ses_master"  # caller session untouched
 
 
 class _ScriptRouter:

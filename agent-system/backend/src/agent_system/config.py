@@ -202,8 +202,10 @@ class Settings(BaseSettings):
     ollama_cloud_base_url: str = "https://ollama.com/v1"
     opencode_api_key: str | None = None
     opencode_base_url: str = "https://opencode.ai/api/v1"
-    llm_provider_order: str = ""
     llm_max_fallback_attempts: int = 3
+    llm_provider_order: str = ""
+    swarm_enabled: bool = True
+    swarm_max_workers: int = 4
     # Extra headers sent with every provider call, as JSON:
     #   PROVIDER_EXTRA_HEADERS='{"X-API-Key":"...","User-Agent":"bob-agent/0.1"}'
     provider_extra_headers: str = "{}"

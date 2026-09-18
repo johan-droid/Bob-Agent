@@ -125,6 +125,12 @@ ROUTER_EVENTS = (
     "router.fallback",
     "router.exhausted",
 )
+SWARM_EVENTS = (
+    "swarm.created",
+    "swarm.worker_created",
+    "swarm.worker_completed",
+    "swarm.verified",
+)
 
 EVENT_TYPES: tuple[str, ...] = (
     SESSION_EVENTS
@@ -142,6 +148,7 @@ EVENT_TYPES: tuple[str, ...] = (
     + INSIGHT_EVENTS
     + CONTEXT_EVENTS
     + ROUTER_EVENTS
+    + SWARM_EVENTS
 )
 
 # ---------------------------------------------------------------------------

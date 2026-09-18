@@ -1498,6 +1498,79 @@ def router_preview(body: RoutePreview, request: Request) -> dict[str, Any]:
     }
 
 
+class SwarmPlanRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=4000)
+    max_workers: int = 4
+    task_type: str = Field(default="general", pattern=r"^[A-Za-z0-9_]{1,40}$")
+
+
+@authenticated.post("/swarm/plan")
+def swarm_plan(body: SwarmPlanRequest, request: Request) -> dict[str, Any]:
+    from agent_system.services.swarm import plan_swarm
+
+    settings = request.app.state.settings
+    cap = min(int(body.max_workers or 1), int(getattr(settings, "swarm_max_workers", 4) or 4))
+    return plan_swarm(body.goal, max_workers=cap, task_type=body.task_type).to_json()
+
+
+@authenticated.get("/swarm/{master_task_id}")
+def swarm_status(
+    master_task_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, Any]:
+    from agent_system.services.swarm import verify_swarm
+
+    factory = request.app.state.session_factory
+    bus: EventBus = request.app.state.event_bus
+    with session_scope(factory) as db:
+        row = enforce_task_visible(db, master_task_id, principal)
+        session_id = row.session_id
+    summary = verify_swarm(factory, bus, master_task_id, session_id=session_id)
+    return {"master_task_id": master_task_id, "summary": summary}
+
+
+class SwarmCreate(BaseModel):
+    session_id: str
+    master_task_id: str
+    goal: str = Field(min_length=1, max_length=4000)
+    max_workers: int = 4
+    task_type: str = Field(default="general", pattern=r"^[A-Za-z0-9_]{1,40}$")
+
+
+@authenticated.post("/swarm", status_code=201)
+def create_swarm_endpoint(
+    body: SwarmCreate,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, Any]:
+    from agent_system.services.orchestrator import Supervisor
+    from agent_system.services.swarm import create_swarm, plan_swarm
+
+    factory = request.app.state.session_factory
+    settings = request.app.state.settings
+    bus: EventBus = request.app.state.event_bus
+    if not bool(getattr(settings, "swarm_enabled", True)):
+        raise HTTPException(status_code=403, detail="swarm disabled")
+    with session_scope(factory) as db:
+        enforce_task_visible(db, body.master_task_id, principal)
+        enforce_session_visible(db, body.session_id, principal)
+    owner = getattr(principal, "user_id", None)
+    supervisor = Supervisor(bus)
+    cap = min(int(body.max_workers or 1), int(getattr(settings, "swarm_max_workers", 4) or 4))
+    decision = plan_swarm(body.goal, max_workers=cap, task_type=body.task_type)
+    if not decision.use_swarm:
+        raise HTTPException(status_code=409, detail="goal is single-agent; no swarm planned")
+    worker_ids = create_swarm(
+        bus, factory, body.session_id, body.master_task_id, decision, supervisor, owner
+    )
+    return {
+        "master_task_id": body.master_task_id,
+        "worker_task_ids": worker_ids,
+        "decision": decision.to_json(),
+    }
+
+
 @authenticated.get("/tasks/{task_id}/attempts")
 def task_attempts(
     task_id: str,

@@ -389,6 +389,31 @@ class WorkerAttempt(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class SwarmMember(Base):
+    """Bounded-swarm membership (Agentic Runtime v1, additive).
+
+    Child tasks remain ordinary rows in ``tasks`` (same lifecycle, same
+    permissions, same verifier); this table only records that a worker task
+    belongs to a master task, with its role and verification state.
+    """
+
+    __tablename__ = "swarm_members"
+
+    id: Mapped[str] = _pk()
+    master_task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    worker_task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(40), default="CODER", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = _ts()
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("worker_task_id", name="uq_swarm_members_worker_task_id"),)
+
+
 class Insight(Base):
     __tablename__ = "insights"
 
