@@ -33,7 +33,9 @@ def test_ssh_execution_with_credential_reference(db_factory):
             "hostname": "192.168.1.50",
             "port": 22,
             "username": "ubuntu",
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nsome_key\n-----END OPENSSH PRIVATE KEY-----",
+            "private_key": (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nsome_key\n-----END OPENSSH PRIVATE KEY-----"
+            ),
             "trust_on_first_use": True,
         },
     )
@@ -56,7 +58,9 @@ def test_ssh_untrusted_host_requires_confirmation(db_factory):
             "hostname": "myvps.example.com",
             "port": 2222,
             "username": "root",
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----",
+            "private_key": (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----"
+            ),
             "trust_on_first_use": False,
         },
     )
@@ -84,7 +88,9 @@ def test_ssh_builtin_tool_wrapper(db_factory):
         {
             "hostname": "raspberrypi.local",
             "username": "pi",
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----",
+            "private_key": (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----"
+            ),
             "trust_on_first_use": True,
         },
     )

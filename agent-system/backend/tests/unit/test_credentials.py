@@ -99,7 +99,9 @@ def test_context_sanitization():
         "credential_ref": "ssh:home-server",
         "api_key": "gsk_secret_key_12345",
         "nested": {
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
+            "private_key": (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
+            )
         },
     }
     cleaned = sanitize_context(raw_context)

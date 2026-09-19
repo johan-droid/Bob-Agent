@@ -7,7 +7,7 @@ Defines `SearchProvider` returning normalized search results:
 - timestamp
 - metadata
 
-Includes DuckDuckGo search provider as default, plus provider fallback, timeout, and duplicate removal.
+Includes DuckDuckGo search provider as default, plus fallback and deduplication.
 """
 
 from __future__ import annotations

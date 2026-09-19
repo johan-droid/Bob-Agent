@@ -47,6 +47,8 @@ class RedisService(ExternalService):
 
     @property
     def is_configured(self) -> bool:
+        if getattr(self.settings, "is_cloud_inline", False):
+            return False
         return bool(str(self.redis_url).strip())
 
     @property
@@ -68,6 +70,11 @@ class RedisService(ExternalService):
 
     def check_health(self, timeout: float = 3.0) -> ServiceHealth:
         if not self.is_configured:
+            reason = (
+                "cloud_inline_run=true (Redis disabled for cloud inline execution)"
+                if getattr(self.settings, "is_cloud_inline", False)
+                else "redis_url is empty"
+            )
             return ServiceHealth(
                 name=self.name,
                 configured=False,
@@ -75,7 +82,7 @@ class RedisService(ExternalService):
                 reachable=False,
                 authenticated=False,
                 status=ServiceHealthStatus.NOT_CONFIGURED,
-                details={"reason": "redis_url is empty"},
+                details={"reason": reason},
             )
 
         start = time.monotonic()

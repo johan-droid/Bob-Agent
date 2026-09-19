@@ -2,13 +2,13 @@
 
 Verifies:
 1. Secret never reaches LLM context.
-2. Secret never appears in logs, exception traces, task descriptions, telemetry, or Telegram history.
+2. Secret never appears in logs, traces, tasks, telemetry, or Telegram history.
 3. User A cannot access User B's credentials (strict user isolation).
 4. Revoked credentials cannot be resolved by tools.
 5. Rotation invalidates old credentials and updates encrypted state in place.
 6. Restart / reboot preserves encrypted credentials.
 7. Missing/invalid master encryption key fails safely.
-8. Complete E2E flow: Telegram setup -> CredentialStore -> SSH/tool execution -> result return -> verify zero secret leakage across all layers.
+8. E2E flow: setup -> CredentialStore -> SSH/tool execution -> zero secret leak.
 """
 
 import pytest
@@ -42,7 +42,11 @@ def db_factory(tmp_path):
 
 def test_secrets_never_stored_unencrypted(db_factory):
     vault = CredentialStore(db_factory)
-    raw_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nVERY_SECRET_ALICE_KEY\n-----END OPENSSH PRIVATE KEY-----"
+    raw_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "VERY_SECRET_ALICE_KEY\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
     vault.save("usr_alice", "ssh", "my-vps", {"private_key": raw_key})
 
     with db_factory() as session:
@@ -114,7 +118,9 @@ def test_context_sanitization_scrubs_raw_secrets():
         "api_key": "gsk_secret_123",
         "nested": {
             "token": "ghp_secret_456",
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----",
+            "private_key": (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
+            ),
         },
     }
     sanitized = sanitize_context(raw_payload)
@@ -136,7 +142,11 @@ async def test_full_chat_to_tool_e2e_zero_leakage_flow(db_factory):
     await tg_svc._dispatch_command(principal, chat_id, "/setup ssh vps")
     await tg_svc._handle_active_setup_step(principal, chat_id, "vps.mycompany.org")
     await tg_svc._handle_active_setup_step(principal, chat_id, "ubuntu")
-    secret_pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nTOP_SECRET_PEM_DATA\n-----END OPENSSH PRIVATE KEY-----"
+    secret_pem = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "TOP_SECRET_PEM_DATA\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
     await tg_svc._handle_active_setup_step(principal, chat_id, secret_pem)
 
     # 2. Tool resolves credential reference without exposing secret

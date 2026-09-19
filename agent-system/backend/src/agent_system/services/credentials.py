@@ -20,10 +20,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
-
-import os
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes

@@ -510,17 +510,28 @@ class GatewayExecutor:
         from agent_system.services.orchestrator import Supervisor
 
         self._gateway_begin(update_id, chat_id, user_id, message_id)
-        supervisor = Supervisor(self._bus)
-        session_id = supervisor.create_session(self._factory, text, owner_user_id=owner)
-        task_ids = ensure_session_tasks(self._factory, self._bus, session_id)
-        master_task_id = task_ids[0] if task_ids else None
-        self._outbox.enqueue(
-            kind=KIND_TASK_ACK,
-            chat_id=chat_id,
-            text=f"Task created: {master_task_id or session_id}\nGoal: {text[:200]}",
-            task_id=master_task_id,
-        )
-        self._gateway_bound(update_id, session_id, master_task_id)
+        session_id = None
+        with session_scope(self._factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.telegram_update_id == update_id)
+                .one_or_none()
+            )
+            if row is not None and row.session_id is not None:
+                session_id = row.session_id
+
+        if session_id is None:
+            supervisor = Supervisor(self._bus)
+            session_id = supervisor.create_session(self._factory, text, owner_user_id=owner)
+            task_ids = ensure_session_tasks(self._factory, self._bus, session_id)
+            master_task_id = task_ids[0] if task_ids else None
+            self._outbox.enqueue(
+                kind=KIND_TASK_ACK,
+                chat_id=chat_id,
+                text=f"Task created: {master_task_id or session_id}\nGoal: {text[:200]}",
+                task_id=master_task_id,
+            )
+            self._gateway_bound(update_id, session_id, master_task_id)
         try:
             drive_session(self._factory, self._bus, session_id)
         finally:
