@@ -131,7 +131,7 @@ class ServiceRateLimitError(ExternalServiceError):
 # ---------------------------------------------------------------------------
 
 
-def with_retry(
+def with_retry[T](
     fn: Callable[[], T],
     max_retries: int = 3,
     backoff_factor: float = 0.2,

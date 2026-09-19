@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # Soft import guard for boto3
 try:
     import boto3
-    from botocore.exceptions import BotoCoreError, ClientError
 
     BOTO3_AVAILABLE = True
 except ImportError:
@@ -144,7 +143,8 @@ class LocalStorageProvider(StorageProvider):
 
         if len(payload) > self.max_file_bytes:
             raise ExternalServiceError(
-                f"File size {len(payload)} bytes exceeds maximum allowed limit of {self.max_file_bytes} bytes ({self.settings.max_file_size_mb} MB)",
+                f"File size {len(payload)} bytes exceeds maximum allowed limit "
+                f"of {self.max_file_bytes} bytes ({self.settings.max_file_size_mb} MB)",
                 service=self.name,
                 code="SIZE_LIMIT_EXCEEDED",
             )

@@ -3,15 +3,15 @@
 Provides secure SSH connection execution and host key fingerprint verification.
 
 Architecture:
-- The agent or user invokes tools using connection references (`connection="ssh:home-server"` or `name="home-server"`).
+- Invokes tools using connection references (`connection="ssh:home-server"`).
 - `SSHService` loads the envelope-encrypted credential from `CredentialStore`.
 - Supports:
   - hostname, port, username
   - private key (with optional passphrase)
   - password authentication fallback
-  - real host fingerprint generation over socket transport and known-hosts verification
+  - real host fingerprint generation over socket transport and known-hosts checks
   - jump host configuration and host aliases
-- The raw SSH private key or passphrase NEVER leaves `SSHService` or enters chat history / LLM context.
+- Raw SSH private key or passphrase NEVER leaves `SSHService` or enters LLM context.
 """
 
 from __future__ import annotations
