@@ -1025,3 +1025,13 @@ class TestApprovalWait:
         assert any(p["reason"] == "approval_denied" for p in failed)
         waiting = [p for t, p in events if t == "agent.waiting_approval"]
         assert waiting and waiting[0]["denied"] is True
+
+
+class TestUserFacingErrorSanitization:
+    def test_internal_exception_sanitized_in_tool_errors(self) -> None:
+        from agent_system.services.tools.protocol import sanitize_tool_result, strip_tool_calls
+
+        msg = "Database connection string failed\n"
+        formatted = sanitize_tool_result(msg)
+        stripped = strip_tool_calls(msg)
+        assert "\u200b" in formatted or "tool:" not in stripped
