@@ -124,6 +124,21 @@ class Settings(BaseSettings):
     openconnector_alias: str = ""  # named connection (x-oo-connector-alias)
     openconnector_user_id: str = "bob-local"  # deprecated (unused by the API)
 
+    # MongoDB Atlas (optional secondary datastore). Off by default.
+    mongodb_enabled: bool = False
+    mongodb_uri: str = ""
+    mongodb_database: str = "bob_agent"
+    mongodb_connect_timeout_ms: int = 5000
+
+    # Durable Object Storage (optional S3-compatible cloud storage)
+    storage_provider: str = "local"  # local | s3
+    storage_local_root: str = "data/storage"
+    s3_bucket_name: str = ""
+    s3_region_name: str = "us-east-1"
+    s3_endpoint_url: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+
     # MCP servers (Model Context Protocol, stdio) as JSON:
     #   MCP_SERVERS='[{"name":"fs","command":"npx",
     #     "args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}]'

@@ -68,12 +68,18 @@ def _readable_text(html: str) -> str:
 
 
 def _research_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:  # noqa: ARG001
+    from agent_system.config import get_settings
+    from agent_system.services.external_services.search import DuckDuckGoSearchProvider
     query = str(args.get("query") or "").strip()
     if not query:
         raise ToolError("research_search: 'query' is required")
     limit = min(int(args.get("limit") or 5), MAX_RESULTS)
-    html = _http_get(SEARCH_URL + quote_plus(query))
-    results = _parse_search_results(html, limit)
+    try:
+        provider = DuckDuckGoSearchProvider(get_settings())
+        search_results = provider.search(query, limit=limit)
+        results = [r.to_dict() for r in search_results]
+    except Exception as exc:
+        results = []
     if not results:
         raise ToolError(
             "research_search returned no results (network blocked or the search endpoint "

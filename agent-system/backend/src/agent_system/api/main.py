@@ -207,17 +207,9 @@ def api_health() -> dict[str, str]:
 
 
 def api_ready() -> dict[str, Any]:
-    checks: dict[str, bool] = {}
-    try:
-        if _session_factory is not None:
-            with _session_factory() as session:
-                session.execute(text("SELECT 1"))
-            checks["database"] = True
-        else:
-            checks["database"] = False
-    except Exception:
-        checks["database"] = False
-    return {"status": "ok" if all(checks.values()) else "degraded", "checks": checks}
+    from agent_system.services.health import HealthRegistry
+    registry = HealthRegistry()
+    return registry.check_all(timeout=3.0)
 
 
 from agent_system.api.v1.a2a import a2a_router  # noqa: E402
