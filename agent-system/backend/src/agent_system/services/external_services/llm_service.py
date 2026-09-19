@@ -78,11 +78,15 @@ class LLMProviderService(ExternalService):
                 name=self.name,
                 configured=True,
                 enabled=True,
-                reachable=status_enum not in (ServiceHealthStatus.UNAVAILABLE, ServiceHealthStatus.DISABLED),
+                reachable=status_enum
+                not in (ServiceHealthStatus.UNAVAILABLE, ServiceHealthStatus.DISABLED),
                 authenticated=status_enum != ServiceHealthStatus.AUTH_FAILED,
                 status=status_enum,
                 last_error=redact_secrets(status_obj.last_error),
-                details={"provider": self.provider_key, "consecutive_failures": status_obj.consecutive_failures},
+                details={
+                    "provider": self.provider_key,
+                    "consecutive_failures": status_obj.consecutive_failures,
+                },
             )
 
         start = time.monotonic()

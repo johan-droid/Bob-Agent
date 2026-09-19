@@ -102,10 +102,10 @@ class HealthRegistry:
                     last_error=str(exc),
                 )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._services) or 1) as executor:
-            future_to_service = {
-                executor.submit(_check, s): s for s in self._services
-            }
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self._services) or 1
+        ) as executor:
+            future_to_service = {executor.submit(_check, s): s for s in self._services}
             for future in concurrent.futures.as_completed(future_to_service):
                 service = future_to_service[future]
                 try:
@@ -132,5 +132,8 @@ class HealthRegistry:
         return {
             "status": status_str,
             "services": results,
-            "checks": {k: v.get("status") in ("OK", "DISABLED", "NOT_CONFIGURED") for k, v in results.items()},
+            "checks": {
+                k: v.get("status") in ("OK", "DISABLED", "NOT_CONFIGURED")
+                for k, v in results.items()
+            },
         }

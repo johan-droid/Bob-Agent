@@ -259,6 +259,7 @@ __all__ = [
 def sanitize_context(obj: Any) -> Any:
     """Recursively sanitize raw credentials out of LLM context objects/dicts."""
     from agent_system.services.secrets import redact_dict, redact_value
+
     if isinstance(obj, dict):
         return redact_dict(obj)
     if isinstance(obj, str):

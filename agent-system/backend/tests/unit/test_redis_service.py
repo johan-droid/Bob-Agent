@@ -62,7 +62,9 @@ def test_redis_unreachable_fallback_isolation():
 
     settings = Settings(redis_url="redis://invalid_host:6379/0")
     mock_redis = MagicMock()
-    mock_redis.ping.side_effect = RedisConnectionError("Could not connect to Redis at invalid_host:6379")
+    mock_redis.ping.side_effect = RedisConnectionError(
+        "Could not connect to Redis at invalid_host:6379"
+    )
 
     service = RedisService(settings, redis_client=mock_redis)
     health = service.check_health()

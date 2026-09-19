@@ -19,14 +19,18 @@ def db_factory(tmp_path):
     Base.metadata.create_all(engine)
     factory = make_session_factory(engine)
     with factory() as session:
-        session.add(User(id="usr_01", display_name="Operator", auth_provider="telegram", role="admin"))
+        session.add(
+            User(id="usr_01", display_name="Operator", auth_provider="telegram", role="admin")
+        )
         session.commit()
     return factory
 
 
 @pytest.mark.asyncio
 async def test_interactive_ssh_setup_workflow(db_factory):
-    svc = TelegramService(settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus())
+    svc = TelegramService(
+        settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus()
+    )
     principal = Principal(user_id="usr_01", role=Role.ADMIN, mode=IdentityMode.TELEGRAM)
     chat_id = 123456
 
@@ -51,7 +55,9 @@ async def test_interactive_ssh_setup_workflow(db_factory):
     assert _ACTIVE_SETUPS[chat_id].step == "ask_key"
 
     # 5. Supply private key (secret input)
-    pem_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret_key_bytes\n-----END OPENSSH PRIVATE KEY-----"
+    pem_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret_key_bytes\n-----END OPENSSH PRIVATE KEY-----"
+    )
     handled = await svc._handle_active_setup_step(principal, chat_id, pem_key)
     assert handled is True
     assert chat_id not in _ACTIVE_SETUPS  # Session completed and purged
@@ -67,7 +73,9 @@ async def test_interactive_ssh_setup_workflow(db_factory):
 
 @pytest.mark.asyncio
 async def test_interactive_api_key_setup_workflow(db_factory):
-    svc = TelegramService(settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus())
+    svc = TelegramService(
+        settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus()
+    )
     principal = Principal(user_id="usr_01", role=Role.ADMIN, mode=IdentityMode.TELEGRAM)
     chat_id = 654321
 
@@ -85,7 +93,9 @@ async def test_interactive_api_key_setup_workflow(db_factory):
 
 @pytest.mark.asyncio
 async def test_connection_management_commands(db_factory):
-    svc = TelegramService(settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus())
+    svc = TelegramService(
+        settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus()
+    )
     principal = Principal(user_id="usr_01", role=Role.ADMIN, mode=IdentityMode.TELEGRAM)
     chat_id = 999999
 

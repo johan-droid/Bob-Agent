@@ -15,8 +15,12 @@ def db_factory(tmp_path):
     Base.metadata.create_all(engine)
     factory = make_session_factory(engine)
     with factory() as session:
-        session.add(User(id="usr_01", display_name="User 1", auth_provider="telegram", role="admin"))
-        session.add(User(id="usr_02", display_name="User 2", auth_provider="telegram", role="member"))
+        session.add(
+            User(id="usr_01", display_name="User 1", auth_provider="telegram", role="admin")
+        )
+        session.add(
+            User(id="usr_02", display_name="User 2", auth_provider="telegram", role="member")
+        )
         session.commit()
     return factory
 

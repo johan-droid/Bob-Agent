@@ -120,7 +120,11 @@ class RedisService(ExternalService):
         except Exception as exc:
             latency = (time.monotonic() - start) * 1000.0
             err_str = str(exc)
-            status = ServiceHealthStatus.AUTH_FAILED if "NOAUTH" in err_str or "WRONGPASS" in err_str else ServiceHealthStatus.UNAVAILABLE
+            status = (
+                ServiceHealthStatus.AUTH_FAILED
+                if "NOAUTH" in err_str or "WRONGPASS" in err_str
+                else ServiceHealthStatus.UNAVAILABLE
+            )
             return ServiceHealth(
                 name=self.name,
                 configured=True,
@@ -160,7 +164,9 @@ class RedisService(ExternalService):
             is_new = client.set(key, "processed", ex=dedup_ttl_seconds, nx=True)
             return not bool(is_new)
         except Exception as exc:
-            logger.warning(f"Redis deduplication check failed for task {task_id}: {redact_secrets(str(exc))}")
+            logger.warning(
+                f"Redis deduplication check failed for task {task_id}: {redact_secrets(str(exc))}"
+            )
             return False
 
     def get_state(self, key: str) -> str | None:

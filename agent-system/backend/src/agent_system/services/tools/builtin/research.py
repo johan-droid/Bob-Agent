@@ -70,6 +70,7 @@ def _readable_text(html: str) -> str:
 def _research_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:  # noqa: ARG001
     from agent_system.config import get_settings
     from agent_system.services.external_services.search import DuckDuckGoSearchProvider
+
     query = str(args.get("query") or "").strip()
     if not query:
         raise ToolError("research_search: 'query' is required")
