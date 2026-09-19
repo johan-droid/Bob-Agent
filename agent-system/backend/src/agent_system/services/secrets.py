@@ -22,7 +22,7 @@ _SECRET_KEY_MARKERS = (
     "authorization",
     "cookie",
     "private_key",
-    "credential",
+    "credential_payload",
     "session_key",
     "signing_key",
     "database_url",

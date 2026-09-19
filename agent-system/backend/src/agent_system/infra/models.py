@@ -584,3 +584,32 @@ class TelegramGatewayMessage(Base):
     session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     processing_status: Mapped[str] = mapped_column(String(16), default="RECEIVED", nullable=False)
+
+
+class UserCredential(Base):
+    """Envelope-encrypted user credentials (v3.1 §14 & Chat-Native Credential Architecture).
+
+    Stores encrypted secrets per user and provider/connection name.
+    Raw secrets are NEVER stored unencrypted. Only metadata (provider, name,
+    status, created_at, last_validated_at) is exposed to non-vault application logic.
+    """
+
+    __tablename__ = "user_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", "name", name="uq_user_credentials_user_provider_name"),
+    )
+
+    id: Mapped[str] = _pk()
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    encrypted_blob: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_dek: Mapped[str] = mapped_column(Text, nullable=False)
+    encryption_algorithm: Mapped[str] = mapped_column(String(30), default="AES-256-GCM-ENVELOPE", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="healthy", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = _ts()
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

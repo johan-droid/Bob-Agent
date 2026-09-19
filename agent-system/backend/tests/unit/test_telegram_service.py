@@ -90,7 +90,7 @@ class TestDecide:
         async def run() -> None:
             await svc._decide(111, rec.approval_id, approve=True)  # noqa: SLF001
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
         assert gate.get(rec.approval_id) is not None
         assert gate.get(rec.approval_id).decision == Decision.APPROVED  # type: ignore[union-attr]
 
@@ -100,7 +100,7 @@ class TestDecide:
         async def run() -> None:
             await svc._decide(111, "approval_nope", approve=True)  # noqa: SLF001
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestUpdateDispatch:

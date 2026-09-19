@@ -12,7 +12,6 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 
 from agent_system.api.deps import get_authenticator
 from agent_system.config import get_settings

@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 from agent_system.services.tool_errors import ToolError
 from agent_system.services.tools.paths import scrub
@@ -78,7 +78,7 @@ def _research_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]: 
         provider = DuckDuckGoSearchProvider(get_settings())
         search_results = provider.search(query, limit=limit)
         results = [r.to_dict() for r in search_results]
-    except Exception as exc:
+    except Exception:
         results = []
     if not results:
         raise ToolError(

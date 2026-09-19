@@ -242,6 +242,7 @@ class ContextManager:
 
 
 __all__ = [
+    "sanitize_context",
     "ContextBlock",
     "ContextManager",
     "CompactionResult",
@@ -253,3 +254,17 @@ __all__ = [
     "classify_importance",
     "estimate_tokens",
 ]
+
+
+def sanitize_context(obj: Any) -> Any:
+    """Recursively sanitize raw credentials out of LLM context objects/dicts."""
+    from agent_system.services.secrets import redact_dict, redact_value
+    if isinstance(obj, dict):
+        return redact_dict(obj)
+    if isinstance(obj, str):
+        return redact_value(obj)
+    if isinstance(obj, list):
+        return [sanitize_context(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(sanitize_context(item) for item in obj)
+    return obj
