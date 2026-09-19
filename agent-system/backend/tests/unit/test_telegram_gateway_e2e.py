@@ -102,16 +102,17 @@ def _ingest(factory: Any, update_id: int, chat_id: int, tg_user: str, text: str)
 
 def _outbox_rows(factory: Any) -> list[tuple[str, str, str | None]]:
     with factory() as db:
-        return [
-            (r.kind, r.text, r.task_id)
-            for r in db.query("x").all()
-        ] if False else [
-            (r.kind, r.text, r.task_id)
-            for r in __import__("agent_system.infra.models", fromlist=["DeliveryOutbox"])
-            .DeliveryOutbox.__table__
-            .c
-            and []
-        ]
+        return (
+            [(r.kind, r.text, r.task_id) for r in db.query("x").all()]
+            if False
+            else [
+                (r.kind, r.text, r.task_id)
+                for r in __import__(
+                    "agent_system.infra.models", fromlist=["DeliveryOutbox"]
+                ).DeliveryOutbox.__table__.c
+                and []
+            ]
+        )
 
 
 def _outbox_snapshot(factory: Any) -> list[dict[str, Any]]:
@@ -346,9 +347,7 @@ def test_progress_notification_reaches_task_chat(tmp_path: Any) -> None:
     bus = EventBus()
     _provision(factory, "555", 700, role="owner")
     with factory() as db:
-        session = Session(
-            id=new_id("ses"), goal="audit", owner_user_id="missing-owner"
-        )
+        session = Session(id=new_id("ses"), goal="audit", owner_user_id="missing-owner")
         db.add(session)
         db.flush()
         task = Task(
