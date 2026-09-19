@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 try:
     import pymongo
     from pymongo.errors import (
-        ConfigurationError,
         ConnectionFailure,
         OperationFailure,
         ServerSelectionTimeoutError,
     )
+
     PYMONGO_AVAILABLE = True
 except ImportError:
     PYMONGO_AVAILABLE = False

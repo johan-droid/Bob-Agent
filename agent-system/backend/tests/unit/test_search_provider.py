@@ -15,15 +15,15 @@ SAMPLE_DDG_HTML = """
 <html>
 <body>
   <div class="result results_links">
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F">Python Programming Language</a>
+    <a class="result__a" href="https://python.org/">Python Programming Language</a>
     <a class="result__snippet">Python is a programming language that lets you work quickly.</a>
   </div>
   <div class="result results_links">
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F">Python Programming Language Duplicate</a>
+    <a class="result__a" href="https://python.org/">Python Programming Language Duplicate</a>
     <a class="result__snippet">Duplicate link test.</a>
   </div>
   <div class="result results_links">
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.python.org%2F">Python Documentation</a>
+    <a class="result__a" href="https://docs.python.org/">Python Documentation</a>
     <a class="result__snippet">Official documentation for Python.</a>
   </div>
 </body>

@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 from agent_system.services.tool_errors import ToolError
 from agent_system.services.tools.paths import scrub
@@ -70,6 +70,7 @@ def _readable_text(html: str) -> str:
 def _research_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:  # noqa: ARG001
     from agent_system.config import get_settings
     from agent_system.services.external_services.search import DuckDuckGoSearchProvider
+
     query = str(args.get("query") or "").strip()
     if not query:
         raise ToolError("research_search: 'query' is required")
@@ -78,7 +79,7 @@ def _research_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]: 
         provider = DuckDuckGoSearchProvider(get_settings())
         search_results = provider.search(query, limit=limit)
         results = [r.to_dict() for r in search_results]
-    except Exception as exc:
+    except Exception:
         results = []
     if not results:
         raise ToolError(

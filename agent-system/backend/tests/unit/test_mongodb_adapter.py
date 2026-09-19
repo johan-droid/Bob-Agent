@@ -65,13 +65,17 @@ def test_mongodb_health_check_mock_success():
 def test_mongodb_health_check_auth_failure():
     from pymongo.errors import OperationFailure
 
-    settings = Settings(mongodb_enabled=True, mongodb_uri="mongodb://user:wrongpass@localhost:27017")
+    settings = Settings(
+        mongodb_enabled=True, mongodb_uri="mongodb://user:wrongpass@localhost:27017"
+    )
     adapter = MongoDBAdapter(settings)
 
     with patch("pymongo.MongoClient") as mock_client_cls:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
-        mock_client.admin.command.side_effect = OperationFailure("Authentication failed for user:wrongpass")
+        mock_client.admin.command.side_effect = OperationFailure(
+            "Authentication failed for user:wrongpass"
+        )
 
         health = adapter.check_health()
         assert health.status == ServiceHealthStatus.AUTH_FAILED
@@ -81,7 +85,9 @@ def test_mongodb_health_check_auth_failure():
 
 @pytest.mark.skipif(not PYMONGO_AVAILABLE, reason="pymongo not installed")
 def test_mongodb_crud_operations():
-    settings = Settings(mongodb_enabled=True, mongodb_uri="mongodb://localhost:27017", mongodb_database="testdb")
+    settings = Settings(
+        mongodb_enabled=True, mongodb_uri="mongodb://localhost:27017", mongodb_database="testdb"
+    )
     adapter = MongoDBAdapter(settings)
 
     with patch("pymongo.MongoClient") as mock_client_cls:

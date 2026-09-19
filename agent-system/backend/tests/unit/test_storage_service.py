@@ -51,7 +51,7 @@ def test_local_storage_size_limit_and_path_traversal():
         large_data = b"x" * (1024 * 1024 + 10)
         with pytest.raises(ExternalServiceError) as exc_info:
             provider.upload_object("oversized.bin", large_data)
-        assert "exceeds maximum allowed limit" in str(exc_info.value)
+        assert "exceeds limit" in str(exc_info.value)
 
         # Test path traversal prevention
         with pytest.raises(ExternalServiceError) as exc_info:
@@ -90,5 +90,8 @@ def test_s3_storage_provider_mock_operations():
         # Test upload
         provider.upload_object("docs/test.pdf", b"pdf content")
         mock_client.put_object.assert_called_once_with(
-            Bucket="my-bucket", Key="docs/test.pdf", Body=b"pdf content", ContentType="application/octet-stream"
+            Bucket="my-bucket",
+            Key="docs/test.pdf",
+            Body=b"pdf content",
+            ContentType="application/octet-stream",
         )

@@ -85,7 +85,7 @@ class PostgresService(ExternalService):
             latency = (time.monotonic() - start) * 1000.0
             err_msg = str(exc)
             status = ServiceHealthStatus.UNAVAILABLE
-            if "password" in err_msg.lower() or "authentication" in err_msg.lower() or "denied" in err_msg.lower():
+            if any(term in err_msg.lower() for term in ("password", "authentication", "denied")):
                 status = ServiceHealthStatus.AUTH_FAILED
             return ServiceHealth(
                 name=self.name,

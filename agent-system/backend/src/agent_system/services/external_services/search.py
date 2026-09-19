@@ -7,7 +7,7 @@ Defines `SearchProvider` returning normalized search results:
 - timestamp
 - metadata
 
-Includes DuckDuckGo search provider as default, plus provider fallback, timeout, and duplicate removal.
+Includes DuckDuckGo search provider as default plus fallback, timeout, and deduplication.
 """
 
 from __future__ import annotations
@@ -41,7 +41,9 @@ class SearchResult:
     source_url: str
     title: str
     snippet: str
-    timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    timestamp: str = field(
+        default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    )
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,7 +128,9 @@ class DuckDuckGoSearchProvider(SearchProvider):
                 res.raise_for_status()
                 html = res.text
         except Exception as exc:
-            raise ServiceUnavailableError(f"Search fetch failed for '{query}': {exc}", service=self.name) from exc
+            raise ServiceUnavailableError(
+                f"Search fetch failed for '{query}': {exc}", service=self.name
+            ) from exc
 
         return _parse_duckduckgo_html(html, limit)
 
@@ -154,7 +158,9 @@ def _parse_duckduckgo_html(html: str, limit: int) -> list[SearchResult]:
             continue
 
         title = a_tag.get_text(strip=True)
-        snippet_tag = result.find("a", class_=re.compile(r"result__snippet")) or result.find("div", class_=re.compile(r"result__snippet"))
+        snippet_tag = result.find("a", class_=re.compile(r"result__snippet")) or result.find(
+            "div", class_=re.compile(r"result__snippet")
+        )
         snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
 
         seen_urls.add(clean_url)
@@ -195,5 +201,6 @@ def _unwrap_ddg_url(href: str) -> str:
         match = re.search(r"uddg=([^&]+)", href)
         if match:
             from urllib.parse import unquote
+
             return unquote(match.group(1))
     return href

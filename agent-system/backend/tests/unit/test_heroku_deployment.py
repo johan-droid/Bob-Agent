@@ -49,6 +49,7 @@ def test_alembic_url_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     from pathlib import Path
 
     import agent_system.infra.db  # noqa: F401
+
     backend_dir = Path(__file__).resolve().parents[2]
     alembic_dir = backend_dir / "alembic"
     if str(alembic_dir) not in sys.path:
