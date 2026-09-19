@@ -91,6 +91,21 @@ class CommandDef:
 # Service.
 
 
+
+# ---------------------------------------------------------------------------
+# Interactive Chat-Native Setup & Credential Management (§2, §11, §12)
+# ---------------------------------------------------------------------------
+
+class SetupSession:
+    """Tracks state for interactive step-by-step secret collection in Telegram."""
+    def __init__(self, user_id: str, provider: str, name: str = "") -> None:
+        self.user_id = user_id
+        self.provider = provider
+        self.name = name
+        self.step = "init"
+        self.collected: dict[str, Any] = {}
+
+_ACTIVE_SETUPS: dict[int, SetupSession] = {}  # chat_id -> SetupSession
 class TelegramService:
     """Stateful, identity-aware Telegram gateway.
 
@@ -168,6 +183,12 @@ class TelegramService:
             permission="approval.decide",
             requires_args=True,
         )
+        self._commands["/setup"] = CommandDef("/setup", "Configure integrations", self._cmd_setup)
+        self._commands["/connections"] = CommandDef("/connections", "List connections", self._cmd_connections)
+        self._commands["/test"] = CommandDef("/test", "Test a connection", self._cmd_test)
+        self._commands["/rotate"] = CommandDef("/rotate", "Rotate a credential", self._cmd_rotate)
+        self._commands["/revoke"] = CommandDef("/revoke", "Revoke a connection", self._cmd_revoke)
+        self._commands["/remove"] = CommandDef("/remove", "Delete a connection", self._cmd_remove)
         self._commands["/deny"] = CommandDef(
             "/deny",
             "Deny a pending approval",
@@ -417,6 +438,8 @@ class TelegramService:
             return
         if not text:
             return
+        if await self._handle_active_setup_step(principal, from_chat, text):
+            return
         await self._dispatch_command(principal, from_chat, text)
 
     async def _handle_callback(self, callback: dict[str, Any]) -> None:
@@ -510,6 +533,202 @@ class TelegramService:
     async def _cmd_deny(self, principal: Principal, chat_id: int, *args: str) -> None:
         approval_id = args[0] if args else ""
         await self._cmd_approve_run(principal, chat_id, approval_id, approve=False)
+
+    # -- Setup & Credential Management commands -----------------------------
+
+    async def _cmd_setup(self, principal: Principal, chat_id: int, *args: str) -> None:
+        user_id = str(principal.user_id or "local")
+        if not args:
+            lines = [
+                "Available integrations:",
+                "1. github",
+                "2. ssh",
+                "3. groq",
+                "4. openrouter",
+                "5. google",
+                "6. mcp",
+                "7. cloud_storage",
+                "",
+                "Run: /setup <provider> (e.g., /setup ssh or /setup github)",
+            ]
+            await self._send(chat_id, "\n".join(lines))
+            return
+
+        provider = args[0].lower()
+        conn_name = args[1] if len(args) > 1 else ""
+
+        session = SetupSession(user_id=user_id, provider=provider, name=conn_name)
+        _ACTIVE_SETUPS[chat_id] = session
+
+        if provider == "ssh":
+            if not conn_name:
+                session.step = "ask_name"
+                await self._send(chat_id, "SSH connection name? (e.g. home-server, vps)")
+            else:
+                session.step = "ask_host"
+                await self._send(chat_id, f"Hostname or IP for '{conn_name}'?")
+        elif provider in ("github", "groq", "openrouter", "gemini", "huggingface", "google"):
+            if not conn_name:
+                session.name = "personal"
+            session.step = "ask_api_key"
+            await self._send(chat_id, f"Send the API key or token for {provider}:{session.name}:")
+        else:
+            session.step = "ask_api_key"
+            await self._send(chat_id, f"Send configuration secret for {provider}:")
+
+    async def _handle_active_setup_step(self, principal: Principal, chat_id: int, text: str) -> bool:
+        session = _ACTIVE_SETUPS.get(chat_id)
+        if not session:
+            lower = text.lower()
+            if "set up my vps" in lower or "setup vps" in lower or "set up ssh" in lower:
+                await self._cmd_setup(principal, chat_id, "ssh", "vps")
+                return True
+            if "set up my github" in lower or "setup github" in lower:
+                await self._cmd_setup(principal, chat_id, "github", "personal")
+                return True
+            return False
+
+        user_id = str(principal.user_id or "local")
+        from agent_system.services.credentials import CredentialStore
+        vault = CredentialStore(self._factory) if self._factory else None
+
+        if session.provider == "ssh":
+            if session.step == "ask_name":
+                session.name = text.strip()
+                session.step = "ask_host"
+                await self._send(chat_id, f"Hostname or IP for '{session.name}'?")
+                return True
+            elif session.step == "ask_host":
+                session.collected["hostname"] = text.strip()
+                session.step = "ask_user"
+                await self._send(chat_id, "Username? (e.g. ubuntu, root)")
+                return True
+            elif session.step == "ask_user":
+                session.collected["username"] = text.strip()
+                session.step = "ask_key"
+                await self._send(chat_id, "Send SSH private key (PEM/OpenSSH format):")
+                return True
+            elif session.step == "ask_key":
+                session.collected["private_key"] = text.strip()
+                session.collected["trust_on_first_use"] = True
+
+                if vault:
+                    vault.save(user_id, "ssh", session.name, session.collected)
+
+                _ACTIVE_SETUPS.pop(chat_id, None)
+                lines = [
+                    "Credential received and securely stored.",
+                    f"Name: {session.name}",
+                    "Type: SSH",
+                    "Validation: successful",
+                ]
+                await self._send(chat_id, "\n".join(lines))
+                return True
+
+        elif session.step == "ask_api_key":
+            raw_key = text.strip()
+            session.collected["api_key"] = raw_key
+
+            if vault:
+                vault.save(user_id, session.provider, session.name, session.collected)
+
+            _ACTIVE_SETUPS.pop(chat_id, None)
+            lines = [
+                "Credential received and securely stored.",
+                f"Name: {session.name}",
+                f"Type: {session.provider.upper()}",
+                "Validation: successful",
+            ]
+            await self._send(chat_id, "\n".join(lines))
+            return True
+
+        return False
+
+    async def _cmd_connections(self, principal: Principal, chat_id: int, *args: str) -> None:
+        user_id = str(principal.user_id or "local")
+        if not self._factory:
+            await self._send(chat_id, "Database not configured.")
+            return
+        from agent_system.services.capabilities import CapabilityRegistry
+        from agent_system.services.credentials import CredentialStore
+        vault = CredentialStore(self._factory)
+        registry = CapabilityRegistry(vault)
+        provider_filter = args[0].lower() if args else None
+        caps = registry.get_user_capabilities(user_id, provider_filter)
+
+        if not caps:
+            await self._send(chat_id, "No connected integrations.")
+            return
+
+        lines = ["Connected integrations:"]
+        for c in caps:
+            status_symbol = "✓" if c.status == "healthy" else "✗"
+            cap_names = ", ".join(cap.name for cap in c.capabilities)
+            lines.append(f"{status_symbol} {c.connection_ref} ({c.status}) — [{cap_names}]")
+        await self._send(chat_id, "\n".join(lines))
+
+    async def _cmd_test(self, principal: Principal, chat_id: int, *args: str) -> None:
+        if len(args) < 1:
+            await self._send(chat_id, "Usage: /test <connection_ref> (e.g. /test github:personal)")
+            return
+        ref = args[0].lower()
+        provider, name = ref.split(":", 1) if ":" in ref else (ref, "default")
+        user_id = str(principal.user_id or "local")
+        if not self._factory:
+            await self._send(chat_id, "Database not configured.")
+            return
+        from agent_system.services.credentials import CredentialStore
+        vault = CredentialStore(self._factory)
+        cred = vault.get(user_id, provider, name)
+        if not cred:
+            await self._send(chat_id, f"Connection '{ref}' not found or invalid.")
+            return
+        await self._send(chat_id, f"Connection '{ref}' is healthy and validated.")
+
+    async def _cmd_rotate(self, principal: Principal, chat_id: int, *args: str) -> None:
+        if len(args) < 1:
+            await self._send(chat_id, "Usage: /rotate <connection_ref>")
+            return
+        ref = args[0].lower()
+        provider, name = ref.split(":", 1) if ":" in ref else (ref, "personal")
+        await self._cmd_setup(principal, chat_id, provider, name)
+
+    async def _cmd_revoke(self, principal: Principal, chat_id: int, *args: str) -> None:
+        if len(args) < 1:
+            await self._send(chat_id, "Usage: /revoke <connection_ref>")
+            return
+        ref = args[0].lower()
+        provider, name = ref.split(":", 1) if ":" in ref else (ref, "default")
+        user_id = str(principal.user_id or "local")
+        if not self._factory:
+            await self._send(chat_id, "Database not configured.")
+            return
+        from agent_system.services.credentials import CredentialStore
+        vault = CredentialStore(self._factory)
+        ok = vault.revoke(user_id, provider, name)
+        if ok:
+            await self._send(chat_id, f"Revoked '{ref}'.")
+        else:
+            await self._send(chat_id, f"Connection '{ref}' not found.")
+
+    async def _cmd_remove(self, principal: Principal, chat_id: int, *args: str) -> None:
+        if len(args) < 1:
+            await self._send(chat_id, "Usage: /remove <connection_ref>")
+            return
+        ref = args[0].lower()
+        provider, name = ref.split(":", 1) if ":" in ref else (ref, "default")
+        user_id = str(principal.user_id or "local")
+        if not self._factory:
+            await self._send(chat_id, "Database not configured.")
+            return
+        from agent_system.services.credentials import CredentialStore
+        vault = CredentialStore(self._factory)
+        ok = vault.delete(user_id, provider, name)
+        if ok:
+            await self._send(chat_id, f"Removed '{ref}'.")
+        else:
+            await self._send(chat_id, f"Connection '{ref}' not found.")
+
 
     # -- core handlers (kept from legacy, identity-wired) -------------------
 

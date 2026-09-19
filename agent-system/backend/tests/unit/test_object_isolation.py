@@ -105,7 +105,7 @@ def test_telegram_approve_owned_approval_identity_forwarded(tmp_path: Any) -> No
         await svc._cmd_approve_run(_principal("999"), 111, alice.approval_id, approve=True)
         await svc._cmd_approve_run(_principal("888"), 111, alice.approval_id, approve=True)
 
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
 
     assert gate.get(alice.approval_id).decision is Decision.APPROVED
     assert any("-> APPROVED" in m for m in sent[:1])  # owner's verdict
@@ -155,7 +155,7 @@ def test_telegram_retry_foreign_owned_task_refused(tmp_path: Any) -> None:
         await svc._cmd_retry(_principal("888"), 111, "task_1")
         await svc._cmd_retry(_principal("999"), 111, "task_1")
 
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
 
     assert any("authored by you" in m for m in was_requeued[:1])
     assert any("Re-queued task" in m for m in was_requeued[1:])
@@ -169,7 +169,7 @@ def test_telegram_ownerless_and_uidless_control_unaffected(tmp_path: Any) -> Non
 
     sent: list[str] = []
     svc._send = _capturing_send(sent)  # type: ignore[method-assign]
-    run = asyncio.get_event_loop().run_until_complete
+    run = asyncio.run
 
     # Ownerless task with an identified principal -> allowed (legacy).
     run(svc._cmd_retry(_principal("888"), 111, "task_ownerless"))
