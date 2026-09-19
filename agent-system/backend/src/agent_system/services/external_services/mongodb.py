@@ -39,6 +39,7 @@ try:
         OperationFailure,
         ServerSelectionTimeoutError,
     )
+
     PYMONGO_AVAILABLE = True
 except ImportError:
     PYMONGO_AVAILABLE = False

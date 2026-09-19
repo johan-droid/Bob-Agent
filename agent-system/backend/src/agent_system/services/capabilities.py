@@ -41,10 +41,10 @@ class CapabilityInfo(NamedTuple):
 @dataclass
 class ConnectionCapability:
     connection_ref: str  # e.g., "github:personal", "ssh:home-server"
-    provider: str        # e.g., "github", "ssh", "groq"
-    name: str            # e.g., "personal", "home-server"
-    credential_type: str # e.g., "oauth", "ssh_key", "api_key"
-    status: str          # "healthy", "degraded", "revoked"
+    provider: str  # e.g., "github", "ssh", "groq"
+    name: str  # e.g., "personal", "home-server"
+    credential_type: str  # e.g., "oauth", "ssh_key", "api_key"
+    status: str  # "healthy", "degraded", "revoked"
     capabilities: list[CapabilityInfo] = field(default_factory=list)
     authorized_tools: list[str] = field(default_factory=list)
     last_validated_at: str | None = None

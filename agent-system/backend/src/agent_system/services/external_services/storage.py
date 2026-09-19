@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 try:
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
+
     BOTO3_AVAILABLE = True
 except ImportError:
     BOTO3_AVAILABLE = False
@@ -162,7 +163,9 @@ class LocalStorageProvider(StorageProvider):
     def download_object(self, key: str) -> bytes:
         target = self._safe_path(key)
         if not target.is_file():
-            raise ExternalServiceError(f"Object not found: {key}", service=self.name, code="NOT_FOUND")
+            raise ExternalServiceError(
+                f"Object not found: {key}", service=self.name, code="NOT_FOUND"
+            )
         return target.read_bytes()
 
     def delete_object(self, key: str) -> bool:
@@ -205,7 +208,10 @@ class S3CompatibleStorageProvider(StorageProvider):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.bucket_name and (self.settings.s3_access_key_id or os.environ.get("AWS_ACCESS_KEY_ID")))
+        return bool(
+            self.bucket_name
+            and (self.settings.s3_access_key_id or os.environ.get("AWS_ACCESS_KEY_ID"))
+        )
 
     @property
     def is_enabled(self) -> bool:
@@ -273,7 +279,11 @@ class S3CompatibleStorageProvider(StorageProvider):
         except Exception as exc:
             latency = (time.monotonic() - start) * 1000.0
             err_msg = str(exc)
-            status = ServiceHealthStatus.AUTH_FAILED if "403" in err_msg or "AccessDenied" in err_msg else ServiceHealthStatus.UNAVAILABLE
+            status = (
+                ServiceHealthStatus.AUTH_FAILED
+                if "403" in err_msg or "AccessDenied" in err_msg
+                else ServiceHealthStatus.UNAVAILABLE
+            )
             return ServiceHealth(
                 name=self.name,
                 configured=True,
@@ -328,7 +338,9 @@ class S3CompatibleStorageProvider(StorageProvider):
             res = client.get_object(Bucket=self.bucket_name, Key=key.lstrip("/"))
             return bytes(res["Body"].read())
         except Exception as exc:
-            raise ExternalServiceError(f"S3 download failed for {key}: {exc}", service=self.name) from exc
+            raise ExternalServiceError(
+                f"S3 download failed for {key}: {exc}", service=self.name
+            ) from exc
 
     def delete_object(self, key: str) -> bool:
         client = self._get_client()

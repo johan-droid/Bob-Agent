@@ -135,7 +135,10 @@ def with_retry(
     fn: Callable[[], T],
     max_retries: int = 3,
     backoff_factor: float = 0.2,
-    retryable_exceptions: tuple[type[Exception], ...] = (ServiceUnavailableError, ServiceRateLimitError),
+    retryable_exceptions: tuple[type[Exception], ...] = (
+        ServiceUnavailableError,
+        ServiceRateLimitError,
+    ),
 ) -> T:
     """Execute a function with exponential backoff retries on retryable errors."""
     last_exc: Exception | None = None

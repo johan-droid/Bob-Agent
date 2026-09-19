@@ -90,5 +90,8 @@ def test_s3_storage_provider_mock_operations():
         # Test upload
         provider.upload_object("docs/test.pdf", b"pdf content")
         mock_client.put_object.assert_called_once_with(
-            Bucket="my-bucket", Key="docs/test.pdf", Body=b"pdf content", ContentType="application/octet-stream"
+            Bucket="my-bucket",
+            Key="docs/test.pdf",
+            Body=b"pdf content",
+            ContentType="application/octet-stream",
         )

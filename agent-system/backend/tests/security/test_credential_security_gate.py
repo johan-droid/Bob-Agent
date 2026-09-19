@@ -32,7 +32,9 @@ def db_factory(tmp_path):
     Base.metadata.create_all(engine)
     factory = make_session_factory(engine)
     with factory() as session:
-        session.add(User(id="usr_alice", display_name="Alice", auth_provider="telegram", role="admin"))
+        session.add(
+            User(id="usr_alice", display_name="Alice", auth_provider="telegram", role="admin")
+        )
         session.add(User(id="usr_bob", display_name="Bob", auth_provider="telegram", role="member"))
         session.commit()
     return factory
@@ -44,7 +46,11 @@ def test_secrets_never_stored_unencrypted(db_factory):
     vault.save("usr_alice", "ssh", "my-vps", {"private_key": raw_key})
 
     with db_factory() as session:
-        row = session.query(UserCredential).filter_by(user_id="usr_alice", provider="ssh", name="my-vps").one()
+        row = (
+            session.query(UserCredential)
+            .filter_by(user_id="usr_alice", provider="ssh", name="my-vps")
+            .one()
+        )
         assert "VERY_SECRET_ALICE_KEY" not in row.encrypted_blob
         assert "VERY_SECRET_ALICE_KEY" not in row.encrypted_dek
 
@@ -62,7 +68,9 @@ def test_user_isolation_boundary(db_factory):
 
 def test_revoked_credential_cannot_be_resolved(db_factory):
     vault = CredentialStore(db_factory)
-    vault.save("usr_alice", "ssh", "home-server", {"hostname": "10.0.0.1", "private_key": "raw_secret"})
+    vault.save(
+        "usr_alice", "ssh", "home-server", {"hostname": "10.0.0.1", "private_key": "raw_secret"}
+    )
 
     # Sanity check
     assert vault.get("usr_alice", "ssh", "home-server") is not None
@@ -71,7 +79,9 @@ def test_revoked_credential_cannot_be_resolved(db_factory):
     vault.revoke("usr_alice", "ssh", "home-server")
 
     # Tool execution fails safely
-    res = execute_ssh_command("ssh:home-server", "uptime", user_id="usr_alice", credential_store=vault)
+    res = execute_ssh_command(
+        "ssh:home-server", "uptime", user_id="usr_alice", credential_store=vault
+    )
     assert res["ok"] is False
     assert "not found or revoked" in res["error"]
 
@@ -104,8 +114,8 @@ def test_context_sanitization_scrubs_raw_secrets():
         "api_key": "gsk_secret_123",
         "nested": {
             "token": "ghp_secret_456",
-            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
-        }
+            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----",
+        },
     }
     sanitized = sanitize_context(raw_payload)
     assert sanitized["connection"] == "ssh:vps"
@@ -116,7 +126,9 @@ def test_context_sanitization_scrubs_raw_secrets():
 
 @pytest.mark.asyncio
 async def test_full_chat_to_tool_e2e_zero_leakage_flow(db_factory):
-    tg_svc = TelegramService(settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus())
+    tg_svc = TelegramService(
+        settings=Settings(), session_factory=db_factory, gate=PermissionGate(), bus=EventBus()
+    )
     principal = Principal(user_id="usr_alice", role=Role.ADMIN, mode=IdentityMode.TELEGRAM)
     chat_id = 112233
 

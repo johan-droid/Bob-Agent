@@ -596,7 +596,9 @@ class UserCredential(Base):
 
     __tablename__ = "user_credentials"
     __table_args__ = (
-        UniqueConstraint("user_id", "provider", "name", name="uq_user_credentials_user_provider_name"),
+        UniqueConstraint(
+            "user_id", "provider", "name", name="uq_user_credentials_user_provider_name"
+        ),
     )
 
     id: Mapped[str] = _pk()
@@ -607,9 +609,13 @@ class UserCredential(Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     encrypted_blob: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_dek: Mapped[str] = mapped_column(Text, nullable=False)
-    encryption_algorithm: Mapped[str] = mapped_column(String(30), default="AES-256-GCM-ENVELOPE", nullable=False)
+    encryption_algorithm: Mapped[str] = mapped_column(
+        String(30), default="AES-256-GCM-ENVELOPE", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(20), default="healthy", nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts()
-    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

@@ -23,8 +23,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
+import os
+
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from agent_system.config import get_settings
@@ -40,8 +43,8 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _derive_master_key(raw_secret: str) -> bytes:
-    """Derive a 32-byte Fernet key from a master secret string using PBKDF2."""
+def _derive_master_key_bytes(raw_secret: str) -> bytes:
+    """Derive a raw 32-byte (256-bit) master key from secret string using PBKDF2HMAC-SHA256."""
     salt = b"bob_master_credential_vault_salt_v1"
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -49,20 +52,44 @@ def _derive_master_key(raw_secret: str) -> bytes:
         salt=salt,
         iterations=100_000,
     )
-    key = kdf.derive(raw_secret.encode("utf-8"))
-    return base64.urlsafe_b64encode(key)
+    return kdf.derive(raw_secret.encode("utf-8"))
 
 
-def get_master_fernet() -> Fernet:
-    """Resolve master Fernet encryption key from Settings."""
+def get_master_key_bytes() -> bytes:
+    """Resolve 256-bit master encryption key from Settings."""
     settings = get_settings()
     master_secret = (
         getattr(settings, "bob_master_encryption_key", None)
         or settings.api_session_secret
         or settings.agent_bootstrap_secret
     )
-    fernet_key = _derive_master_key(master_secret)
+    return _derive_master_key_bytes(master_secret)
+
+
+def get_master_fernet() -> Fernet:
+    """Legacy helper: Resolve master Fernet encryption key from Settings."""
+    raw_bytes = get_master_key_bytes()
+    fernet_key = base64.urlsafe_b64encode(raw_bytes)
     return Fernet(fernet_key)
+
+
+def _aes_gcm_encrypt(key_32bytes: bytes, plaintext: bytes) -> str:
+    """Encrypt plaintext using AES-256-GCM, returning base64 payload of nonce + ciphertext + tag."""
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key_32bytes)
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    return base64.b64encode(nonce + ciphertext).decode("utf-8")
+
+
+def _aes_gcm_decrypt(key_32bytes: bytes, b64_payload: str) -> bytes:
+    """Decrypt base64-encoded nonce + ciphertext + tag using AES-256-GCM."""
+    raw = base64.b64decode(b64_payload.encode("utf-8"))
+    if len(raw) < 12:
+        raise ValueError("Invalid AES-GCM payload: missing nonce or ciphertext")
+    nonce = raw[:12]
+    ciphertext = raw[12:]
+    aesgcm = AESGCM(key_32bytes)
+    return aesgcm.decrypt(nonce, ciphertext, None)
 
 
 class CredentialMetadata(NamedTuple):
@@ -102,13 +129,12 @@ class CredentialStore:
         if not user_id or not provider or not name:
             raise ValueError("user_id, provider, and name are required")
 
-        master_fernet = get_master_fernet()
-        dek = Fernet.generate_key()
-        dek_fernet = Fernet(dek)
+        master_key = get_master_key_bytes()
+        dek = AESGCM.generate_key(bit_length=256)
 
         payload_bytes = json.dumps(payload).encode("utf-8")
-        encrypted_blob = dek_fernet.encrypt(payload_bytes).decode("utf-8")
-        encrypted_dek = master_fernet.encrypt(dek).decode("utf-8")
+        encrypted_blob = _aes_gcm_encrypt(dek, payload_bytes)
+        encrypted_dek = _aes_gcm_encrypt(master_key, dek)
 
         now_ts = _now()
         with session_scope(self._factory) as db:
@@ -190,16 +216,42 @@ class CredentialStore:
                 return None
 
             try:
-                master_fernet = get_master_fernet()
-                dek = master_fernet.decrypt(row.encrypted_dek.encode("utf-8"))
-                dek_fernet = Fernet(dek)
-                payload_bytes = dek_fernet.decrypt(row.encrypted_blob.encode("utf-8"))
-                payload = json.loads(payload_bytes.decode("utf-8"))
-                if not isinstance(payload, dict):
-                    return None
-                return payload
+                if row.encryption_algorithm == "AES-256-GCM-ENVELOPE":
+                    try:
+                        master_key = get_master_key_bytes()
+                        dek = _aes_gcm_decrypt(master_key, row.encrypted_dek)
+                        payload_bytes = _aes_gcm_decrypt(dek, row.encrypted_blob)
+                        payload = json.loads(payload_bytes.decode("utf-8"))
+                        if isinstance(payload, dict):
+                            return payload
+                    except Exception:
+                        # Fallback for legacy Fernet-encrypted rows saved before AESGCM migration
+                        master_fernet = get_master_fernet()
+                        dek = master_fernet.decrypt(row.encrypted_dek.encode("utf-8"))
+                        dek_fernet = Fernet(dek)
+                        payload_bytes = dek_fernet.decrypt(row.encrypted_blob.encode("utf-8"))
+                        payload = json.loads(payload_bytes.decode("utf-8"))
+                        if isinstance(payload, dict):
+                            return payload
+                else:
+                    master_fernet = get_master_fernet()
+                    dek = master_fernet.decrypt(row.encrypted_dek.encode("utf-8"))
+                    dek_fernet = Fernet(dek)
+                    payload_bytes = dek_fernet.decrypt(row.encrypted_blob.encode("utf-8"))
+                    payload = json.loads(payload_bytes.decode("utf-8"))
+                    if isinstance(payload, dict):
+                        return payload
+                return None
             except Exception as exc:
-                logger.error("credential_decryption_failed", extra={"user_id": user_id, "provider": provider, "name": name, "error": str(exc)})
+                logger.error(
+                    "credential_decryption_failed",
+                    extra={
+                        "user_id": user_id,
+                        "provider": provider,
+                        "name": name,
+                        "error": str(exc),
+                    },
+                )
                 return None
 
     def delete(self, user_id: str, provider: str, name: str) -> bool:

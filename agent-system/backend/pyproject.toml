@@ -26,6 +26,7 @@ dependencies = [
     "fpdf2>=2.8.8",
     "httpx>=0.28.1",
     "cryptography>=50.0.1",
+    "paramiko>=3.4",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +58,7 @@ dev = [
     "types-docker>=7.2.0.20260827",
     "types-pyyaml>=6.0.12.20260906",
     "profilis==1.0.0",
+    "types-paramiko>=5.0.0.20260724",
 ]
 
 [build-system]
