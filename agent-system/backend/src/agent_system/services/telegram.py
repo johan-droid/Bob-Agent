@@ -767,7 +767,7 @@ class TelegramService:
         )
         # Cloud (CLOUD_INLINE_RUN): no RQ worker, so drive in-process.
         # The web request must return fast; Telegram retries slow responses.
-        if bool(getattr(self._settings, "cloud_inline_run", False)):
+        if self._settings.is_cloud_inline:
             thread = threading.Thread(
                 target=self._drive_and_report,
                 args=(chat_id, session_id),

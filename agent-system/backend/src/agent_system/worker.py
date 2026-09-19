@@ -335,6 +335,17 @@ def main() -> None:  # pragma: no cover — manual worker process entrypoint
     import uuid
 
     settings = get_settings()
+    if settings.is_cloud_inline:
+        raise RuntimeError(
+            "Worker process cannot start when CLOUD_INLINE_RUN=true. "
+            "In-process task runner (cloud execution) is active on the web dyno; "
+            "do not run the worker dyno or worker process."
+        )
+    if not settings.redis_url or not str(settings.redis_url).strip():
+        raise RuntimeError(
+            "REDIS_URL is required when CLOUD_INLINE_RUN=false to run the RQ worker."
+        )
+
     conn = Redis.from_url(settings.redis_url)
     # Unique per-process name: a crashed worker's stale registration must not
     # block a fresh worker from starting (RQ raises on duplicate names).

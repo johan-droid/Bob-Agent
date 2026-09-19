@@ -248,6 +248,11 @@ class Settings(BaseSettings):
     max_retries: int = 3
 
     @property
+    def is_cloud_inline(self) -> bool:
+        """True when running in cloud inline execution mode (no Redis/RQ worker)."""
+        return bool(self.cloud_inline_run)
+
+    @property
     def effective_port(self) -> int:
         """Port the server must bind/liveness-probe ($PORT wins on Heroku)."""
         return int(self.port or self.api_port)
