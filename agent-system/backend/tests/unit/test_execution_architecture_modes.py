@@ -261,9 +261,7 @@ def test_mode_b_cloud_inline_false_requires_redis_and_worker_guard(
         monkeypatch.setenv("REDIS_URL", "")
         clear_settings_cache()
 
-        with pytest.raises(
-            RuntimeError, match="REDIS_URL is required when CLOUD_INLINE_RUN=false"
-        ):
+        with pytest.raises(RuntimeError, match="REDIS_URL is required when CLOUD_INLINE_RUN=false"):
             worker_main()
     finally:
         clear_settings_cache()

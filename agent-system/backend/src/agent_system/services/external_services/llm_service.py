@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMProviderService(ExternalService):
-    """External service adapter for a specific LLM provider (e.g. Groq, Gemini, OpenRouter, OpenAI)."""
+    """External service adapter for a specific LLM provider."""
 
     def __init__(
         self,
