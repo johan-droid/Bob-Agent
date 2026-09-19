@@ -433,11 +433,11 @@ class GatewayExecutor:
         with session_scope(self._factory) as db:
             row = (
                 db.query(
-                TelegramAccount.user_id,
-                TelegramAccount.role.label("acct_role"),
-                User.is_active,
-                User.role.label("user_role"),
-            )
+                    TelegramAccount.user_id,
+                    TelegramAccount.role.label("acct_role"),
+                    User.is_active,
+                    User.role.label("user_role"),
+                )
                 .join(User, TelegramAccount.user_id == User.id)
                 .filter(TelegramAccount.telegram_user_id == str(account_id))
                 .one_or_none()

@@ -89,10 +89,7 @@ def main() -> int:
         run = db.query(AgentRun).filter_by(task_id=task_id).first()
         lease = db.query(AgentLease).filter_by(agent_run_id=run.id).first() if run else None
         events = (
-            db.query(EventRow)
-            .filter(EventRow.task_id == task_id)
-            .order_by(EventRow.sequence)
-            .all()
+            db.query(EventRow).filter(EventRow.task_id == task_id).order_by(EventRow.sequence).all()
         )
         event_types = [e.type for e in events]
 
@@ -117,9 +114,7 @@ def main() -> int:
             and validate_ok
         )
         print(
-            f"\nworker_id '{worker_id}' proves out-of-process execution"
-            if ok
-            else "\nE2E FAILED"
+            f"\nworker_id '{worker_id}' proves out-of-process execution" if ok else "\nE2E FAILED"
         )
         return 0 if ok else 1
 

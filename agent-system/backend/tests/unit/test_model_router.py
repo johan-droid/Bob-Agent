@@ -201,6 +201,7 @@ def test_budget_scopes_are_independent() -> None:
     assert monitor.record("task:task_1", 0.5) == [50.0]
     assert monitor.record("daily", 0.5) == []  # 0.5% — nothing fired
 
+
 def test_routing_modes() -> None:
     from agent_system.services.llm_catalog import default_catalog
     from agent_system.services.llm_router import request_for_mode, route
@@ -224,7 +225,16 @@ def test_routing_modes() -> None:
 
     dec = route(req_coding, cat)
     known_providers = {
-        "groq", "nim", "opencode", "openrouter", "together", "ollama_cloud",
-        "anthropic", "openai", "gemini", "deepseek", "ollama"
+        "groq",
+        "nim",
+        "opencode",
+        "openrouter",
+        "together",
+        "ollama_cloud",
+        "anthropic",
+        "openai",
+        "gemini",
+        "deepseek",
+        "ollama",
     }
     assert dec is not None and dec.provider in known_providers

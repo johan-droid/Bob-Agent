@@ -118,6 +118,7 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_delivery_outbox_channel"), "delivery_outbox", ["channel"], unique=False
     )
+    op.create_index(op.f("ix_delivery_outbox_kind"), "delivery_outbox", ["kind"], unique=False)
     op.create_index(op.f("ix_delivery_outbox_state"), "delivery_outbox", ["state"], unique=False)
     op.create_index(
         op.f("ix_delivery_outbox_next_attempt_at"),
@@ -147,6 +148,7 @@ def downgrade() -> None:
     op.drop_index(
         op.f("ix_delivery_outbox_next_attempt_at"), table_name="delivery_outbox"
     )
+    op.drop_index(op.f("ix_delivery_outbox_kind"), table_name="delivery_outbox")
     op.drop_index(op.f("ix_delivery_outbox_state"), table_name="delivery_outbox")
     op.drop_index(op.f("ix_delivery_outbox_channel"), table_name="delivery_outbox")
     op.drop_table("delivery_outbox")
