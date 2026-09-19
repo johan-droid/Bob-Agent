@@ -107,5 +107,10 @@ module = [
     "opentelemetry.instrumentation.sqlalchemy",
     "opentelemetry.instrumentation.httpx",
     "sentence_transformers",
+    "pymongo",
+    "pymongo.errors",
+    "boto3",
+    "botocore",
+    "botocore.exceptions",
 ]
 ignore_missing_imports = true
