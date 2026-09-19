@@ -1,7 +1,8 @@
 """Telegram gateway API (webhook transport + management endpoints).
 
 - POST /api/v1/telegram/webhook : receive Telegram updates when webhook mode
-  is enabled; authenticated via the `X-Telegram-Webhook-Secret` header.
+  is enabled; authenticated via the standard `X-Telegram-Bot-Api-Secret-Token`
+  or `X-Telegram-Webhook-Secret` header.
 - GET  /api/v1/telegram/status   : report transport / configured state.
 
 Unauthenticated webhook uses a separate secret; management endpoints require
@@ -37,7 +38,11 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     expected = settings.telegram_webhook_secret
     if not expected:
         raise HTTPException(status_code=400, detail="webhook mode not enabled")
-    provided = request.headers.get("X-Telegram-Webhook-Secret", "")
+    provided = (
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        or request.headers.get("X-Telegram-Webhook-Secret")
+        or ""
+    )
     if not _hmac.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid webhook secret")
     try:

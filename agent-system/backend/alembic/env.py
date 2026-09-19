@@ -7,12 +7,15 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 
-from agent_system.infra.db import make_engine
+from agent_system.infra.db import _normalize_url, make_engine
 from agent_system.infra.models import Base
 
-config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+try:
+    config = context.config
+    if config is not None and config.config_file_name is not None:
+        fileConfig(config.config_file_name)
+except (AttributeError, NameError):
+    config = None
 
 target_metadata = Base.metadata
 
@@ -20,7 +23,10 @@ target_metadata = Base.metadata
 def _url() -> str:
     import os
 
-    return os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    raw = os.environ.get("DATABASE_URL")
+    if not raw and config is not None:
+        raw = config.get_main_option("sqlalchemy.url")
+    return _normalize_url(raw or "")
 
 
 def run_migrations_offline() -> None:
@@ -48,7 +54,8 @@ def run_migrations_online() -> None:
     engine.dispose()
 
 
-if context.is_offline_mode():
-    run_migrations_offline()
-else:
-    run_migrations_online()
+if getattr(context, "config", None) is not None:
+    if context.is_offline_mode():
+        run_migrations_offline()
+    else:
+        run_migrations_online()
