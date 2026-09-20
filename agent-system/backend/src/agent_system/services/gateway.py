@@ -425,8 +425,11 @@ class GatewayExecutor:
         authorization — it is re-verified server-side at execution time.
         Unknown, inactive or blocked accounts are never executed (deny by
         default, no oracle to probing senders).
+
+        If identity mode is `telegram` and `account_id` is in the allowed user IDs list
+        but not yet provisioned, auto-provision it.
         """
-        from agent_system.services.identity import IdentityMode
+        from agent_system.services.identity import IdentityMode, IdentityService
 
         identity_mode = getattr(self._settings, "agent_identity_mode", "local")
 
@@ -454,6 +457,23 @@ class GatewayExecutor:
                     ):
                         return None
                     return str(row.user_id)
+
+            # Auto-provision if in identity mode and listed in allowed user IDs
+            if identity_mode == IdentityMode.TELEGRAM.value:
+                identity_svc = IdentityService(self._factory, self._settings)
+                if str(account_id) in identity_svc.allowed_user_ids():
+                    try:
+                        principal = identity_svc.provision(
+                            str(account_id),
+                            display_name=f"telegram:{account_id}",
+                            chat_id=chat_id,
+                        )
+                        return principal.user_id
+                    except Exception as exc:
+                        _logger.warning(
+                            "Gateway auto-provision failed for account %s: %s", account_id, exc
+                        )
+                        return None
 
         # 2. Local mode fallback (chat-id allowlist)
         if identity_mode == "local" or identity_mode == IdentityMode.LOCAL.value:
@@ -515,10 +535,17 @@ class GatewayExecutor:
 
     def _process_one(self, update_id: int) -> None:
         account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
+        _logger.info("telegram.update.claimed update_id=%s chat_id=%s", update_id, chat_id)
         owner = self._resolve_owner(account_id, chat_id=chat_id)
         if not text or chat_id is None or owner is None:
             self._mark_processed(update_id)
             return
+        _logger.info(
+            "telegram.identity.resolved update_id=%s chat_id=%s owner=%s",
+            update_id,
+            chat_id,
+            owner,
+        )
         # Durable ack + exactly one master task, via the normal runtime seams.
         from agent_system.services.cloud import drive_session, ensure_session_tasks
         from agent_system.services.orchestrator import Supervisor
@@ -537,8 +564,17 @@ class GatewayExecutor:
         if session_id is None:
             supervisor = Supervisor(self._bus)
             session_id = supervisor.create_session(self._factory, text, owner_user_id=owner)
+            _logger.info(
+                "telegram.session.created update_id=%s session_id=%s", update_id, session_id
+            )
             task_ids = ensure_session_tasks(self._factory, self._bus, session_id)
             master_task_id = task_ids[0] if task_ids else None
+            _logger.info(
+                "telegram.task.created update_id=%s session_id=%s task_id=%s",
+                update_id,
+                session_id,
+                master_task_id,
+            )
             self._outbox.enqueue(
                 kind=KIND_TASK_ACK,
                 chat_id=chat_id,
@@ -547,7 +583,23 @@ class GatewayExecutor:
             )
             self._gateway_bound(update_id, session_id, master_task_id)
         try:
+            _logger.info("telegram.agent.started session_id=%s", session_id)
             drive_session(self._factory, self._bus, session_id)
+            _logger.info("telegram.task.completed session_id=%s", session_id)
+        except Exception as exc:
+            _logger.exception(
+                "telegram.agent.failed update_id=%s chat_id=%s session_id=%s error=%s",
+                update_id,
+                chat_id,
+                session_id,
+                exc,
+            )
+            # Send failure notification if drive_session threw before emitting task.failed
+            self._outbox.enqueue(
+                kind=KIND_RESULT,
+                chat_id=chat_id,
+                text=f"❌ Session failed: {str(exc)[:1000]}",
+            )
         finally:
             # Results reach the outbox here (event subscribers only queued —
             # the emit happens inside the orchestrator's transaction). The

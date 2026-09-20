@@ -412,6 +412,7 @@ class TelegramService:
 
         - Local mode: chat id must be on the allowlist -> OPERATOR.
         - Identity mode: Telegram user id -> IdentityService -> Principal.
+          If allowed but unprovisioned, auto-provision idempotently.
         """
         if self._identity is None:
             if chat_id in self._allowed:
@@ -420,7 +421,19 @@ class TelegramService:
         tid = str(from_user["id"]) if from_user else None
         if tid is None:
             return None
-        return self._identity.resolve(tid, chat_id)
+        principal = self._identity.resolve(tid, chat_id)
+        if principal is None and tid in self._identity.allowed_user_ids():
+            try:
+                display_name = f"telegram:{tid}"
+                if from_user and "username" in from_user:
+                    display_name = f"@{from_user['username']}"
+                elif from_user and "first_name" in from_user:
+                    display_name = str(from_user["first_name"])
+                principal = self._identity.provision(tid, display_name, chat_id)
+            except Exception as exc:
+                _logger.warning("Auto-provisioning failed for Telegram user %s: %s", tid, exc)
+                return None
+        return principal
 
     def _authorized_chat_ids(self) -> list[int]:
         """All chat ids that should receive an approval broadcast.
@@ -512,6 +525,7 @@ class TelegramService:
             db.add(row)
             try:
                 db.flush()
+                _logger.info("telegram.update.persisted update_id=%s chat_id=%s", key, from_chat)
             except IntegrityError:
                 db.rollback()
                 existing = db.get(TelegramUpdate, key)
@@ -522,6 +536,9 @@ class TelegramService:
                 existing.account_id = existing.account_id or account_id
                 existing.chat_id = existing.chat_id or (str(from_chat) if from_chat else None)
                 existing.payload_json = update
+                _logger.info(
+                    "telegram.update.claimed update_id=%s chat_id=%s retry=True", key, from_chat
+                )
                 return True
             return True
 

@@ -300,48 +300,75 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             emit("model.token", {"model_id": model_id, "delta": delta})
 
         active_model = model_id
-        if len(candidates) > 1:
-            from agent_system.services.fallback import invoke_with_fallback
+        import logging as _logging
 
-            result = invoke_with_fallback(
-                router,
-                factory,
-                candidates,
-                prompt,
-                task_id=task_id,
-                worker_id=run_id or task_id,
-                session_id=session_id,
-                agent_run_id=run_id,
-                agent_type=agent_type,
-                max_attempts=int(getattr(settings, "llm_max_fallback_attempts", 3) or 3),
-                bus=bus,
+        _log = _logging.getLogger(__name__)
+        _log.info(
+            "telegram.model.started model_id=%s session_id=%s task_id=%s",
+            model_id,
+            session_id,
+            task_id,
+        )
+        try:
+            if len(candidates) > 1:
+                from agent_system.services.fallback import invoke_with_fallback
+
+                result = invoke_with_fallback(
+                    router,
+                    factory,
+                    candidates,
+                    prompt,
+                    task_id=task_id,
+                    worker_id=run_id or task_id,
+                    session_id=session_id,
+                    agent_run_id=run_id,
+                    agent_type=agent_type,
+                    max_attempts=int(getattr(settings, "llm_max_fallback_attempts", 3) or 3),
+                    bus=bus,
+                )
+                if result is None:
+                    raise RuntimeError("model invocation failed: no candidates")
+                active_model = str(getattr(result, "model_id", model_id))
+            elif hasattr(router, "invoke_streaming"):
+                result = router.invoke_streaming(
+                    factory,
+                    model_id,
+                    prompt,
+                    session_id=session_id,
+                    task_id=task_id,
+                    agent_run_id=run_id,
+                    agent_type=agent_type,
+                    on_token=_on_token,
+                )
+            else:  # pragma: no cover — all shipped routers stream
+                result = router.invoke(
+                    factory,
+                    model_id,
+                    prompt,
+                    session_id=session_id,
+                    task_id=task_id,
+                    agent_run_id=run_id,
+                    agent_type=agent_type,
+                )
+            if not result.ok:
+                _log.warning(
+                    "telegram.model.failed model_id=%s session_id=%s error=%s",
+                    active_model,
+                    session_id,
+                    result.error,
+                )
+                raise RuntimeError(result.error or "model invocation failed")
+            _log.info(
+                "telegram.model.completed model_id=%s session_id=%s", active_model, session_id
             )
-            if result is None:
-                raise RuntimeError("model invocation failed: no candidates")
-            active_model = str(getattr(result, "model_id", model_id))
-        elif hasattr(router, "invoke_streaming"):
-            result = router.invoke_streaming(
-                factory,
-                model_id,
-                prompt,
-                session_id=session_id,
-                task_id=task_id,
-                agent_run_id=run_id,
-                agent_type=agent_type,
-                on_token=_on_token,
+        except Exception as exc:
+            _log.warning(
+                "telegram.model.failed model_id=%s session_id=%s error=%s",
+                active_model,
+                session_id,
+                exc,
             )
-        else:  # pragma: no cover — all shipped routers stream
-            result = router.invoke(
-                factory,
-                model_id,
-                prompt,
-                session_id=session_id,
-                task_id=task_id,
-                agent_run_id=run_id,
-                agent_type=agent_type,
-            )
-        if not result.ok:
-            raise RuntimeError(result.error or "model invocation failed")
+            raise
         usage = {
             "input_tokens": int(result.tokens_in or 0),
             "output_tokens": int(result.tokens_out or 0),

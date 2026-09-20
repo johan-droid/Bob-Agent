@@ -12,11 +12,14 @@ the normal authenticator.
 from __future__ import annotations
 
 import hmac as _hmac
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from agent_system.api.deps import get_authenticator
+
+_logger = logging.getLogger(__name__)
 
 telegram_router = APIRouter(prefix="/api/v1/telegram")
 
@@ -49,6 +52,9 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         update: dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body") from None
+    update_id = update.get("update_id")
+    from_chat = (update.get("message") or {}).get("chat", {}).get("id")
+    _logger.info("telegram.webhook.received update_id=%s chat_id=%s", update_id, from_chat)
     await svc.handle_update(update)
     return {"status": "ok"}
 
