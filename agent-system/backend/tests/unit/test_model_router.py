@@ -238,3 +238,104 @@ def test_routing_modes() -> None:
         "ollama",
     }
     assert dec is not None and dec.provider in known_providers
+
+
+class TestEndToEndMatrix:
+    def test_classify_error_matrix(self) -> None:
+        from agent_system.services.llm_router import FailureCategory, classify_error
+
+        cat, retry = classify_error("Invalid API Key", status_code=401)
+        assert cat == FailureCategory.AUTH_FAILURE and not retry
+
+        cat, retry = classify_error("Model not found", status_code=404)
+        assert cat == FailureCategory.NOT_FOUND and not retry
+
+        cat, retry = classify_error("Rate limit exceeded", status_code=429)
+        assert cat == FailureCategory.RATE_LIMIT and retry
+
+        cat, retry = classify_error("Internal Server Error", status_code=500)
+        assert cat == FailureCategory.SERVER_ERROR and retry
+
+        cat, retry = classify_error("Connection timed out", status_code=None)
+        assert cat == FailureCategory.TIMEOUT and retry
+
+    def test_tool_calling_filtering(self) -> None:
+        from agent_system.services.llm_catalog import default_catalog
+        from agent_system.services.llm_router import RoutingRequest, rank_candidates
+
+        cat = default_catalog()
+        req = RoutingRequest(requires_tool_calling=True)
+        ranked = rank_candidates(req, cat)
+        for model_cap, _ in ranked:
+            assert model_cap.tool_calling is True
+
+    def test_free_only_filtering(self) -> None:
+        from agent_system.services.llm_catalog import default_catalog
+        from agent_system.services.llm_router import RoutingRequest, rank_candidates
+
+        cat = default_catalog()
+        req = RoutingRequest(prefer_cost="free")
+        ranked = rank_candidates(req, cat)
+        assert len(ranked) > 0
+        # The top ranked candidate should be free tier
+        top, _ = ranked[0]
+        assert top.cost_class == "free"
+
+    def test_fallback_chain_on_provider_error(self, env: tuple[object, object, EventBus]) -> None:
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        router = ModelRouter(bus, pricing, registry)
+
+        # Primary provider fails, fallback succeeds
+        from agent_system.services.fallback import invoke_with_fallback
+
+        router.register_adapter("echo_primary", UnavailableProvider())
+        router.register_adapter("echo_fallback", EchoProvider())
+
+        pricing.register(
+            ModelInfo(
+                model_id="m-primary",
+                provider="echo_primary",
+                input_cost_per_1m=0,
+                output_cost_per_1m=0,
+            )
+        )
+        pricing.register(
+            ModelInfo(
+                model_id="m-fallback",
+                provider="echo_fallback",
+                input_cost_per_1m=0,
+                output_cost_per_1m=0,
+            )
+        )
+
+        candidates = [("echo_primary", "m-primary"), ("echo_fallback", "m-fallback")]
+        res = invoke_with_fallback(router, factory, candidates, "test prompt")
+        assert res is not None
+        assert res.ok
+        assert res.model_id == "m-fallback"
+
+    def test_all_providers_unavailable_fails_cleanly(
+        self, env: tuple[object, object, EventBus]
+    ) -> None:
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        router = ModelRouter(bus, pricing, registry)
+
+        from agent_system.services.fallback import invoke_with_fallback
+
+        router.register_adapter("echo_f1", UnavailableProvider())
+        router.register_adapter("echo_f2", UnavailableProvider())
+
+        pricing.register(
+            ModelInfo(model_id="m1", provider="echo_f1", input_cost_per_1m=0, output_cost_per_1m=0)
+        )
+        pricing.register(
+            ModelInfo(model_id="m2", provider="echo_f2", input_cost_per_1m=0, output_cost_per_1m=0)
+        )
+
+        candidates = [("echo_f1", "m1"), ("echo_f2", "m2")]
+        res = invoke_with_fallback(router, factory, candidates, "test prompt")
+        assert res is not None
+        assert not res.ok
+        assert res.error is not None

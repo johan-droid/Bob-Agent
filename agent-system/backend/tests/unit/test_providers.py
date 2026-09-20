@@ -69,6 +69,27 @@ class TestProviderSpec:
             assert isinstance(spec.base_url, str)
 
 
+class TestGroqRegression:
+    def test_groq_url_construction_prevents_404_double_slash(self, monkeypatch) -> None:
+        """Regression test: Groq base URL with trailing slash or chat/completions is sanitized."""
+        post = _patch_client(
+            monkeypatch,
+            {
+                "choices": [{"message": {"content": "pong"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+        s = _settings(groq_base_url="https://api.groq.com/openai/v1/chat/completions/")
+        adapter = build_adapter("groq", s, api_key="test-key")
+        assert adapter is not None
+        result = adapter.invoke("llama-3.3-70b-versatile", "ping")
+
+        assert result["output"] == "pong"
+        args, kwargs = post.call_args
+        url: str = args[0]
+        assert url == "https://api.groq.com/openai/v1/chat/completions"
+
+
 class TestOpenAICompat:
     def test_invoke_sends_messages(self, monkeypatch) -> None:
         post = _patch_client(

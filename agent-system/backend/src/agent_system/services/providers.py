@@ -218,6 +218,16 @@ def provider_spec(provider: str) -> ProviderSpec | None:
     return PROVIDERS.get(provider)
 
 
+def _sanitize_base_url(url: str | None) -> str:
+    """Sanitize base URL by stripping trailing slashes and endpoint paths like /chat/completions."""
+    if not url:
+        return ""
+    cleaned = url.strip().rstrip("/")
+    if cleaned.endswith("/chat/completions"):
+        cleaned = cleaned[: -len("/chat/completions")].rstrip("/")
+    return cleaned
+
+
 def provider_base_url(provider: str, settings: Settings) -> str | None:
     """Settings-overridable base URL for a provider (additive helper)."""
     spec = provider_spec(provider)
@@ -238,7 +248,8 @@ def provider_base_url(provider: str, settings: Settings) -> str | None:
         "ollama_cloud": settings.ollama_cloud_base_url,
         "opencode": settings.opencode_base_url,
     }
-    return overrides.get(provider, spec.base_url) or spec.base_url
+    raw = overrides.get(provider, spec.base_url) or spec.base_url
+    return _sanitize_base_url(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -376,13 +387,21 @@ class OpenAICompatibleAdapter:
         choices = data.get("choices") or []
         text = ""
         message: dict[str, Any] = {}
+        finish_reason = None
         if choices:
-            message = choices[0].get("message") or {}
+            choice = choices[0]
+            message = choice.get("message") or {}
             text = message.get("content") or ""
+            finish_reason = choice.get("finish_reason")
         return {
+            "provider": self.spec.key,
+            "model": model_id,
+            "content": text,
             "output": text,
-            "usage": _usage(data),
             "tool_calls": _canonical_tool_calls(message.get("tool_calls")),
+            "finish_reason": finish_reason or "stop",
+            "usage": _usage(data),
+            "request_id": str(data.get("id") or ""),
         }
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:
@@ -519,21 +538,29 @@ class GeminiAdapter:
         candidates = data.get("candidates") or []
         text = ""
         function_calls: list[dict[str, Any]] = []
+        finish_reason = None
         if candidates:
-            parts = (candidates[0].get("content") or {}).get("parts") or []
+            cand = candidates[0]
+            finish_reason = cand.get("finishReason")
+            parts = (cand.get("content") or {}).get("parts") or []
             text = "".join(p.get("text", "") for p in parts)
             function_calls = [
                 p.get("functionCall") for p in parts if isinstance(p.get("functionCall"), dict)
             ]
         usage_meta = data.get("usageMetadata") or {}
         return {
+            "provider": self.spec.key,
+            "model": model_id,
+            "content": text,
             "output": text,
+            "tool_calls": _canonical_tool_calls(function_calls),
+            "finish_reason": str(finish_reason or "stop").lower(),
             "usage": {
                 "input_tokens": int(usage_meta.get("promptTokenCount") or 0),
                 "output_tokens": int(usage_meta.get("candidatesTokenCount") or 0),
                 "cached_tokens": 0,
             },
-            "tool_calls": _canonical_tool_calls(function_calls),
+            "request_id": "",
         }
 
 
@@ -581,15 +608,20 @@ class AnthropicAdapter:
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         usage = data.get("usage") or {}
         return {
+            "provider": self.spec.key,
+            "model": model_id,
+            "content": text,
             "output": text,
+            "tool_calls": _canonical_tool_calls(
+                [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+            ),
+            "finish_reason": str(data.get("stop_reason") or "stop"),
             "usage": {
                 "input_tokens": int(usage.get("input_tokens") or 0),
                 "output_tokens": int(usage.get("output_tokens") or 0),
                 "cached_tokens": int(usage.get("cache_read_input_tokens") or 0),
             },
-            "tool_calls": _canonical_tool_calls(
-                [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
-            ),
+            "request_id": str(data.get("id") or ""),
         }
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:
@@ -737,7 +769,7 @@ def build_adapter(provider: str, settings: Settings, api_key: str | None = None)
     cls = ADAPTER_CLASSES.get(provider)
     if spec is None or cls is None:
         return None
-    base_url = provider_base_url(provider, settings) or spec.base_url
+    base_url = _sanitize_base_url(provider_base_url(provider, settings) or spec.base_url)
     if base_url != spec.base_url:
         spec = replace(spec, base_url=base_url)
     extra = build_extra_headers(settings)
