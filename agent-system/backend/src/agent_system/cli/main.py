@@ -15,10 +15,6 @@ schema; documented exit codes for scripting:
 from __future__ import annotations
 
 import json as _json
-import os
-import pathlib
-import shutil
-import subprocess
 import sys
 from typing import Any
 
@@ -212,25 +208,8 @@ def doctor() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# sessions / chat
+# sessions
 # ---------------------------------------------------------------------------
-
-
-@app.command("chat")
-def chat(
-    goal: str | None = typer.Argument(None, help="Goal to submit (omit for REPL)"),
-    interactive: bool = typer.Option(False, "--interactive", "-i", help="Force REPL mode"),
-    watch: bool = typer.Option(False, "--watch", help="One-shot: tail progress after submit"),
-) -> Any:
-    """Submit a goal, or open the interactive chat REPL (no goal given)."""
-    from agent_system.cli.chat import run_one_shot, run_repl
-
-    if goal is None or interactive:
-        code = run_repl()
-        sys.exit(code)
-        return None
-    run_one_shot(goal, watch=watch)
-    return None
 
 
 @sessions_app.command("create")
@@ -395,62 +374,6 @@ def events_list(
     if type:
         params["type"] = type
     output(api_request("GET", "/api/v1/events", params=params))
-
-
-# ---------------------------------------------------------------------------
-# web dashboard
-# ---------------------------------------------------------------------------
-
-_WEB_DIR = pathlib.Path(__file__).resolve().parents[4] / "web"
-_WEB_DEPS_MARKER = _WEB_DIR / "node_modules"
-
-
-def _web_deps_installed() -> bool:
-    """Check if Node.js dependencies for the web dashboard are installed."""
-    return _WEB_DEPS_MARKER.is_dir() and any(_WEB_DEPS_MARKER.iterdir())
-
-
-@app.command("web")
-def web_command(
-    port: int = typer.Option(3000, "--port", "-p", help="Port for the Web dashboard"),
-    production: bool = typer.Option(
-        False, "--production", help="Use production build instead of dev server"
-    ),
-) -> None:
-    """Start the Web dashboard.
-
-    Launches the Next.js server so you can interact with the agent through a
-    browser UI. Requires Node.js dependencies to be installed (run `npm install`
-    in the `web/` directory first).
-    """
-    if not _WEB_DIR.exists():
-        typer.echo(f"[red]Web dashboard directory not found: {_WEB_DIR}[/red]")
-        raise typer.Exit(code=EXIT_NOT_FOUND)
-
-    if not _web_deps_installed():
-        typer.echo("[yellow]Web dependencies not installed.[/yellow]")
-        typer.echo(f"  Run: [bold]cd {_WEB_DIR} && npm install[/bold]")
-        raise typer.Exit(code=EXIT_USAGE)
-
-    npm_cmd = shutil.which("npm")
-    if npm_cmd is None:
-        typer.echo("[red]npm not found. Install Node.js to use the Web dashboard.[/red]")
-        raise typer.Exit(code=EXIT_UNAVAILABLE)
-
-    script = "start" if production else "dev"
-    typer.echo(f"[bold]Starting Web dashboard on http://localhost:{port}[/bold]")
-    typer.echo("  [dim](Press Ctrl+C to stop)[/dim]")
-
-    env = {**os.environ, "PORT": str(port)}
-
-    try:
-        subprocess.run([npm_cmd, "run", script], cwd=str(_WEB_DIR), env=env, check=True)
-    except subprocess.CalledProcessError as exc:
-        typer.echo(f"[red]Web dashboard exited with code {exc.returncode}[/red]")
-        raise typer.Exit(code=EXIT_UNAVAILABLE) from exc
-    except KeyboardInterrupt as exc:
-        typer.echo("\n[yellow]Web dashboard stopped.[/yellow]")
-        raise typer.Exit(code=EXIT_OK) from exc
 
 
 def entrypoint() -> None:

@@ -572,37 +572,22 @@ def write_env(values: dict[str, str]) -> pathlib.Path:
 
 
 def _next_steps(path: pathlib.Path, prof_path: pathlib.Path) -> None:
-    """Compact launch + live-reconfiguration guidance."""
+    """Compact launch + Heroku/Telegram deployment guidance."""
     _console.print(f"\n[green]✓[/green] {path} written · profile [dim]{prof_path}[/dim]")
     _console.print()
-    use_web = _confirm("Would you like to use the Web dashboard?", default=True)
-    if use_web:
-        _console.print(
-            Panel(
-                "[bold]make start[/bold]  launch API + worker + dashboard\n"
-                "[bold]agentctl web[/bold]  start the Web dashboard directly\n"
-                "\n"
-                "[dim]Once running, open:[/dim] [bold]http://localhost:3000[/bold]",
-                title="[bold]Web Dashboard[/bold]",
-                box=box.ROUNDED,
-                border_style="blue",
-                padding=(0, 1),
-            )
+    _console.print(
+        Panel(
+            "[bold]Bob Agent — Telegram Cloud Agent[/bold]\n"
+            "• Local API Server:  [bold]uv run uvicorn agent_system.api.main:app[/bold]\n"
+            "• Heroku Deploy:     [bold]git push heroku main[/bold]\n"
+            "• Telegram Control:  Message your bot on Telegram (/start, /help, /status)\n"
+            "• Admin CLI:        [bold]agentctl status[/bold] / [bold]agentctl tasks list[/bold]",
+            title="[bold]Next Steps[/bold]",
+            box=box.ROUNDED,
+            border_style="bright_cyan",
+            padding=(0, 1),
         )
-    else:
-        _console.print(
-            Panel(
-                "[bold]make start[/bold]  launch API + worker + dashboard\n"
-                "[bold]agentctl chat[/bold]  REPL — reconfigure any time, no restart:\n"
-                "  [dim]/model set openrouter meta-llama/…[/dim]  switch model\n"
-                "  [dim]/settings set KEY VALUE[/dim]            any config key\n"
-                "  [dim]/tools · /skills · /memory · /schedule[/dim]",
-                title="[bold]Next[/bold]",
-                box=box.ROUNDED,
-                border_style="green",
-                padding=(0, 1),
-            )
-        )
+    )
 
 
 def setup_command(

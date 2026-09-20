@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -221,8 +222,61 @@ class TelegramService:
             return "webhook"
         return "polling"
 
+    def _resolve_webhook_url(self) -> str | None:
+        raw_url = getattr(self._settings, "telegram_webhook_url", None) or os.environ.get(
+            "TELEGRAM_WEBHOOK_URL"
+        )
+        if raw_url:
+            raw_url = raw_url.strip()
+            if not raw_url.startswith("http://") and not raw_url.startswith("https://"):
+                raw_url = f"https://{raw_url}"
+            if raw_url.endswith("/api/v1/telegram/webhook"):
+                return raw_url
+            return f"{raw_url.rstrip('/')}/api/v1/telegram/webhook"
+
+        app_name = getattr(self._settings, "heroku_app_name", None) or os.environ.get(
+            "HEROKU_APP_NAME"
+        )
+        if app_name:
+            app_name = app_name.strip()
+            return f"https://{app_name}.herokuapp.com/api/v1/telegram/webhook"
+        return None
+
+    async def _setup_webhook(self) -> None:
+        webhook_url = self._resolve_webhook_url()
+        if not webhook_url:
+            _logger.warning(
+                "Telegram webhook enabled, but TELEGRAM_WEBHOOK_URL / HEROKU_APP_NAME unset."
+            )
+            return
+        if not self._token:
+            return
+        url = _API_BASE.format(token=self._token) + "/setWebhook"
+        payload: dict[str, Any] = {
+            "url": webhook_url,
+            "allowed_updates": ["message", "callback_query"],
+        }
+        if self._settings.telegram_webhook_secret:
+            payload["secret_token"] = self._settings.telegram_webhook_secret
+
+        try:
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+            resp = await self._client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("ok"):
+                _logger.info("Successfully registered Telegram webhook URL: %s", webhook_url)
+            else:
+                _logger.warning("Telegram setWebhook API returned non-ok: %s", data)
+        except Exception as exc:
+            _logger.exception("Failed to auto-configure Telegram webhook: %s", exc)
+
     async def start(self) -> None:
-        """Begin listening. In polling mode spawns a background thread + loop."""
+        """Begin listening.
+
+        In polling mode spawns a background thread; in webhook mode calls setWebhook.
+        """
         if not self.is_configured():
             return
         try:
@@ -233,6 +287,8 @@ class TelegramService:
                     target=self._run_polling_loop, args=(self._loop,), daemon=True
                 )
                 self._thread.start()
+            elif self.transport == "webhook":
+                await self._setup_webhook()
         except Exception as exc:
             self._startup_error = str(exc)
             _logger.exception("telegram service start failed")

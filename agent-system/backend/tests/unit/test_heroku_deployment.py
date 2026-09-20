@@ -70,14 +70,30 @@ def test_production_secrets_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_production_secrets_pass_when_provided(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify AGENT_ENV=production succeeds when custom secrets are provided."""
+    """Verify AGENT_ENV=production succeeds when custom secrets & Telegram config are set."""
+    monkeypatch.setenv("AGENT_ENV", "production")
+    monkeypatch.setenv("API_SESSION_SECRET", "prod-secret-1234567890-a1b2c3d4e5f6")
+    monkeypatch.setenv("AGENT_BOOTSTRAP_SECRET", "prod-bootstrap-1234567890-a1b2c3d4e5f6")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:prod-bot-token")
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "prod-webhook-secret")
+    monkeypatch.setenv("AGENT_IDENTITY_MODE", "telegram")
+    clear_settings_cache()
+    try:
+        s = get_settings()
+        assert s.agent_env == "production"
+    finally:
+        clear_settings_cache()
+
+
+def test_production_telegram_credentials_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify AGENT_ENV=production refuses to start without Telegram credentials."""
     monkeypatch.setenv("AGENT_ENV", "production")
     monkeypatch.setenv("API_SESSION_SECRET", "prod-secret-1234567890-a1b2c3d4e5f6")
     monkeypatch.setenv("AGENT_BOOTSTRAP_SECRET", "prod-bootstrap-1234567890-a1b2c3d4e5f6")
     clear_settings_cache()
     try:
-        s = get_settings()
-        assert s.agent_env == "production"
+        with pytest.raises(RuntimeError, match="Production mode requires TELEGRAM_BOT_TOKEN"):
+            get_settings()
     finally:
         clear_settings_cache()
 

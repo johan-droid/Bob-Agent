@@ -65,8 +65,8 @@ def test_status_hits_health_and_ready(backend: StubBackend) -> None:
     assert backend.requests[1]["path"] == "/api/v1/ready"
 
 
-def test_chat_creates_session_via_api(backend: StubBackend) -> None:
-    result = runner.invoke(app, ["--json", "chat", "Build a FastAPI scaffold"])
+def test_session_create_via_api(backend: StubBackend) -> None:
+    result = runner.invoke(app, ["--json", "sessions", "create", "Build a FastAPI scaffold"])
     assert result.exit_code == EXIT_OK
     payload = json.loads(result.stdout)
     assert payload["id"].startswith("ses_")

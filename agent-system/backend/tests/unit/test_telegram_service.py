@@ -326,3 +326,89 @@ class TestPollingTransportSafety:
         assert svc1._acquire_polling_lease() is True  # noqa: SLF001
         # Second instance trying while first instance holds lease:
         assert svc2._acquire_polling_lease() is False  # noqa: SLF001
+
+
+class TestTelegramCommands:
+    @pytest.mark.asyncio
+    async def test_all_control_plane_commands_registered(self) -> None:
+        svc = _service(_settings(telegram_allowed_chat_ids="111"))
+        expected_commands = {
+            "/start",
+            "/help",
+            "/status",
+            "/cancel",
+            "/retry",
+            "/approve",
+            "/deny",
+            "/setup",
+            "/connections",
+            "/test",
+            "/rotate",
+            "/revoke",
+            "/remove",
+        }
+        assert expected_commands.issubset(set(svc.commands.keys()))
+
+    @pytest.mark.asyncio
+    async def test_cmd_start_and_help_dispatch(self) -> None:
+        svc = _service(_settings(telegram_allowed_chat_ids="111"))
+        outbound: list[str] = []
+
+        async def fake_send(chat_id: int, text: str, **kwargs: Any) -> None:
+            outbound.append(text)
+
+        svc._send = fake_send  # type: ignore[method-assign] # noqa: SLF001
+
+        await svc.handle_update(
+            {"update_id": 1, "message": {"chat": {"id": 111}, "text": "/start"}}
+        )
+        assert len(outbound) == 1
+        assert "Bob Agent connected" in outbound[0]
+
+        await svc.handle_update({"update_id": 2, "message": {"chat": {"id": 111}, "text": "/help"}})
+        assert len(outbound) == 2
+        assert "/help" in outbound[1]
+
+
+class TestWebhookAutoRegistration:
+    def test_resolve_webhook_url_from_explicit_setting(self) -> None:
+        svc = _service(_settings(telegram_webhook_url="https://bob.example.com"))
+        url = svc._resolve_webhook_url()  # noqa: SLF001
+        assert url == "https://bob.example.com/api/v1/telegram/webhook"
+
+    def test_resolve_webhook_url_from_heroku_app_name(self) -> None:
+        svc = _service(_settings(heroku_app_name="bob-agent-prod"))
+        url = svc._resolve_webhook_url()  # noqa: SLF001
+        assert url == "https://bob-agent-prod.herokuapp.com/api/v1/telegram/webhook"
+
+    @pytest.mark.asyncio
+    async def test_setup_webhook_invokes_telegram_api(self) -> None:
+        svc = _service(
+            _settings(
+                telegram_webhook_secret="mysec",
+                heroku_app_name="my-app",
+            )
+        )
+        posted_payloads: list[dict[str, Any]] = []
+
+        class FakeClient:
+            async def post(self, url: str, json: dict[str, Any]) -> Any:
+                posted_payloads.append({"url": url, "json": json})
+
+                class FakeResp:
+                    def raise_for_status(self) -> None:
+                        pass
+
+                    def json(self) -> dict[str, Any]:
+                        return {"ok": True, "result": True}
+
+                return FakeResp()
+
+        svc._client = FakeClient()  # noqa: SLF001
+        await svc._setup_webhook()  # noqa: SLF001
+
+        assert len(posted_payloads) == 1
+        p = posted_payloads[0]
+        assert "setWebhook" in p["url"]
+        assert p["json"]["url"] == "https://my-app.herokuapp.com/api/v1/telegram/webhook"
+        assert p["json"]["secret_token"] == "mysec"

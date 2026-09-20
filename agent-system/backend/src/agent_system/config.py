@@ -160,6 +160,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_allowed_chat_ids: str = ""
     telegram_webhook_secret: str | None = None
+    telegram_webhook_url: str | None = None
+    heroku_app_name: str | None = None
 
     # LLM providers (optional; system boots fine without any).
     # OpenAI-style compatibility; per-provider keys + configurable base URLs.
@@ -274,11 +276,20 @@ class Settings(BaseSettings):
             )
         env = (self.agent_env or "").lower()
         raw_env = (_os.environ.get("AGENT_ENV", "") or "").lower()
-        if (env == "production" or raw_env == "production") and using_default:
-            raise RuntimeError(
-                "Refusing to start with default dev secrets in production: "
-                "set API_SESSION_SECRET and AGENT_BOOTSTRAP_SECRET."
-            )
+        if env == "production" or raw_env == "production":
+            if using_default:
+                raise RuntimeError(
+                    "Refusing to start with default dev secrets in production: "
+                    "set API_SESSION_SECRET and AGENT_BOOTSTRAP_SECRET."
+                )
+            if not self.telegram_bot_token:
+                raise RuntimeError("Production mode requires TELEGRAM_BOT_TOKEN to be configured.")
+            if not self.telegram_webhook_secret:
+                raise RuntimeError(
+                    "Production mode requires TELEGRAM_WEBHOOK_SECRET to be configured."
+                )
+            if (self.agent_identity_mode or "").lower() != "telegram":
+                raise RuntimeError("Production mode requires AGENT_IDENTITY_MODE=telegram.")
         return self
 
     @property
