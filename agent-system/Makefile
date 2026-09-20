@@ -1,4 +1,4 @@
-.PHONY: install dev test lint typecheck migrate up down check start setup bootstrap doctor chat settings setup-web web qa-sandbox-image
+.PHONY: install dev test lint typecheck migrate up down check start setup bootstrap doctor settings qa-sandbox-image
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -51,11 +51,6 @@ setup:
 settings:
 	cd backend && uv run agentctl settings $(ARGS)
 
-# Interactive chat REPL with slash commands.
-# One-liner:  make chat   (or: cd backend && uv run agentctl chat)
-chat:
-	cd backend && uv run agentctl chat
-
 test:
 	cd backend && uv run pytest -q
 
@@ -88,43 +83,6 @@ down:
 # this target is what makes the Docker-gated QA path runnable. Idempotent.
 qa-sandbox-image:
 	docker build -t agent-system/qa-sandbox:latest -f backend/docker/qa-sandbox.Dockerfile backend/docker
-
-# ---------------------------------------------------------------------------
-# Web Dashboard Targets
-# ---------------------------------------------------------------------------
-
-# Setup web dashboard dependencies (first time only)
-# Usage: make setup-web
-setup-web:
-	@echo "[make] Setting up web dashboard..."
-	cd web && npm install
-	@echo "[make] Web dashboard dependencies installed."
-
-# Start the web dashboard development server
-# Usage: make web
-web:
-	@echo "[make] Starting web dashboard on http://localhost:3000..."
-	cd web && npm run dev
-
-# Start Bob Agent as a Standalone Desktop Application
-# Usage: make app (or make desktop)
-app:
-	@echo "[make] Launching Bob Agent Standalone Desktop App..."
-	cd web && npm run app
-
-desktop: app
-
-# Build web dashboard for production
-# Usage: make web-build
-web-build:
-	@echo "[make] Building web dashboard for production..."
-	cd web && npm run build
-
-# Start web dashboard in production mode
-# Usage: make web-start
-web-start:
-	@echo "[make] Starting web dashboard (production)..."
-	cd web && npm start
 
 # ---------------------------------------------------------------------------
 # Platform info

@@ -107,7 +107,7 @@ class DuckDuckGoSearchProvider(SearchProvider):
                 enabled=True,
                 reachable=False,
                 authenticated=False,
-                status=ServiceHealthStatus.UNAVAILABLE,
+                status=ServiceHealthStatus.DEGRADED,
                 latency_ms=latency,
                 last_error=redact_secrets(str(exc)),
                 details={"endpoint": self.endpoint},

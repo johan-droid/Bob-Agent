@@ -148,7 +148,9 @@ When you push new code to Heroku:
 
 ## 9. Telegram Webhook Setup
 
-Once your app is deployed and live on Heroku (`https://<app-name>.herokuapp.com`), register your webhook with Telegram:
+Bob automatically configures its Telegram webhook during startup when `HEROKU_APP_NAME` or `TELEGRAM_WEBHOOK_URL` is set in config vars along with `TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN`.
+
+If manual registration or verification is needed:
 
 ```bash
 curl -X POST https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook \
@@ -156,7 +158,7 @@ curl -X POST https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook \
   -d secret_token="<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-Telegram will send webhook updates with header `X-Telegram-Bot-Api-Secret-Token`, which Bob validates against `TELEGRAM_WEBHOOK_SECRET`.
+Telegram sends webhook updates with header `X-Telegram-Bot-Api-Secret-Token`, which Bob validates against `TELEGRAM_WEBHOOK_SECRET`.
 
 ---
 

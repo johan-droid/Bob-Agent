@@ -163,31 +163,3 @@ class TestCli:
         assert result.exit_code == EXIT_OK
         payload = json.loads(result.output)
         assert payload["key"] == "API_PORT"
-
-
-class TestReplWiring:
-    def test_settings_list_inline(self, isolated: pathlib.Path, capsys) -> None:
-        from agent_system.cli import chat as chat_mod
-
-        chat_mod.handle_line(chat_mod.ChatState(), "/settings list cost")
-        assert "DAILY_BUDGET_USD" in capsys.readouterr().out
-
-    def test_settings_set_inline(self, isolated: pathlib.Path, capsys) -> None:
-        from agent_system.cli import chat as chat_mod
-
-        chat_mod.handle_line(chat_mod.ChatState(), "/settings set MAX_RETRIES 4")
-        assert "MAX_RETRIES" in capsys.readouterr().out
-
-    def test_soul_missing_hint(self, isolated: pathlib.Path, capsys) -> None:
-        from agent_system.cli import chat as chat_mod
-
-        chat_mod.handle_line(chat_mod.ChatState(), "/soul")
-        assert "SOUL.md" in capsys.readouterr().out
-
-    def test_soul_shows_file(self, isolated: pathlib.Path, monkeypatch, capsys) -> None:
-        from agent_system.cli import chat as chat_mod
-
-        (isolated / "SOUL.md").write_text("# Soul\n\nYou are Bob.\n", encoding="utf-8")
-        monkeypatch.chdir(isolated)
-        chat_mod.handle_line(chat_mod.ChatState(), "/soul")
-        assert "You are Bob" in capsys.readouterr().out
