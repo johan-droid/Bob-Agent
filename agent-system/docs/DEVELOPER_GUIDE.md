@@ -71,12 +71,12 @@ Appendix C. [Glossary](#appendix-c-glossary)
 
 ## 1. At a glance
 
-Bob is a **local-first autonomous multi-agent AI system**. You state a goal; a
+Bob is a **Telegram-controlled cloud-based autonomous multi-agent AI system**. You state a goal via Telegram; a
 supervisor decomposes it into an explicit task DAG; ReAct LLM agents execute
 each task with a real tool registry (shell, files, web, memory, OpenConnector SaaS
 actions, MCP servers), and every step lands on an inspectable, replayable event
-stream. Three frontends share one API contract: a terminal REPL (`agentctl chat`),
-a Next.js dashboard, and a Telegram gateway.
+stream and PostgreSQL outbox for Telegram delivery. Telegram is the primary control
+interface while cloud infrastructure performs execution and stores durable state.
 
 **Headline capabilities (implemented):**
 

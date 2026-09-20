@@ -946,13 +946,23 @@ def build_model_router(
     call ``router.registry.select("default")`` / ``select("*")``. When a
     ``skill_manager`` is given, ``router.invoke(..., skills=[...])`` injects
     skill instructions into the prompt; ``soul_text`` is prepended as the
-    ``<identity>`` block on every call.
+    ``<identity>`` block on every call. If ``soul_text`` is None, it is
+    automatically loaded via ``load_soul()``.
     """
     from agent_system.services.model_router import (
         ModelRegistry,
         ModelRouter,
         SelectionRule,
     )
+
+    if soul_text is None:
+        try:
+            from agent_system.services.soul import load_soul
+
+            _, loaded_soul = load_soul(getattr(settings, "soul_path", "") or None)
+            soul_text = loaded_soul or None
+        except Exception:
+            pass
 
     router = ModelRouter(
         event_bus,

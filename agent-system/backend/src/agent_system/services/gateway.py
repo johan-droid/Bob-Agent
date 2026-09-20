@@ -682,14 +682,28 @@ class GatewayExecutor:
                 _, soul_text = load_soul(getattr(self._settings, "soul_path", "") or None)
                 router = build_model_router(self._bus, self._settings, soul_text=soul_text or None)
                 inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
-                answer = inv.output if inv.ok and inv.output else "Hey! 👋 What are we working on?"
-                provider = getattr(inv, "provider", None) or "groq"
-                model_id = getattr(inv, "model_id", None) or router.default_model
-                lat_ms = getattr(inv, "latency_ms", None)
-                latency_s = float(lat_ms) / 1000.0 if lat_ms is not None else None
+                if inv.ok and inv.output:
+                    answer = inv.output
+                    provider = getattr(inv, "provider", None) or "groq"
+                    model_id = getattr(inv, "model_id", None) or router.default_model
+                    lat_ms = getattr(inv, "latency_ms", None)
+                    latency_s = float(lat_ms) / 1000.0 if lat_ms is not None else None
+                else:
+                    err_detail = getattr(inv, "error", None) or "Model returned empty response."
+                    _logger.warning("gateway.chat.failed error=%s", err_detail)
+                    answer = (
+                        "I'm sorry, I encountered an issue reaching the model service "
+                        "to respond to your message. Please try again shortly."
+                    )
+                    provider = getattr(inv, "provider", None) or "groq"
+                    model_id = getattr(inv, "model_id", None) or router.default_model
+                    latency_s = 0.2
             except Exception as exc:
                 _logger.warning("gateway.chat.fallback error=%s", exc)
-                answer = "Hey! 👋 What are we working on?"
+                answer = (
+                    "I'm sorry, I encountered an issue reaching the model service "
+                    "to respond to your message. Please try again shortly."
+                )
                 provider = "groq"
                 model_id = "default"
                 latency_s = 0.2
@@ -712,13 +726,13 @@ class GatewayExecutor:
         # -------------------------------------------------------------------
         # Durable AGENT Task Path (TOOL_TASK, CODING_TASK, RESEARCH_TASK, etc.)
         # -------------------------------------------------------------------
-        from agent_system.services.telegram_presenter import save_chat_message
+        from agent_system.services.telegram_presenter import build_task_ack, save_chat_message
 
         save_chat_message(self._factory, chat_id, "user", text)
         self._outbox.enqueue(
             kind="command_response",
             chat_id=chat_id,
-            text="Yep — I'll check that.",
+            text=build_task_ack(text, req_type),
         )
         session_id = None
         with session_scope(self._factory) as db:
