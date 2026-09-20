@@ -82,6 +82,9 @@ class Outbox:
             )
             db.add(row)
             db.flush()
+            logger.info(
+                "telegram.outbox.created outbox_id=%s chat_id=%s kind=%s", row.id, chat_id, kind
+            )
             return row.id
 
     def claim_batch(
@@ -134,6 +137,7 @@ class Outbox:
         token = self._settings.telegram_bot_token
         if not token:
             return False
+        logger.info("telegram.outbox.sent outbox_id=%s chat_id=%s", row.id, row.chat_id)
         if client is None and (token.startswith("test:") or token == "mock"):
             return self._mark_delivered(row)
         own_client = client is None
@@ -159,6 +163,12 @@ class Outbox:
             )
             resp.raise_for_status()
         except Exception as exc:
+            logger.warning(
+                "telegram.delivery.failed outbox_id=%s chat_id=%s error=%s",
+                row.id,
+                row.chat_id,
+                _scrub_error(exc),
+            )
             self._advance_failure(row, exc)
         else:
             return self._mark_delivered(row)
@@ -190,6 +200,10 @@ class Outbox:
                 )
             )
             db.commit()
+            if affected > 0:
+                logger.info(
+                    "telegram.response.delivered outbox_id=%s chat_id=%s", row.id, row.chat_id
+                )
             return affected > 0
 
     def _advance_failure(self, row: DeliveryOutbox, exc: Exception) -> None:

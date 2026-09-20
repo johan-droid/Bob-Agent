@@ -157,9 +157,10 @@ class IdentityService:
         """
         if self.mode is IdentityMode.LOCAL:
             return None
+        from agent_system.infra.db import session_scope
         from agent_system.infra.models import TelegramAccount
 
-        with self._factory() as db:
+        with session_scope(self._factory) as db:
             account = (
                 db.query(TelegramAccount)
                 .filter_by(telegram_user_id=str(telegram_user_id))
@@ -193,7 +194,7 @@ class IdentityService:
 
         - Unknown telegram user id: refused (deny by default).
         - Blocked account: stays blocked (provisioning never unblocks).
-        - Existing account: returned unchanged (idempotent).
+        - Existing account: returned unchanged (idempotent), updating chat_id if new.
         - First provisioned account: becomes ``owner``.
         """
         if self.mode is IdentityMode.LOCAL:
@@ -202,22 +203,26 @@ class IdentityService:
         allowed = self.allowed_user_ids()
         if allowed and tid not in allowed:
             raise IdentityError("telegram user is not on the provisioning allowlist")
+        from agent_system.infra.db import session_scope
         from agent_system.infra.models import TelegramAccount, User
 
-        with self._factory() as db:
+        with session_scope(self._factory) as db:
             existing = db.query(TelegramAccount).filter_by(telegram_user_id=tid).one_or_none()
             if existing is not None:
-                user = existing.user
+                user = db.get(User, existing.user_id)
                 if user is None or not user.is_active:
                     raise IdentityError("account is blocked")
                 role = Role(existing.role)
                 if role is Role.BLOCKED:
                     raise IdentityError("account is blocked")
+                if chat_id is not None and existing.chat_id != str(chat_id):
+                    existing.chat_id = str(chat_id)
+                final_chat_id = int(existing.chat_id) if existing.chat_id else chat_id
                 return Principal(
                     user_id=user.id,
                     role=role,
                     mode=IdentityMode.TELEGRAM,
-                    chat_id=(int(existing.chat_id) if existing.chat_id else chat_id),
+                    chat_id=final_chat_id,
                     telegram_user_id=tid,
                 )
             first = db.query(User).count() == 0
