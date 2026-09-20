@@ -204,8 +204,8 @@ def execute_task(task_id: str | None = None, factory: Any = None) -> dict[str, A
                 verification_reason = verification.reason
                 verification_mode = verification.mode
             except Exception as exc:
-                verification_passed = True
-                verification_reason = f"verifier crashed; lenient pass: {type(exc).__name__}"
+                verification_passed = False
+                verification_reason = f"verifier crashed: {type(exc).__name__}: {exc}"
             bus.emit(
                 Event(
                     type="qa.completed" if verification_passed else "qa.failed",

@@ -154,6 +154,8 @@ class TelegramService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop = threading.Event()
         self._update_offset: int = 0
+        self._last_poll_error: str | None = None
+        self._startup_error: str | None = None
         # Command registry.
         self._commands: dict[str, CommandDef] = {}
         self._register_commands()
@@ -223,13 +225,18 @@ class TelegramService:
         """Begin listening. In polling mode spawns a background thread + loop."""
         if not self.is_configured():
             return
-        self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
-        if self.transport == "polling":
-            self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=self._run_polling_loop, args=(self._loop,), daemon=True
-            )
-            self._thread.start()
+        try:
+            self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+            if self.transport == "polling":
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._run_polling_loop, args=(self._loop,), daemon=True
+                )
+                self._thread.start()
+        except Exception as exc:
+            self._startup_error = str(exc)
+            _logger.exception("telegram service start failed")
+            raise
 
     async def stop(self) -> None:
         self._stop.set()
@@ -253,15 +260,63 @@ class TelegramService:
         finally:
             loop.close()
 
+    def _acquire_polling_lease(self) -> bool:
+        """Acquire/refresh single-consumer polling lease via DB idempotency table."""
+        if self._factory is None:
+            return True
+        try:
+            from datetime import datetime
+
+            from agent_system.infra.db import session_scope
+            from agent_system.infra.models import IdempotencyKey
+
+            lease_key = "telegram_polling_lease"
+            worker_id = f"poll-{id(self)}"
+            now = utcnow()
+            with session_scope(self._factory) as db:
+                row = db.get(IdempotencyKey, lease_key)
+                if row is None:
+                    db.add(
+                        IdempotencyKey(
+                            key=lease_key,
+                            operation="polling_consumer",
+                            result_ref=f"{worker_id}:{now.isoformat()}",
+                        )
+                    )
+                    return True
+                ref_parts = (row.result_ref or "").split(":", 1)
+                holder_id = ref_parts[0] if ref_parts else ""
+                if holder_id == worker_id:
+                    row.result_ref = f"{worker_id}:{now.isoformat()}"
+                    return True
+                try:
+                    last_ts = datetime.fromisoformat(ref_parts[1]) if len(ref_parts) > 1 else now
+                    if (now - last_ts).total_seconds() > 45:
+                        row.result_ref = f"{worker_id}:{now.isoformat()}"
+                        return True
+                except Exception:
+                    row.result_ref = f"{worker_id}:{now.isoformat()}"
+                    return True
+                return False
+        except Exception:
+            return True
+
     async def _poll_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                if not self._acquire_polling_lease():
+                    self._last_poll_error = (
+                        "Polling skipped: active single-consumer lease held by another instance"
+                    )
+                    await asyncio.sleep(max(1.0, self._settings.outbox_poll_seconds or 1.0))
+                    continue
                 updates = await self._get_updates()
                 for update in updates:
                     await self.handle_update(update)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._last_poll_error = str(exc)
                 _logger.exception("telegram poll loop error")
             await asyncio.sleep(max(0, self._settings.outbox_poll_seconds or 1.0))
 
@@ -269,20 +324,31 @@ class TelegramService:
         """Long-poll ``getUpdates``; updates are de-duped in handle_update."""
         if self._client is None or not self._token:
             return []
-        resp = await self._client.get(
-            _API_BASE.format(token=self._token) + "/getUpdates",
-            params={
-                "offset": self._update_offset + 1,
-                "timeout": 30,
-                "allowed_updates": ["message", "callback_query"],
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        updates: list[dict[str, Any]] = data.get("result", [])
-        if updates:
-            self._update_offset = max(u["update_id"] for u in updates)
-        return updates
+        try:
+            resp = await self._client.get(
+                _API_BASE.format(token=self._token) + "/getUpdates",
+                params={
+                    "offset": self._update_offset + 1,
+                    "timeout": 30,
+                    "allowed_updates": ["message", "callback_query"],
+                },
+            )
+            resp.raise_for_status()
+            self._last_poll_error = None
+            data = resp.json()
+            updates: list[dict[str, Any]] = data.get("result", [])
+            if updates:
+                self._update_offset = max(u["update_id"] for u in updates)
+            return updates
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                self._last_poll_error = (
+                    "Conflict: 409 from Telegram getUpdates (another poller or webhook active)"
+                )
+                _logger.warning("Telegram polling conflict (409): %s", exc)
+                return []
+            self._last_poll_error = f"HTTP {exc.response.status_code}: {exc}"
+            raise
 
     # -- identity & authorization -------------------------------------------
 

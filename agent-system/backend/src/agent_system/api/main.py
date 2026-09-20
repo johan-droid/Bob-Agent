@@ -54,9 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     try:
         await app.state.telegram.start()
-    except Exception:
-        # A broken Telegram config must never take down the API server.
-        pass
+    except Exception as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("Telegram service startup error: %s", exc)
+        app.state.telegram_startup_error = str(exc)
     # Skills (Hermes-style pluggable capabilities): always available, even
     # with zero skills on disk — discovery degrades to an empty list.
     # Shipped seeds count as "builtin" only when the default dir is in use.

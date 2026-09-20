@@ -61,10 +61,13 @@ def health() -> dict[str, str]:
 
 
 @router.get("/ready")
-def ready() -> dict[str, Any]:
+def ready(response: Response) -> dict[str, Any]:
     from agent_system.api.main import api_ready
 
-    return api_ready()
+    data = api_ready()
+    if data.get("status") == "not_ready" or not data.get("ready", True):
+        response.status_code = 503
+    return data
 
 
 # ---------------------------------------------------------------------------

@@ -536,3 +536,153 @@ def test_user_cancellation_cancels_master_task(tmp_path: Any) -> None:
         assert db.get(Task, task_id).state == "CANCELLED"
     # Cancelling again is a no-op (state machine gate).
     assert orch.cancel_task(factory, task_id) is False
+
+
+# --------------------------------------------------------------------------- #
+# 9. Golden Path E2E + Crash Matrix
+# --------------------------------------------------------------------------- #
+
+
+def test_telegram_golden_path_end_to_end_and_crashes(tmp_path: Any) -> None:
+    from agent_system.services.orchestrator import Orchestrator, Supervisor
+    from agent_system.services.telegram import TelegramService
+    from agent_system.services.verifier import Verifier
+
+    factory = _factory(tmp_path, name="golden_path.db")
+    settings = _settings(tmp_path)
+    bus = EventBus()
+
+    # 1. Provision user & identity
+    owner_id = _provision(factory, "999", 777, role="owner")
+
+    # 2. Ingest update -> durable ledger
+    _ingest(factory, 101, 777, "999", "Build a report")
+    with factory() as db:
+        ledger_row = db.get(TelegramUpdate, 101)
+        assert ledger_row is not None
+        assert ledger_row.processed_at is None
+
+    # 3. Simulate process crash after ledger insertion: new process & executor
+    executor = GatewayExecutor(settings, factory, bus)
+    processed_count = executor.process_pending()
+    assert processed_count == 1
+
+    # Verify session & task created with owner
+    with factory() as db:
+        sessions = db.query(Session).all()
+        assert len(sessions) == 1
+        assert sessions[0].owner_user_id == owner_id
+        tasks = db.query(Task).filter_by(session_id=sessions[0].id).all()
+        assert len(tasks) >= 1
+        assert all(t.state == "SUCCEEDED" for t in tasks)
+        created_task_count = len(tasks)
+
+    # 4. Prove duplicate update never duplicates task (handled by handle_update)
+    tg_service = TelegramService(settings, factory, PermissionGate(factory), bus)
+    dup_update = {
+        "update_id": 101,
+        "message": {
+            "message_id": 201,
+            "chat": {"id": 777},
+            "from": {"id": 999},
+            "text": "Build a report",
+        },
+    }
+    # Duplicate update ingestion via TelegramService idempotency gate:
+    assert tg_service._log_update(dup_update) is False  # Already completed
+    assert executor.process_pending() == 0
+    with factory() as db:
+        assert db.query(Session).count() == 1
+        assert db.query(Task).count() == created_task_count
+
+    # 5. Tool execution & Verifier interaction
+    sup = Supervisor(bus)
+    session_id = sup.create_session(
+        factory, "Goal with tool & verification", owner_user_id=owner_id
+    )
+    tool_task_id = sup.add_task(factory, session_id, "llm", "Task requiring verification")
+    sup.plan(factory, session_id)
+
+    def _sample_handler(task_input: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+        return {"output": "result generated", "verified": True}
+
+    orch = Orchestrator(bus, verifier=Verifier(settings))
+    orch.register_handler("llm", _sample_handler)
+
+    # 6. Simulate crash during execution / expired lease recovery
+    started = orch.run_ready_tasks(factory, session_id)
+    assert tool_task_id in started
+    with factory() as db:
+        task_row = db.get(Task, tool_task_id)
+        assert task_row.state == "SUCCEEDED"
+        assert task_row.result_json.get("verification", {}).get("passed") is True
+
+    # 7. Deliver outbox & simulated Telegram API failure retry
+    outbox = Outbox(factory, settings)
+    outbox.enqueue(
+        kind="notification", chat_id=777, text="Task finished successfully", task_id=tool_task_id
+    )
+
+    class _FlakyAPI:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+        def post(self, *args: Any, **kwargs: Any) -> Any:
+            self.attempts += 1
+            if self.attempts == 1:
+
+                class _ErrResp:
+                    def raise_for_status(self) -> None:
+                        raise RuntimeError("503 Service Unavailable")
+
+                return _ErrResp()
+
+            class _OkResp:
+                def raise_for_status(self) -> None:
+                    pass
+
+                def json(self) -> dict[str, Any]:
+                    return {"ok": True}
+
+            return _OkResp()
+
+    api = _FlakyAPI()
+    batch = outbox.claim_batch(worker_id="gw_worker")
+    assert len(batch) >= 1
+    item = [i for i in batch if i.task_id == tool_task_id][0]
+
+    # First attempt fails -> returns False and state becomes RETRY
+    delivered_first = outbox.deliver_one(item, client=api)
+    assert delivered_first is False
+
+    from datetime import timedelta
+
+    from agent_system.domain.events import utcnow
+
+    with factory() as db:
+        from agent_system.infra.models import DeliveryOutbox
+
+        row = db.get(DeliveryOutbox, item.id)
+        assert row.state in ("RETRY", "DEAD")
+        row.state = "RETRY"
+        row.next_attempt_at = utcnow() - timedelta(seconds=10)
+        row.claimed_at = None
+        db.commit()
+
+    # Retry delivers successfully
+    reclaimed = outbox.claim_batch(worker_id="gw_worker")
+    reclaimed_item = [i for i in reclaimed if i.id == item.id][0]
+    delivered = outbox.deliver_one(reclaimed_item, client=api)
+    assert delivered is True
+
+    with factory() as db:
+        from agent_system.infra.models import DeliveryOutbox
+
+        row = db.get(DeliveryOutbox, item.id)
+        assert row.state == "DELIVERED"

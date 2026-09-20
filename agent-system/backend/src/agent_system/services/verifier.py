@@ -90,13 +90,9 @@ class Verifier:
                     mode="strict",
                 )
             return VerificationResult(True, "no verifiable artifact; lenient pass", mode="lenient")
-        except Exception as exc:  # verifier crash must not wedge execution
-            if self.strict:
-                return VerificationResult(
-                    False, f"verifier crashed: {type(exc).__name__}: {exc}", mode="strict"
-                )
+        except Exception as exc:  # verifier crash must not wedge execution, but MUST mark failed
             return VerificationResult(
-                True, f"verifier crashed; lenient pass: {type(exc).__name__}", mode="lenient"
+                False, f"verifier crashed: {type(exc).__name__}: {exc}", mode="crash"
             )
 
     # -- deterministic signals -------------------------------------------
@@ -172,12 +168,8 @@ class Verifier:
                         pass
             qa_result = agent.run_generated_tests(source, test_code, search)
         except Exception as exc:
-            if self.strict:
-                return VerificationResult(
-                    False, f"qa verification errored: {type(exc).__name__}: {exc}", mode="qa"
-                )
             return VerificationResult(
-                True, f"qa unavailable; lenient pass: {type(exc).__name__}", mode="qa"
+                False, f"qa verification errored: {type(exc).__name__}: {exc}", mode="qa"
             )
         # Persist the QAReport (best effort; never fails verification on DB error).
         try:
