@@ -644,6 +644,8 @@ class GatewayExecutor:
         # Lightweight CHAT Path
         # -------------------------------------------------------------------
         if req_type == "CHAT":
+            from agent_system.services.memory_hooks import recall_recent
+            from agent_system.services.soul import load_soul
             from agent_system.services.telegram_presenter import (
                 format_model_footer,
                 load_chat_history,
@@ -656,19 +658,29 @@ class GatewayExecutor:
             history = load_chat_history(self._factory, chat_id, limit=10)
 
             prompt_lines = [
-                "You are Bob, a helpful AI assistant on Telegram. "
-                "Respond conversationally, concisely, and helpfully."
+                "Respond conversationally, concisely, and helpfully as Bob "
+                "according to your identity."
             ]
             if history:
                 prompt_lines.append("\nRecent Conversation:")
                 for msg in history[:-1]:
                     role_lbl = "User" if msg["role"] == "user" else "Assistant"
                     prompt_lines.append(f"{role_lbl}: {msg['content']}")
+
+            try:
+                notes = recall_recent(self._settings, text, limit=3, factory=self._factory)
+                if notes:
+                    rendered = "\n".join(f"- {n['title']}: {n['snippet'][:200]}" for n in notes)
+                    prompt_lines.append(f"\nRelevant Memories:\n{rendered}")
+            except Exception:
+                pass
+
             prompt_lines.append(f"\nUser: {text}")
             prompt = "\n".join(prompt_lines)
 
             try:
-                router = build_model_router(self._bus, self._settings)
+                _, soul_text = load_soul(getattr(self._settings, "soul_path", "") or None)
+                router = build_model_router(self._bus, self._settings, soul_text=soul_text or None)
                 inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
                 answer = inv.output if inv.ok and inv.output else "Hey! 👋 What are we working on?"
                 provider = getattr(inv, "provider", None) or "groq"

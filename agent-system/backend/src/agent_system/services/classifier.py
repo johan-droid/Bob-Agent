@@ -23,85 +23,87 @@ _CHAT_GREETINGS = {
     "thank you",
     "bye",
     "goodbye",
+    "ok",
+    "okay",
+    "nice",
+    "cool",
+    "awesome",
+    "got it",
+    "makes sense",
 }
 
-_CHAT_PHRASES = [
-    r"who\s+are\s+you",
-    r"what\s+are\s+you",
-    r"what\s+is\s+your\s+name",
-    r"how\s+are\s+you",
-    r"tell\s+me\s+about\s+yourself",
-    r"are\s+you\s+there",
-    r"are\s+you\s+a\s+bot",
-    r"what\s+can\s+you\s+do",
+_CHAT_PATTERNS = [
+    r"^who\s+are\s+you",
+    r"^what\s+are\s+you",
+    r"^what\s+is\s+your\s+name",
+    r"^how\s+are\s+you",
+    r"^tell\s+me\s+about\s+yourself",
+    r"^are\s+you\s+there",
+    r"^are\s+you\s+a\s+bot",
+    r"^what\s+can\s+you\s+do",
+    r"^what\s+did\s+we\s+discuss",
+    r"^what\s+did\s+i\s+(say|ask)",
+    r"^can\s+you\s+explain",
+    r"^can\s+you\s+tell\s+me",
+    r"^remember\s+this",
+    r"^explain\s+",
+    r"^tell\s+me\s+",
+    r"^why\s+is\s+",
+    r"^i\s+don't\s+understand",
+    r"^that's\s+",
+    r"^that\s+is\s+",
 ]
 
-_CODING_KEYWORDS = [
-    "code",
-    "script",
-    "python",
-    "javascript",
-    "typescript",
-    "html",
-    "css",
-    "refactor",
-    "bug",
-    "fix",
-    "function",
-    "class",
-    "git",
-    "commit",
-    "repo",
-    "repository",
-    "pytest",
-    "unittest",
-    "write a program",
+_CODING_PATTERNS = [
+    r"\bpython\b",
+    r"\bjavascript\b",
+    r"\btypescript\b",
+    r"\bpytest\b",
+    r"\bunittest\b",
+    r"write\s+(a\s+)?(python|code|script|program|function|class)",
+    r"\brefactor\b",
+    r"\bfix\b",
+    r"git\s+(commit|push|pull|merge|repo)",
+    r"audit\s+(my\s+)?(repository|code|repo)",
 ]
 
-_RESEARCH_KEYWORDS = [
-    "search",
-    "google",
-    "web",
-    "find info",
-    "look up",
-    "research",
-    "browse",
-    "news",
-    "summarize article",
+_RESEARCH_PATTERNS = [
+    r"search\s+(the\s+)?web",
+    r"search\s+google",
+    r"\bgoogle\b",
+    r"look\s+up\s+",
+    r"find\s+info",
+    r"browse\s+(the\s+)?web",
+    r"\bsummarize\b",
+    r"\bsummary\b",
+    r"\bresearch\b",
 ]
 
-_LONG_RUNNING_KEYWORDS = [
-    "batch",
-    "crawl",
-    "benchmark",
-    "deploy",
-    "train",
-    "backup",
-    "long running",
+_LONG_RUNNING_PATTERNS = [
+    r"\bbatch\b",
+    r"\bcrawl\b",
+    r"\bbenchmark\b",
+    r"long\s+running",
 ]
 
-_TOOL_KEYWORDS = [
-    "file",
-    "folder",
-    "directory",
-    "shell",
-    "bash",
-    "ssh",
-    "execute",
-    "run",
-    "terminal",
-    "create",
-    "delete",
-    "download",
-    "upload",
-    "read",
-    "write",
-    "openconnector",
-    "mcp",
-    "audit",
-    "analyze",
-    "task",
-    "data",
+_TOOL_PATTERNS = [
+    r"\btask\b",
+    r"\banalyze\b",
+    r"\breport\b",
+    r"\bprocess\b",
+    r"\bexecute\b",
+    r"run\s+(command|terminal|a\s+task|task|script|test|job|app)",
+    r"\bssh\b",
+    r"\bcreate\b",
+    r"\bbuild\b",
+    r"\bgenerate\b",
+    r"\bdeploy\b",
+    r"\binstall\b",
+    r"remind\s+me",
+    r"openconnector",
+    r"\bmcp\b",
+    r"delete\s+file",
+    r"download\s+file",
 ]
 
 
@@ -111,43 +113,38 @@ def classify_request_type(text: str) -> str:
     if not raw:
         return "CHAT"
     cleaned = raw.lower().strip()
+    cleaned_no_punct = cleaned.rstrip(".!?")
 
-    # 1. Exact or simple greeting match
-    if cleaned in _CHAT_GREETINGS or cleaned.rstrip(".!?") in _CHAT_GREETINGS:
+    # 1. Exact or simple greeting/conversational match
+    if cleaned in _CHAT_GREETINGS or cleaned_no_punct in _CHAT_GREETINGS:
         return "CHAT"
 
-    # 2. Known conversational phrases
-    for pattern in _CHAT_PHRASES:
+    # 2. Known conversational patterns
+    for pattern in _CHAT_PATTERNS:
         if re.search(pattern, cleaned):
             return "CHAT"
 
-    # 3. Task category keywords
-    for kw in _CODING_KEYWORDS:
-        if kw in cleaned:
+    # 3. Strong coding triggers
+    for pattern in _CODING_PATTERNS:
+        if re.search(pattern, cleaned):
             return "CODING_TASK"
 
-    for kw in _RESEARCH_KEYWORDS:
-        if kw in cleaned:
+    # 4. Strong research triggers
+    for pattern in _RESEARCH_PATTERNS:
+        if re.search(pattern, cleaned):
             return "RESEARCH_TASK"
 
-    for kw in _LONG_RUNNING_KEYWORDS:
-        if kw in cleaned:
+    # 5. Long running triggers
+    for pattern in _LONG_RUNNING_PATTERNS:
+        if re.search(pattern, cleaned):
             return "LONG_RUNNING_TASK"
 
-    for kw in _TOOL_KEYWORDS:
-        if kw in cleaned:
+    # 6. Tool execution triggers
+    for pattern in _TOOL_PATTERNS:
+        if re.search(pattern, cleaned):
             return "TOOL_TASK"
 
-    task_verbs = ("task", "audit", "analyze", "report", "process", "build", "create")
-    if any(w in cleaned for w in task_verbs):
-        return "TOOL_TASK"
-
-    # Short casual messages without task/action verbs
-    words = cleaned.split()
-    if len(words) <= 3:
-        return "CHAT"
-
-    return "TOOL_TASK"
+    return "CHAT"
 
 
 __all__ = ["classify_request_type"]

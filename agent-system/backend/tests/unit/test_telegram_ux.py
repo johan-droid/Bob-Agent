@@ -92,3 +92,122 @@ def test_hi_conversational_path() -> None:
         assert any("↳" in t for t in texts)
         assert not any("Task accepted" in t for t in texts)
         assert not any("task_" in t for t in texts)
+
+
+def test_normal_queries_do_not_create_task() -> None:
+    from agent_system.infra.models import Session
+
+    settings = Settings(
+        agent_identity_mode="local",
+        telegram_allowed_chat_ids="100",
+        telegram_bot_token="test:token",
+    )
+    engine = make_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    bus = EventBus()
+
+    executor = GatewayExecutor(settings, factory, bus)
+
+    # Ingest "what did we discuss earlier?" update
+    update = {
+        "update_id": 2,
+        "message": {
+            "message_id": 11,
+            "chat": {"id": 100},
+            "from": {"id": 100},
+            "text": "what did we discuss earlier?",
+        },
+    }
+    svc = TelegramService(settings, factory, None, bus)
+    svc._log_update(update)
+
+    executor.process_pending()
+
+    # Confirm no Session row was created for casual chat
+    with factory() as db:
+        sessions = db.query(Session).all()
+        assert len(sessions) == 0
+        outbox = db.query(DeliveryOutbox).all()
+        assert len(outbox) == 2
+        assert outbox[0].kind == "typing"
+        assert outbox[1].kind == "notification"
+        assert "Yep — I'll check that." not in outbox[1].text
+
+
+def test_chat_mode_injects_soul() -> None:
+    from typing import Any
+    from unittest.mock import patch
+
+    from agent_system.services.model_router import ModelRouter
+    from agent_system.services.soul import load_soul
+
+    _, soul_text = load_soul()
+    assert soul_text != ""  # SOUL.md exists
+
+    settings = Settings(
+        agent_identity_mode="local",
+        telegram_allowed_chat_ids="100",
+        telegram_bot_token="test:token",
+    )
+    engine = make_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    bus = EventBus()
+
+    executor = GatewayExecutor(settings, factory, bus)
+
+    update = {
+        "update_id": 3,
+        "message": {
+            "message_id": 12,
+            "chat": {"id": 100},
+            "from": {"id": 100},
+            "text": "how are you?",
+        },
+    }
+    svc = TelegramService(settings, factory, None, bus)
+    svc._log_update(update)
+
+    captured_soul: list[str | None] = []
+    orig_invoke = ModelRouter.invoke
+
+    def spy_invoke(self: Any, factory: Any, model_id: str, prompt: str, **kwargs: Any) -> Any:
+        captured_soul.append(self.soul_text)
+        return orig_invoke(self, factory, model_id, prompt, **kwargs)
+
+    with patch.object(ModelRouter, "invoke", spy_invoke):
+        executor.process_pending()
+
+    assert len(captured_soul) == 1
+    assert captured_soul[0] is not None
+    assert "Bob" in captured_soul[0]
+
+
+def test_chat_history_in_task_context() -> None:
+    from agent_system.agents.react_agent import _with_memory
+    from agent_system.infra.models import TelegramGatewayMessage
+
+    engine = make_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+
+    chat_id = 100
+    save_chat_message(factory, chat_id, "user", "I am working on Project Alpha.")
+    save_chat_message(factory, chat_id, "assistant", "Sounds great!")
+
+    session_id = "session_test_123"
+    with factory() as db:
+        db.add(
+            TelegramGatewayMessage(
+                id="tgm_123",
+                chat_id=str(chat_id),
+                session_id=session_id,
+                processing_status="DISPATCHED",
+            )
+        )
+        db.commit()
+
+    task_prompt = _with_memory(Settings(), "Fix the README", factory=factory, session_id=session_id)
+    assert "Project Alpha" in task_prompt
+    assert "Recent Conversation History:" in task_prompt

@@ -630,6 +630,7 @@ class TelegramService:
         principal: Principal,
         chat_id: int,
         text: str,
+        update_id: int | None = None,
     ) -> None:
         lower = text.lower().split()
         cmd_name = lower[0] if lower else ""
@@ -638,7 +639,7 @@ class TelegramService:
         cmd = self._commands.get(cmd_name)
         if cmd is None:
             # Natural-language goal -> start a session (spec §12).
-            await self._create_session(principal, chat_id, text)
+            await self._create_session(principal, chat_id, text, update_id=update_id)
             return
         if cmd.permission is not None and not principal.can(cmd.permission):
             await self._send(chat_id, "You do not have permission for that command.")
