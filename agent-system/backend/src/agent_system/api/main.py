@@ -159,8 +159,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     executor = GatewayExecutor(settings, recovery_factory, recovery_bus)
                     executor.recover()
                     Outbox(recovery_factory, settings).drain()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import logging as _logging
+
+                    _logging.getLogger(__name__).warning("Telegram recovery sweep error: %s", exc)
 
             recover_tasks()
             app.state.runner_scheduler = BackgroundScheduler()

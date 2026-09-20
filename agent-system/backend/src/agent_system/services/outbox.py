@@ -143,8 +143,9 @@ class Outbox:
             payload: dict[str, Any] = {
                 "chat_id": int(row.chat_id),
                 "text": row.text,
-                "reply_markup": row.reply_markup_json or {},
             }
+            if row.reply_markup_json:
+                payload["reply_markup"] = row.reply_markup_json
             reply_to = row.reply_to_message_id
             if reply_to is not None:
                 payload["reply_parameters"] = {
