@@ -239,10 +239,15 @@ class GatewayRelay:
             return False
         if event.type == "task.completed":
             output = str(event.payload.get("output") or "Task completed.")
-            text = f"✅ Task {task_id} completed\n\n{output[:3500]}"
+            text = output[:3500]
         else:
-            error = str(event.payload.get("error") or "unknown error")
-            text = f"❌ Task {task_id} failed\n\n{error[:3500]}"
+            raw_err = str(event.payload.get("error") or "")
+            err_markers = ("HTTPStatusError", "Traceback", "http://", "https://", "db_error")
+            if any(m in raw_err for m in err_markers):
+                clean_err = "The agent encountered a temporary service issue. Please try again."
+            else:
+                clean_err = raw_err[:1000] if raw_err else "The task could not be completed."
+            text = f"Sorry, I ran into an issue while fulfilling your request.\n\n{clean_err}"
         self._outbox.enqueue(
             kind=KIND_RESULT,
             chat_id=int(chat_id),
@@ -374,12 +379,14 @@ class GatewayExecutor:
 
     def _owner_and_chat(
         self, update_id: int
-    ) -> tuple[str | None, int | None, str | None, int | None, str]:
-        """Owner account id + chat id + user id + message id + goal text."""
+    ) -> tuple[str | None, int | None, str | None, int | None, str, bool]:
+        """Owner account id + chat id + user id + message id + goal text + already_processed."""
         with session_scope(self._factory) as db:
             row = db.get(TelegramUpdate, update_id)
             if row is None:
-                return None, None, None, None, ""
+                return None, None, None, None, "", True
+            if row.processed_at is not None:
+                return None, None, None, None, "", True
             payload = row.payload_json or {}
             message = payload.get("message") or {}
             text = str(message.get("text") or "").strip()
@@ -398,7 +405,7 @@ class GatewayExecutor:
                 message_id = int(message_id) if message_id is not None else None
             except (TypeError, ValueError):
                 message_id = None
-            return account_id, chat_id, user_id, message_id, text
+            return account_id, chat_id, user_id, message_id, text, False
 
     # -- pipeline stages --------------------------------------------------------
 
@@ -541,6 +548,12 @@ class GatewayExecutor:
 
     def _drive_and_finish(self, update_id: int, session_id: str, chat_id: int) -> None:
         from agent_system.services.cloud import drive_session
+        from agent_system.services.telegram_presenter import TelegramProgressPresenter
+
+        presenter = TelegramProgressPresenter(
+            self._factory, self._outbox, chat_id, session_id, self._bus
+        )
+        presenter.start()
 
         try:
             _logger.info("telegram.agent.started session_id=%s", session_id)
@@ -557,10 +570,11 @@ class GatewayExecutor:
             self._outbox.enqueue(
                 kind=KIND_RESULT,
                 chat_id=chat_id,
-                text=f"❌ Session failed: {str(exc)[:1000]}",
+                text="Sorry, I ran into an issue while fulfilling your request. Please try again.",
             )
         finally:
             try:
+                presenter.stop()
                 self._relay.flush()
                 self._gateway_done(update_id)
                 self._mark_processed(update_id)
@@ -574,7 +588,13 @@ class GatewayExecutor:
                 _logger.info("gateway.update.in_flight_skip update_id=%s", update_id)
                 return False
             self._in_flight.add(update_id)
-        account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
+        account_id, chat_id, user_id, message_id, text, already_processed = self._owner_and_chat(
+            update_id
+        )
+        if already_processed:
+            with self._in_flight_lock:
+                self._in_flight.discard(update_id)
+            return False
         _logger.info("gateway.update.claimed update_id=%s chat_id=%s", update_id, chat_id)
         owner = self._resolve_owner(account_id, chat_id=chat_id)
         if owner is None:
@@ -599,10 +619,50 @@ class GatewayExecutor:
             chat_id,
             owner,
         )
+        from agent_system.domain.tasks import TaskState
+        from agent_system.services.classifier import classify_request_type
         from agent_system.services.cloud import ensure_session_tasks
         from agent_system.services.orchestrator import Supervisor
+        from agent_system.services.providers import build_model_router
+
+        req_type = classify_request_type(text)
+        _logger.info("gateway.request.classified update_id=%s req_type=%s", update_id, req_type)
 
         self._gateway_begin(update_id, chat_id, user_id, message_id)
+
+        # -------------------------------------------------------------------
+        # Lightweight CHAT Path
+        # -------------------------------------------------------------------
+        if req_type == "CHAT":
+            self._outbox.enqueue(kind="typing", chat_id=chat_id, text="")
+            try:
+                router = build_model_router(self._bus, self._settings)
+                prompt = (
+                    "You are Bob, a helpful AI assistant on Telegram. "
+                    "Respond conversationally, concisely, and helpfully.\n\n"
+                    f"User: {text}"
+                )
+                inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
+                answer = (
+                    inv.output
+                    if inv.ok and inv.output
+                    else "Hello! I am Bob, your AI assistant. How can I help you today?"
+                )
+            except Exception as exc:
+                _logger.warning("gateway.chat.fallback error=%s", exc)
+                answer = "Hello! I am Bob, your AI assistant. How can I help you today?"
+
+            self._outbox.enqueue(kind=KIND_RESULT, chat_id=chat_id, text=answer[:4000])
+            self._outbox.drain()
+            self._gateway_done(update_id)
+            self._mark_processed(update_id)
+            with self._in_flight_lock:
+                self._in_flight.discard(update_id)
+            return True
+
+        # -------------------------------------------------------------------
+        # Durable AGENT Task Path (TOOL_TASK, CODING_TASK, RESEARCH_TASK, etc.)
+        # -------------------------------------------------------------------
         session_id = None
         with session_scope(self._factory) as db:
             row = (
@@ -612,6 +672,41 @@ class GatewayExecutor:
             )
             if row is not None and row.session_id is not None:
                 session_id = row.session_id
+            elif chat_id is not None and message_id is not None:
+                existing_msg = (
+                    db.query(TelegramGatewayMessage)
+                    .filter(
+                        TelegramGatewayMessage.chat_id == str(chat_id),
+                        TelegramGatewayMessage.message_id == message_id,
+                        TelegramGatewayMessage.session_id.isnot(None),
+                    )
+                    .first()
+                )
+                if existing_msg is not None and existing_msg.session_id is not None:
+                    session_id = existing_msg.session_id
+                    if row is not None:
+                        row.session_id = session_id
+                        row.processing_status = "DISPATCHED"
+
+        if session_id is not None:
+            with session_scope(self._factory) as db:
+                tasks = db.query(Task).filter(Task.session_id == session_id).all()
+                term_states = (
+                    TaskState.SUCCEEDED.value,
+                    TaskState.FAILED.value,
+                    TaskState.CANCELLED.value,
+                )
+                if tasks and all(t.state in term_states for t in tasks):
+                    _logger.info(
+                        "gateway.session.already_terminal update_id=%s session_id=%s",
+                        update_id,
+                        session_id,
+                    )
+                    self._gateway_done(update_id)
+                    self._mark_processed(update_id)
+                    with self._in_flight_lock:
+                        self._in_flight.discard(update_id)
+                    return True
 
         if session_id is None:
             supervisor = Supervisor(self._bus)
@@ -626,12 +721,6 @@ class GatewayExecutor:
                 update_id,
                 session_id,
                 master_task_id,
-            )
-            self._outbox.enqueue(
-                kind=KIND_TASK_ACK,
-                chat_id=chat_id,
-                text=f"Task accepted: {master_task_id or session_id}\nGoal: {text[:200]}",
-                task_id=master_task_id,
             )
             self._gateway_bound(update_id, session_id, master_task_id)
 

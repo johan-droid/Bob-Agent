@@ -143,23 +143,27 @@ def test_telegram_natural_language_goal_pipeline(
 
         # 2. Process via GatewayExecutor
         executor = GatewayExecutor(settings, factory, bus)
-        processed = executor.process_pending()
-        assert processed == 1
+        executor.start()
+        try:
+            processed = executor.process_pending()
+            assert processed == 1
 
-        # 3. Verify session, task, and outbox results
-        with factory() as db:
-            session = db.query(Session).first()
-            assert session is not None
-            assert session.goal == "Summarize today's release status"
+            # 3. Verify session, task, and outbox results
+            with factory() as db:
+                session = db.query(Session).first()
+                assert session is not None
+                assert session.goal == "Summarize today's release status"
 
-            task = db.query(Task).filter_by(session_id=session.id).first()
-            assert task is not None
-            assert task.state in (TaskState.SUCCEEDED.value, TaskState.FAILED.value)
+                task = db.query(Task).filter_by(session_id=session.id).first()
+                assert task is not None
+                assert task.state in (TaskState.SUCCEEDED.value, TaskState.FAILED.value)
 
-            outbox_rows = db.query(DeliveryOutbox).all()
-            assert len(outbox_rows) >= 1
-            kinds = [r.kind for r in outbox_rows]
-            assert "command_response" in kinds or "notification" in kinds
+                outbox_rows = db.query(DeliveryOutbox).all()
+                assert len(outbox_rows) >= 1
+                kinds = [r.kind for r in outbox_rows]
+                assert "notification" in kinds or "command_response" in kinds
+        finally:
+            executor.stop()
     finally:
         clear_settings_cache()
 

@@ -223,8 +223,17 @@ def _sanitize_base_url(url: str | None) -> str:
     if not url:
         return ""
     cleaned = url.strip().rstrip("/")
-    if cleaned.endswith("/chat/completions"):
+    while cleaned.endswith("/chat/completions"):
         cleaned = cleaned[: -len("/chat/completions")].rstrip("/")
+    if "api.groq.com" in cleaned:
+        if cleaned.endswith("/openai/v1"):
+            return cleaned
+        if cleaned.endswith("/openai"):
+            return f"{cleaned}/v1"
+        if cleaned.endswith("/v1"):
+            return cleaned.replace("/v1", "/openai/v1")
+        if cleaned in ("https://api.groq.com", "http://api.groq.com"):
+            return f"{cleaned}/openai/v1"
     return cleaned
 
 

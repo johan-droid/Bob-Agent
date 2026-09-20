@@ -41,10 +41,14 @@ class ProviderStatus:
 def classify_provider_error(error: str) -> ProviderHealth:
     """Classify a raw adapter error into a health state (additive helper)."""
     text = (error or "").upper()
-    if "429" in text or "RATE_LIMIT" in text or "RETRY_AFTER" in text:
-        return ProviderHealth.RATE_LIMITED
+    if "404" in text or "NOT FOUND" in text or "DOES NOT EXIST" in text or "UNKNOWN MODEL" in text:
+        return ProviderHealth.DISABLED
+    if "400" in text or "INVALID_REQUEST" in text or "BAD REQUEST" in text:
+        return ProviderHealth.DISABLED
     if "401" in text or "403" in text or "AUTH" in text or "API_KEY" in text:
         return ProviderHealth.AUTH_FAILED
+    if "429" in text or "RATE_LIMIT" in text or "RETRY_AFTER" in text:
+        return ProviderHealth.RATE_LIMITED
     if "TIMEOUT" in text or "CONNECTION" in text or "5" in text[:3]:
         return ProviderHealth.UNAVAILABLE
     if "500" in text or "502" in text or "503" in text or "504" in text:
@@ -60,6 +64,12 @@ def is_provider_failure(error: str) -> bool:
         return False
     text = error.upper()
     markers = (
+        "404",
+        "400",
+        "401",
+        "403",
+        "NOT FOUND",
+        "BAD REQUEST",
         "429",
         "RATE_LIMIT",
         "TIMEOUT",

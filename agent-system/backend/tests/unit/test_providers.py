@@ -89,6 +89,36 @@ class TestGroqRegression:
         url: str = args[0]
         assert url == "https://api.groq.com/openai/v1/chat/completions"
 
+    def test_groq_base_url_variations_sanitized(self) -> None:
+        from agent_system.services.providers import _sanitize_base_url
+
+        assert _sanitize_base_url("https://api.groq.com") == "https://api.groq.com/openai/v1"
+        assert _sanitize_base_url("https://api.groq.com/v1") == "https://api.groq.com/openai/v1"
+        assert (
+            _sanitize_base_url("https://api.groq.com/chat/completions")
+            == "https://api.groq.com/openai/v1"
+        )
+        assert (
+            _sanitize_base_url("https://api.groq.com/openai/v1/chat/completions/")
+            == "https://api.groq.com/openai/v1"
+        )
+
+    def test_permanent_404_error_quarantines_provider(self) -> None:
+        from agent_system.services.provider_health import (
+            ProviderHealth,
+            ProviderHealthTracker,
+            classify_provider_error,
+            is_provider_failure,
+        )
+
+        err = "HTTPStatusError: 404 Not Found at https://api.groq.com/openai/v1/chat/completions"
+        assert is_provider_failure(err) is True
+        assert classify_provider_error(err) == ProviderHealth.DISABLED
+
+        tracker = ProviderHealthTracker()
+        tracker.report_failure("groq", "llama-3.3-70b-versatile", err)
+        assert tracker.is_routable("groq", "llama-3.3-70b-versatile") is False
+
 
 class TestOpenAICompat:
     def test_invoke_sends_messages(self, monkeypatch) -> None:

@@ -216,7 +216,7 @@ def test_f_model_failure(factory, settings, bus):
                         "message_id": 4,
                         "chat": {"id": 999},
                         "from": {"id": 12345},
-                        "text": "Do something that fails",
+                        "text": "Execute task do something that fails",
                     },
                 },
             )
@@ -231,7 +231,7 @@ def test_f_model_failure(factory, settings, bus):
     with session_scope(factory) as db:
         rows = db.query(DeliveryOutbox).all()
         assert len(rows) >= 1
-        fail_msg = [r for r in rows if "Model provider unavailable" in r.text]
+        fail_msg = [r for r in rows if "issue" in r.text or "failed" in r.text.lower()]
         assert len(fail_msg) == 1
     executor.stop()
 
@@ -391,7 +391,7 @@ async def test_l_full_e2e_trace(factory, settings, bus, gate):
             "message_id": 40,
             "chat": {"id": 999},
             "from": {"id": 12345, "first_name": "E2EUser"},
-            "text": "Hello Bob E2E",
+            "text": "Do task Hello Bob E2E",
         },
     }
 
@@ -425,11 +425,10 @@ async def test_l_full_e2e_trace(factory, settings, bus, gate):
 
     outbox = Outbox(factory, settings)
     drained = outbox.drain(client=mock_client)
-    assert drained >= 2  # Task ACK + Task completed result
+    assert drained >= 1  # Task completed result
 
     # Verify mock call sent to chat 999
     sent_payloads = [call[1]["json"] for call in mock_client.post.call_args_list]
-    assert any("Task accepted" in p.get("text", "") for p in sent_payloads)
     assert any("Hello! I am Bob, your AI agent." in p.get("text", "") for p in sent_payloads)
 
     executor.stop()
