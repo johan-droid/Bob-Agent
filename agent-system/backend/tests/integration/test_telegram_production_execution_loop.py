@@ -296,8 +296,7 @@ def test_model_failure_produces_durable_error_response(tmp_path: Any) -> None:
         with factory() as db:
             out_rows = db.query(DeliveryOutbox).all()
             assert any(
-                "Sorry" in r.text or "failed" in r.text.lower() or "503" in r.text
-                for r in out_rows
+                "Sorry" in r.text or "failed" in r.text.lower() or "503" in r.text for r in out_rows
             )
     finally:
         agent_system.services.cloud.drive_session = original_drive

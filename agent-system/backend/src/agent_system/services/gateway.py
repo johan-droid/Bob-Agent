@@ -231,6 +231,12 @@ class GatewayRelay:
     # -- relay targets ---------------------------------------------------------
 
     def _relay_result(self, event: Event) -> bool:
+        from agent_system.services.telegram_presenter import (
+            format_model_footer,
+            sanitize_telegram_message,
+            save_chat_message,
+        )
+
         task_id = event.task_id
         if not task_id:
             return False
@@ -238,16 +244,20 @@ class GatewayRelay:
         if chat_id is None:
             return False
         if event.type == "task.completed":
-            output = str(event.payload.get("output") or "Task completed.")
-            text = output[:3500]
-        else:
-            raw_err = str(event.payload.get("error") or "")
-            err_markers = ("HTTPStatusError", "Traceback", "http://", "https://", "db_error")
-            if any(m in raw_err for m in err_markers):
-                clean_err = "The agent encountered a temporary service issue. Please try again."
+            output = str(event.payload.get("output") or "Done.")
+            clean_output = sanitize_telegram_message(output)
+            provider = str(event.payload.get("provider") or event.payload.get("actor") or "groq")
+            model_id = str(event.payload.get("model") or event.payload.get("model_id") or "default")
+            lat_ms = event.payload.get("latency_ms")
+            latency_s = float(lat_ms) / 1000.0 if lat_ms is not None else None
+            footer = format_model_footer(provider, model_id, latency_s)
+            if footer not in clean_output:
+                text = f"{clean_output}\n\n{footer}"
             else:
-                clean_err = raw_err[:1000] if raw_err else "The task could not be completed."
-            text = f"Sorry, I ran into an issue while fulfilling your request.\n\n{clean_err}"
+                text = clean_output
+            save_chat_message(self._factory, chat_id, "assistant", clean_output)
+        else:
+            text = "Sorry, I ran into an issue while fulfilling your request. Please try again."
         self._outbox.enqueue(
             kind=KIND_RESULT,
             chat_id=int(chat_id),
@@ -634,25 +644,52 @@ class GatewayExecutor:
         # Lightweight CHAT Path
         # -------------------------------------------------------------------
         if req_type == "CHAT":
+            from agent_system.services.telegram_presenter import (
+                format_model_footer,
+                load_chat_history,
+                sanitize_telegram_message,
+                save_chat_message,
+            )
+
             self._outbox.enqueue(kind="typing", chat_id=chat_id, text="")
+            save_chat_message(self._factory, chat_id, "user", text)
+            history = load_chat_history(self._factory, chat_id, limit=10)
+
+            prompt_lines = [
+                "You are Bob, a helpful AI assistant on Telegram. "
+                "Respond conversationally, concisely, and helpfully."
+            ]
+            if history:
+                prompt_lines.append("\nRecent Conversation:")
+                for msg in history[:-1]:
+                    role_lbl = "User" if msg["role"] == "user" else "Assistant"
+                    prompt_lines.append(f"{role_lbl}: {msg['content']}")
+            prompt_lines.append(f"\nUser: {text}")
+            prompt = "\n".join(prompt_lines)
+
             try:
                 router = build_model_router(self._bus, self._settings)
-                prompt = (
-                    "You are Bob, a helpful AI assistant on Telegram. "
-                    "Respond conversationally, concisely, and helpfully.\n\n"
-                    f"User: {text}"
-                )
                 inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
-                answer = (
-                    inv.output
-                    if inv.ok and inv.output
-                    else "Hello! I am Bob, your AI assistant. How can I help you today?"
-                )
+                answer = inv.output if inv.ok and inv.output else "Hey! 👋 What are we working on?"
+                provider = getattr(inv, "provider", None) or "groq"
+                model_id = getattr(inv, "model_id", None) or router.default_model
+                lat_ms = getattr(inv, "latency_ms", None)
+                latency_s = float(lat_ms) / 1000.0 if lat_ms is not None else None
             except Exception as exc:
                 _logger.warning("gateway.chat.fallback error=%s", exc)
-                answer = "Hello! I am Bob, your AI assistant. How can I help you today?"
+                answer = "Hey! 👋 What are we working on?"
+                provider = "groq"
+                model_id = "default"
+                latency_s = 0.2
 
-            self._outbox.enqueue(kind=KIND_RESULT, chat_id=chat_id, text=answer[:4000])
+            clean_answer = sanitize_telegram_message(answer)
+            footer = format_model_footer(provider, model_id, latency_s)
+            final_text = (
+                f"{clean_answer}\n\n{footer}" if footer not in clean_answer else clean_answer
+            )
+            save_chat_message(self._factory, chat_id, "assistant", clean_answer)
+
+            self._outbox.enqueue(kind=KIND_RESULT, chat_id=chat_id, text=final_text[:4000])
             self._outbox.drain()
             self._gateway_done(update_id)
             self._mark_processed(update_id)
@@ -663,6 +700,14 @@ class GatewayExecutor:
         # -------------------------------------------------------------------
         # Durable AGENT Task Path (TOOL_TASK, CODING_TASK, RESEARCH_TASK, etc.)
         # -------------------------------------------------------------------
+        from agent_system.services.telegram_presenter import save_chat_message
+
+        save_chat_message(self._factory, chat_id, "user", text)
+        self._outbox.enqueue(
+            kind="command_response",
+            chat_id=chat_id,
+            text="Yep — I'll check that.",
+        )
         session_id = None
         with session_scope(self._factory) as db:
             row = (

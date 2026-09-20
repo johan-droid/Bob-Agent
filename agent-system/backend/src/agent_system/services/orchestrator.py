@@ -804,9 +804,7 @@ class Orchestrator:
                         type="agent.completed"
                         if effective == TaskState.SUCCEEDED
                         else (
-                            "agent.failed"
-                            if effective == TaskState.FAILED
-                            else "agent.terminated"
+                            "agent.failed" if effective == TaskState.FAILED else "agent.terminated"
                         ),
                         session_id=session_id,
                         task_id=task_id,

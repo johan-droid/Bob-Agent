@@ -210,6 +210,7 @@ class Settings(BaseSettings):
     # Agentic Runtime v1 (additive layer on the frozen task/permission/
     # execution contracts): capability-aware routing + bounded swarm +
     # provider fallback with a durable attempt ledger.
+    bob_zero_cost_mode: bool = True
     nim_api_key: str | None = None
     nim_base_url: str = "https://integrate.api.nvidia.com/v1"
     ollama_cloud_api_key: str | None = None

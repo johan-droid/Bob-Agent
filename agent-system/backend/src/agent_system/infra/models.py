@@ -619,3 +619,15 @@ class UserCredential(Base):
     last_validated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class TelegramChatHistory(Base):
+    """Conversational history for a Telegram chat (multi-turn context)."""
+
+    __tablename__ = "telegram_chat_history"
+
+    id: Mapped[str] = _pk()
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" or "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _ts(index=True)
