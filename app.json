@@ -1,6 +1,6 @@
 {
   "name": "Bob Agent",
-  "description": "Autonomous multi-agent AI system — Heroku cloud runtime (single web dyno, Postgres, Telegram webhook)",
+  "description": "Bob Agent — Telegram-only cloud agent on Heroku (Postgres durable state, inline execution, no Redis/RQ worker).",
   "stack": "heroku-24",
   "formation": {
     "web": {
@@ -28,9 +28,6 @@
     },
     "TELEGRAM_BOT_TOKEN": {
       "required": true
-    },
-    "TELEGRAM_ALLOWED_CHAT_IDS": {
-      "required": false
     },
     "DEFAULT_PROVIDER": {
       "value": "groq"
@@ -91,6 +88,15 @@
     },
     "AGENT_IDENTITY_MODE": {
       "value": "telegram"
+    },
+    "AGENT_ENV": {
+      "value": "production"
+    },
+    "TELEGRAM_ALLOWED_USER_IDS": {
+      "required": true
+    },
+    "HEROKU_APP_NAME": {
+      "value": "firecrow-project-migrated"
     }
   }
 }
