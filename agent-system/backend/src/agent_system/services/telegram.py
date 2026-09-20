@@ -930,9 +930,13 @@ class TelegramService:
             record_session_chat(self._factory, session_id, int(chat_id))
         except Exception:
             _logger.exception("telegram: session-chat mapping failed (session %s)", session_id)
+        from agent_system.services.classifier import classify_request_type
+        from agent_system.services.telegram_presenter import build_task_ack
+
+        ack_text = build_task_ack(goal, classify_request_type(goal))
         await self._send(
             chat_id,
-            "Yep — I'll check that.",
+            ack_text,
             kind=KIND_COMMAND_RESPONSE,
         )
         # Drive session in-process in a background thread.

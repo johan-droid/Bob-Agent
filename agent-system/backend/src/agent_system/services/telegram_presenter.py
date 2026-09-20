@@ -33,6 +33,22 @@ _INTERNAL_ID_PATTERNS = [
 ]
 
 
+def build_task_ack(goal: str, req_type: str = "TOOL_TASK") -> str:
+    """Generate a context-aware initial task acknowledgement based on classification and goal."""
+    lower = (goal or "").lower()
+    if "deploy" in lower:
+        return "Checking deployment details and preparing the task..."
+    if "debug" in lower or "fix" in lower or "bug" in lower:
+        return "Investigating the issue and debugging..."
+    if req_type == "RESEARCH_TASK" or "search" in lower or "research" in lower or "find" in lower:
+        return "Gathering information and researching..."
+    if req_type == "CODING_TASK" or "code" in lower or "script" in lower or "refactor" in lower:
+        return "Working on the code implementation..."
+    if req_type == "LONG_RUNNING_TASK" or "batch" in lower or "crawl" in lower:
+        return "Initiating the process..."
+    return "Starting work on your request..."
+
+
 def format_model_footer(
     provider: str | None, model_id: str | None, latency_s: float | None = None
 ) -> str:
@@ -207,6 +223,7 @@ class TelegramProgressPresenter:
 
 __all__ = [
     "TelegramProgressPresenter",
+    "build_task_ack",
     "format_model_footer",
     "load_chat_history",
     "map_tool_to_progress",
