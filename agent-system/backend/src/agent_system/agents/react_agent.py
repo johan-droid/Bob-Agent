@@ -182,19 +182,57 @@ def _extract_goal(task_input: dict[str, Any]) -> str | None:
     return None
 
 
-def _with_memory(settings: Any, goal: str, factory: Any = None) -> str:
-    """Inject the top-k most relevant vault notes into the task text."""
-    top_k = int(getattr(settings, "memory_recall_top_k", 0) or 0)
-    if top_k <= 0:
-        return goal
+def _chat_id_for_session(factory: Any, session_id: str | None) -> str | None:
+    if factory is None or not session_id:
+        return None
     try:
-        notes = recall_recent(settings, goal, top_k, factory=factory)
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import TelegramGatewayMessage
+
+        with session_scope(factory) as db:
+            row = (
+                db.query(TelegramGatewayMessage.chat_id)
+                .filter(TelegramGatewayMessage.session_id == str(session_id))
+                .first()
+            )
+            return row[0] if row and row[0] else None
     except Exception:
-        return goal  # memory must never break execution
-    if not notes:
-        return goal
-    rendered = "\n".join(f"- {n['title']}: {n['snippet'][:200]}" for n in notes)
-    return f"{goal}\n\nRelevant memories:\n{rendered}"
+        return None
+
+
+def _with_memory(
+    settings: Any, goal: str, factory: Any = None, session_id: str | None = None
+) -> str:
+    """Inject recent conversation history and top-k vault notes into the task text."""
+    parts = [goal]
+
+    chat_id = _chat_id_for_session(factory, session_id) if session_id else None
+    if chat_id:
+        try:
+            from agent_system.services.telegram_presenter import load_chat_history
+
+            history = load_chat_history(factory, chat_id, limit=6)
+            if history:
+                lines = []
+                for msg in history[:-1]:
+                    role_lbl = "User" if msg["role"] == "user" else "Assistant"
+                    lines.append(f"{role_lbl}: {msg['content']}")
+                if lines:
+                    parts.append("Recent Conversation History:\n" + "\n".join(lines))
+        except Exception:
+            pass
+
+    top_k = int(getattr(settings, "memory_recall_top_k", 0) or 0)
+    if top_k > 0:
+        try:
+            notes = recall_recent(settings, goal, top_k, factory=factory)
+            if notes:
+                rendered = "\n".join(f"- {n['title']}: {n['snippet'][:200]}" for n in notes)
+                parts.append("Relevant memories:\n" + rendered)
+        except Exception:
+            pass
+
+    return "\n\n".join(parts)
 
 
 def _build_router(settings: Any, bus: Any) -> Any:
@@ -403,7 +441,7 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
     loop = run_tool_loop(
         invoke=invoke,
         system=_SYSTEM_PROMPT,
-        task=_with_memory(settings, goal, factory=factory),
+        task=_with_memory(settings, goal, factory=factory, session_id=session_id),
         registry=tool_registry,
         ctx=tool_ctx,
         emit=emit,
