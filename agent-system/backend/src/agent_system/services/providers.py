@@ -270,6 +270,17 @@ def _strip_none(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
+def _extract_rate_limit_headers(headers: Any) -> dict[str, Any]:
+    if not headers:
+        return {}
+    res: dict[str, Any] = {}
+    for k, v in headers.items():
+        lk = k.lower()
+        if "ratelimit" in lk or lk == "retry-after":
+            res[lk] = v
+    return res
+
+
 def _usage(data: dict[str, Any]) -> dict[str, Any]:
     usage = data.get("usage") or data.get("usage_") or {}
     return {
@@ -391,7 +402,12 @@ class OpenAICompatibleAdapter:
                 headers=self._headers(),
                 json=payload,
             )
-            resp.raise_for_status()
+            rl_info = _extract_rate_limit_headers(resp.headers)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                exc.rate_limit_info = rl_info  # type: ignore[attr-defined]
+                raise
             data = resp.json()
         choices = data.get("choices") or []
         text = ""
@@ -411,6 +427,7 @@ class OpenAICompatibleAdapter:
             "finish_reason": finish_reason or "stop",
             "usage": _usage(data),
             "request_id": str(data.get("id") or ""),
+            "rate_limit_info": rl_info,
         }
 
     def stream(self, model_id: str, prompt: str, **kwargs: Any) -> Any:

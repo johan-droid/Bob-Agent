@@ -8,6 +8,7 @@ single editable Telegram progress message with concise status indicators.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -17,6 +18,91 @@ from agent_system.infra.event_bus import EventBus
 logger = logging.getLogger(__name__)
 
 UPDATE_THROTTLE_SECONDS = 1.5
+
+_INTERNAL_ID_PATTERNS = [
+    r"Task accepted:\s*[a-zA-Z0-9_-]+",
+    r"Task registered:\s*[a-zA-Z0-9_-]+",
+    r"Session\s+[a-zA-Z0-9_-]+:\s*",
+    r"task_[0-9A-Za-z_]+",
+    r"session_[0-9A-Za-z_]+",
+    r"run_[0-9A-Za-z_]+",
+    r"tgm_[0-9A-Za-z_]+",
+    r"attempt_[0-9A-Za-z_]+",
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    r"Worker assigned:[^\n]*",
+]
+
+
+def format_model_footer(
+    provider: str | None, model_id: str | None, latency_s: float | None = None
+) -> str:
+    """Format model transparency footer line: ↳ groq · llama-3.3-70b-versatile · 0.8s"""
+    p = (provider or "groq").strip().lower()
+    m = (model_id or "default").strip()
+    if "/" in m:
+        m = m.split("/")[-1]
+    if latency_s is not None and latency_s > 0:
+        return f"↳ {p} · {m} · {latency_s:.1f}s"
+    return f"↳ {p} · {m}"
+
+
+def sanitize_telegram_message(text: str) -> str:
+    """Strip all internal IDs, tracebacks, and technical noise from Telegram user messages."""
+    if not text:
+        return ""
+    cleaned = text
+    if "Traceback (most recent call last):" in cleaned:
+        return "Sorry, I ran into an issue while fulfilling your request."
+
+    for pattern in _INTERNAL_ID_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned)
+
+    lines = [line.strip() for line in cleaned.split("\n")]
+    result = "\n".join(line for line in lines if line)
+    return result or text
+
+
+def load_chat_history(factory: Any, chat_id: int | str, limit: int = 10) -> list[dict[str, str]]:
+    """Load recent Telegram chat history for context continuity."""
+    if factory is None or not chat_id:
+        return []
+    try:
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import TelegramChatHistory
+
+        with session_scope(factory) as db:
+            rows = (
+                db.query(TelegramChatHistory)
+                .filter(TelegramChatHistory.chat_id == str(chat_id))
+                .order_by(TelegramChatHistory.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [{"role": r.role, "content": r.content} for r in reversed(rows)]
+    except Exception:
+        return []
+
+
+def save_chat_message(factory: Any, chat_id: int | str, role: str, content: str) -> None:
+    """Save a single message to Telegram chat history."""
+    if factory is None or not chat_id or not content:
+        return
+    try:
+        from agent_system.domain import ids
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import TelegramChatHistory
+
+        with session_scope(factory) as db:
+            db.add(
+                TelegramChatHistory(
+                    id=ids.new_id("tch"),
+                    chat_id=str(chat_id),
+                    role=role,
+                    content=content,
+                )
+            )
+    except Exception:
+        pass
 
 
 def map_tool_to_progress(tool_name: str) -> str:
@@ -119,4 +205,11 @@ class TelegramProgressPresenter:
                     self._edit_message_id = None  # Updated when message delivered
 
 
-__all__ = ["TelegramProgressPresenter", "map_tool_to_progress"]
+__all__ = [
+    "TelegramProgressPresenter",
+    "format_model_footer",
+    "load_chat_history",
+    "map_tool_to_progress",
+    "sanitize_telegram_message",
+    "save_chat_message",
+]

@@ -451,6 +451,11 @@ class ModelRouter:
         def _call() -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
             assert adapter is not None
             response = adapter.invoke(model_id, prompt, **kwargs)
+            rl_info = response.get("rate_limit_info")
+            if rl_info:
+                from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
+
+                GLOBAL_HEALTH_TRACKER.update_rate_limits(provider, model_id, rl_info)
             return (
                 str(response.get("output", "")),
                 dict(response.get("usage", {})),
@@ -805,6 +810,12 @@ class ModelRouter:
         # Unknown pricing -> None cost, flagged estimated; NEVER crashes.
         cost_estimated = cost is None
         from agent_system.infra.telemetry import get_metrics
+        from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
+
+        if ok:
+            GLOBAL_HEALTH_TRACKER.report_success(provider, model_id, latency_ms=latency_ms)
+        else:
+            GLOBAL_HEALTH_TRACKER.report_failure(provider, model_id, error=error or "")
 
         get_metrics().record_model_latency(provider, latency_ms, ok)
         if session_id is not None and cost is not None:

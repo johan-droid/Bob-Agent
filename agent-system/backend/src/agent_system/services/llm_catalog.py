@@ -181,6 +181,17 @@ def default_catalog() -> CapabilityCatalog:
             cost_class="free",
         ),
         ModelCapability(
+            provider="opencode",
+            model_id="opencode/free-coding",
+            context_limit=131072,
+            tool_calling=True,
+            structured_output=True,
+            reasoning=True,
+            coding=3,
+            latency_class="standard",
+            cost_class="free",
+        ),
+        ModelCapability(
             provider="nim",
             model_id="meta/llama-3.3-70b-instruct",
             context_limit=131072,
@@ -188,7 +199,7 @@ def default_catalog() -> CapabilityCatalog:
             structured_output=True,
             coding=3,
             latency_class="standard",
-            cost_class="cheap",
+            cost_class="free",
             max_output_tokens=8192,
         ),
         ModelCapability(
@@ -199,7 +210,7 @@ def default_catalog() -> CapabilityCatalog:
             reasoning=True,
             coding=3,
             latency_class="slow",
-            cost_class="cheap",
+            cost_class="free",
             max_output_tokens=8192,
         ),
         ModelCapability(
@@ -209,7 +220,7 @@ def default_catalog() -> CapabilityCatalog:
             tool_calling=True,
             coding=2,
             latency_class="standard",
-            cost_class="cheap",
+            cost_class="free",
         ),
         ModelCapability(
             provider="ollama_cloud",
@@ -218,7 +229,7 @@ def default_catalog() -> CapabilityCatalog:
             tool_calling=True,
             coding=3,
             latency_class="standard",
-            cost_class="cheap",
+            cost_class="free",
         ),
         ModelCapability(
             provider="ollama",

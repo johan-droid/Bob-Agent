@@ -67,6 +67,7 @@ class RoutingRequest:
     min_coding: int = 0
     prefer_latency: str = ""
     prefer_cost: str = ""
+    zero_cost_mode: bool = True
     preordered_providers: tuple[str, ...] = ()
     excluded_providers: tuple[str, ...] = ()
 
@@ -99,7 +100,8 @@ def rank_candidates(
     health: Any | None = None,
     configured_providers: list[str] | None = None,
 ) -> list[tuple[Any, str]]:
-    """Rank (capability, reason) pairs. Pure function — no I/O, no mutation."""
+    """Rank (capability, reason) pairs following the 7-stage deterministic pipeline."""
+    # 1. Capability filter
     cands = catalog.filter(
         tool_calling=True if request.requires_tool_calling else None,
         min_context=request.min_context,
@@ -108,12 +110,72 @@ def rank_candidates(
     )
     if request.requires_reasoning:
         cands = [c for c in cands if c.reasoning]
+
+    # 2. Configured and excluded providers
     if configured_providers is not None:
         cands = [c for c in cands if c.provider in configured_providers]
     if request.excluded_providers:
         cands = [c for c in cands if c.provider not in request.excluded_providers]
-    if health is not None:
-        cands = [c for c in cands if health.is_routable(c.provider, c.model_id)]
+
+    # 3. Zero-cost filter (BOB_ZERO_COST_MODE)
+    if request.zero_cost_mode:
+        from agent_system.services.providers import provider_spec
+
+        filtered = []
+        for c in cands:
+            spec = provider_spec(c.provider)
+            if c.cost_class == "free" or (spec is not None and spec.free_tier):
+                filtered.append(c)
+        cands = filtered
+
+    # 4. Quota / health & cooldown filter
+    health_tracker = health
+    if health_tracker is None:
+        from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
+
+        health_tracker = GLOBAL_HEALTH_TRACKER
+
+    if health_tracker is not None:
+        cands = [c for c in cands if health_tracker.is_routable(c.provider, c.model_id)]
+
+    # Determine provider role order default if not specified
+    role_order = list(request.preordered_providers)
+    if not role_order:
+        default_chain = [
+            "groq",
+            "gemini",
+            "opencode",
+            "nim",
+            "openrouter",
+            "ollama_cloud",
+            "ollama",
+        ]
+        if request.task_type == "chat" or request.prefer_latency == "fast":
+            role_order = default_chain
+        elif request.min_coding >= 2 or "code" in request.worker_role.lower():
+            role_order = [
+                "opencode",
+                "nim",
+                "gemini",
+                "groq",
+                "openrouter",
+                "ollama_cloud",
+                "ollama",
+            ]
+        elif request.requires_reasoning:
+            role_order = [
+                "nim",
+                "gemini",
+                "opencode",
+                "groq",
+                "openrouter",
+                "ollama_cloud",
+                "ollama",
+            ]
+        elif request.requires_vision:
+            role_order = ["gemini", "groq", "nim", "opencode", "openrouter"]
+        else:
+            role_order = default_chain
 
     def _score(cap: Any) -> tuple[int, int, int, int, str, str]:
         latency_pen = 0
@@ -122,11 +184,11 @@ def rank_candidates(
         cost_pen = _COST_RANK.get(cap.cost_class, 1)
         if request.prefer_cost == "free":
             cost_pen = _COST_RANK.get(cap.cost_class, 1) * 2
-        order_pen = 0
-        if request.preordered_providers and cap.provider in request.preordered_providers:
-            order_pen = list(request.preordered_providers).index(cap.provider)
-        elif request.preordered_providers:
-            order_pen = len(request.preordered_providers)
+
+        order_pen = 99
+        if cap.provider in role_order:
+            order_pen = role_order.index(cap.provider)
+
         coding_bonus = -int(cap.coding)
         return (order_pen, latency_pen, cost_pen, coding_bonus, cap.provider, cap.model_id)
 

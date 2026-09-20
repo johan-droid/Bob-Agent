@@ -931,7 +931,8 @@ class TelegramService:
             _logger.exception("telegram: session-chat mapping failed (session %s)", session_id)
         await self._send(
             chat_id,
-            f"Task accepted: {session_id}\nGoal: {goal[:200]}",
+            "Yep — I'll check that.",
+            kind=KIND_COMMAND_RESPONSE,
         )
         # Drive session in-process in a background thread.
         # The web request must return fast; Telegram retries slow responses.

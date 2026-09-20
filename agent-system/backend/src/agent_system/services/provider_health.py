@@ -26,6 +26,11 @@ class ProviderStatus:
     retry_after: float = 0.0
     last_error: str = ""
     updated_at: float = field(default_factory=time.monotonic)
+    requests_remaining: int | None = None
+    tokens_remaining: int | None = None
+    latency_ms: int = 0
+    success_count: int = 0
+    failure_count: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -34,6 +39,11 @@ class ProviderStatus:
             "health": self.health.value,
             "consecutive_failures": self.consecutive_failures,
             "retry_after": self.retry_after,
+            "requests_remaining": self.requests_remaining,
+            "tokens_remaining": self.tokens_remaining,
+            "latency_ms": self.latency_ms,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
             "last_error": self.last_error[:300],
         }
 
@@ -127,7 +137,48 @@ class ProviderHealthTracker:
                     existing.retry_after = 0.0
             return existing
 
-    def report_success(self, provider: str, model_id: str = "") -> None:
+    def update_rate_limits(self, provider: str, model_id: str, headers: dict[str, Any]) -> None:
+        """Parse provider rate limit / reset headers (Groq, OpenAI, etc.)."""
+        if not headers:
+            return
+        with self._lock:
+            key = self._key(provider, model_id)
+            st = self._status.get(key)
+            if st is None:
+                st = ProviderStatus(provider=provider, model_id=model_id)
+                self._status[key] = st
+
+            rem_req = headers.get("x-ratelimit-remaining-requests")
+            if rem_req is not None:
+                try:
+                    st.requests_remaining = int(rem_req)
+                except (ValueError, TypeError):
+                    pass
+
+            rem_tok = headers.get("x-ratelimit-remaining-tokens")
+            if rem_tok is not None:
+                try:
+                    st.tokens_remaining = int(rem_tok)
+                except (ValueError, TypeError):
+                    pass
+
+            retry_after = headers.get("retry-after")
+            if retry_after is not None:
+                try:
+                    secs = float(retry_after)
+                    st.retry_after = time.monotonic() + max(1.0, secs)
+                    st.health = ProviderHealth.RATE_LIMITED
+                except (ValueError, TypeError):
+                    pass
+
+            if (st.requests_remaining is not None and st.requests_remaining <= 0) or (
+                st.tokens_remaining is not None and st.tokens_remaining <= 0
+            ):
+                st.health = ProviderHealth.RATE_LIMITED
+                if st.retry_after <= time.monotonic():
+                    st.retry_after = time.monotonic() + 60.0
+
+    def report_success(self, provider: str, model_id: str = "", latency_ms: int = 0) -> None:
         with self._lock:
             key = self._key(provider, model_id)
             st = self._status.get(key)
@@ -138,6 +189,8 @@ class ProviderHealthTracker:
             st.consecutive_failures = 0
             st.retry_after = 0.0
             st.last_error = ""
+            st.latency_ms = latency_ms
+            st.success_count += 1
             st.updated_at = time.monotonic()
 
     def report_failure(
@@ -155,6 +208,7 @@ class ProviderHealthTracker:
                 self._status[key] = st
             st.health = classify_provider_error(error)
             st.consecutive_failures += 1
+            st.failure_count += 1
             st.last_error = error[:300]
             st.updated_at = time.monotonic()
             if st.health == ProviderHealth.RATE_LIMITED:
@@ -186,7 +240,10 @@ class ProviderHealthTracker:
             return [s.to_json() for s in self._status.values()]
 
 
+GLOBAL_HEALTH_TRACKER = ProviderHealthTracker()
+
 __all__ = [
+    "GLOBAL_HEALTH_TRACKER",
     "ProviderHealth",
     "ProviderHealthTracker",
     "ProviderStatus",
