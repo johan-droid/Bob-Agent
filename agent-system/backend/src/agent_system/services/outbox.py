@@ -113,7 +113,7 @@ class Outbox:
                     db.query(DeliveryOutbox)
                     .filter(
                         DeliveryOutbox.id == r.id,
-                        DeliveryOutbox.next_attempt_at == r.next_attempt_at,
+                        DeliveryOutbox.state.in_(("PENDING", "RETRY")),
                     )
                     .update(
                         {

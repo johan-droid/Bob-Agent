@@ -128,9 +128,37 @@ class HealthRegistry:
                     }
                     all_ok = False
 
-        status_str = "ok" if all_ok else "degraded"
+        is_cloud_inline = getattr(self.settings, "is_cloud_inline", False)
+        db_check = results.get("postgresql") or results.get("database") or {}
+        redis_check = results.get("redis") or {}
+
+        db_ok = db_check.get("status") in (
+            "OK",
+            "DISABLED",
+            "NOT_CONFIGURED",
+        ) and db_check.get("reachable", True)
+
+        if is_cloud_inline or not redis_check.get("configured", False):
+            is_ready = db_ok
+        else:
+            redis_ok = redis_check.get("status") in (
+                "OK",
+                "DISABLED",
+                "NOT_CONFIGURED",
+            ) and redis_check.get("reachable", True)
+            is_ready = db_ok and redis_ok
+
+        if not is_ready:
+            status_str = "not_ready"
+        elif not all_ok:
+            status_str = "degraded"
+        else:
+            status_str = "ok"
+
         return {
             "status": status_str,
+            "ready": is_ready,
+            "mode": "inline" if is_cloud_inline else "rq_worker",
             "services": results,
             "checks": {
                 k: v.get("status") in ("OK", "DISABLED", "NOT_CONFIGURED")

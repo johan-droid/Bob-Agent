@@ -167,7 +167,7 @@ Verify your deployment using HTTP requests or your browser:
 - **Health Endpoint**: `GET https://<app-name>.herokuapp.com/api/v1/health`
   - Expected Response: `{"status": "ok"}`
 - **Readiness Endpoint**: `GET https://<app-name>.herokuapp.com/api/v1/ready`
-  - Expected Response: `{"status": "ok", "checks": {"database": true}}`
+  - Expected Response: `{"status": "ok", "ready": true, "mode": "inline", "checks": {"database": true}}`
 
 ---
 

@@ -23,7 +23,7 @@ class TestAuth:
     def test_health_open_ready_reports_db(self, client: TestClient) -> None:
         assert client.get("/api/v1/health").status_code == 200
         body = client.get("/api/v1/ready").json()
-        assert body["status"] in {"ok", "degraded"}
+        assert body["status"] in {"ok", "degraded", "not_ready"}
         assert "database" in body["checks"]
 
     def test_protected_endpoint_requires_auth(self) -> None:

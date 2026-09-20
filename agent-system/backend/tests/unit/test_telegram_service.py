@@ -286,3 +286,43 @@ class TestSend:
         # Two approved chats -> two sendMessage calls with reply markup.
         assert len(calls) == 2
         assert all("inline_keyboard" in c["json"]["reply_markup"] for c in calls)
+
+
+class TestPollingTransportSafety:
+    @pytest.mark.asyncio
+    async def test_get_updates_409_conflict_recorded_gracefully(self) -> None:
+        svc = _service(_settings())
+
+        class FakeResponse:
+            status_code = 409
+            text = "Conflict: terminated by other getUpdates request"
+
+        class FakeClient:
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                import httpx
+
+                raise httpx.HTTPStatusError(
+                    "Conflict",
+                    request=httpx.Request("GET", "https://api.telegram.org"),
+                    response=httpx.Response(
+                        409, request=httpx.Request("GET", "https://api.telegram.org")
+                    ),
+                )
+
+        svc._client = FakeClient()  # noqa: SLF001
+        updates = await svc._get_updates()  # noqa: SLF001
+        assert updates == []
+        assert svc._last_poll_error is not None  # noqa: SLF001
+        assert "Conflict: 409" in svc._last_poll_error  # noqa: SLF001
+
+    def test_single_consumer_polling_lease(self, tmp_path: Path) -> None:
+        engine = make_engine(f"sqlite:///{tmp_path / 'tg_lease.db'}")
+        Base.metadata.create_all(engine)
+        factory = make_session_factory(engine)
+
+        svc1 = TelegramService(_settings(), factory, PermissionGate(), EventBus())
+        svc2 = TelegramService(_settings(), factory, PermissionGate(), EventBus())
+
+        assert svc1._acquire_polling_lease() is True  # noqa: SLF001
+        # Second instance trying while first instance holds lease:
+        assert svc2._acquire_polling_lease() is False  # noqa: SLF001

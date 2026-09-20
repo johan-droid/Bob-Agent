@@ -672,7 +672,7 @@ class Orchestrator:
             from agent_system.services.verifier import VerificationResult
 
             verification = VerificationResult(
-                True, f"verifier crashed; lenient pass: {type(exc).__name__}"
+                False, f"verifier crashed: {type(exc).__name__}: {exc}", mode="crash"
             )
         if verification is None or verification.passed:
             reason = verification.reason if verification else "no verifier"
