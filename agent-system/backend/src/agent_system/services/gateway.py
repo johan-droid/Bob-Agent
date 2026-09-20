@@ -670,11 +670,7 @@ class GatewayExecutor:
             try:
                 router = build_model_router(self._bus, self._settings)
                 inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
-                answer = (
-                    inv.output
-                    if inv.ok and inv.output
-                    else "Hey! 👋 What are we working on?"
-                )
+                answer = inv.output if inv.ok and inv.output else "Hey! 👋 What are we working on?"
                 provider = getattr(inv, "provider", None) or "groq"
                 model_id = getattr(inv, "model_id", None) or router.default_model
                 lat_ms = getattr(inv, "latency_ms", None)
