@@ -16,7 +16,7 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-# One-shot installer: detects the OS, installs Python 3.12+/uv/git/Redis,
+# One-shot installer: detects the OS, installs Python 3.12+/uv/git,
 # fetches deps, migrates, and launches the setup wizard.
 #   make bootstrap            # interactive
 #   make bootstrap YES=--yes  # fully automatic
@@ -40,10 +40,9 @@ install:
 dev:
 	cd backend && uv run uvicorn agent_system.api.main:app --reload --port 8000
 
-start: up migrate
-	@echo "Starting backend (port 8000) + RQ worker…"
-	@cd backend && uv run uvicorn agent_system.api.main:app --port 8000 & \
-	cd backend && uv run python -m agent_system.worker
+start: migrate
+	@echo "Starting backend (port 8000)..."
+	cd backend && uv run uvicorn agent_system.api.main:app --port 8000
 
 setup:
 	cd backend && uv run agentctl setup
@@ -72,7 +71,7 @@ migrate:
 
 db-reset:
 	@echo "[make] Resetting database..."
-	rm -f backend/data/agent_system.db* backend/data/e2e_worker_check.db*
+	rm -f backend/data/agent_system.db*
 	cd backend && uv run alembic upgrade head
 	@echo "[make] Database reset complete with fresh schema."
 

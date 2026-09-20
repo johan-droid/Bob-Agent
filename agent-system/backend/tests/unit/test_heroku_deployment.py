@@ -12,10 +12,8 @@ from agent_system.infra.db import _normalize_url
 def test_clean_imports() -> None:
     """Verify primary application modules import cleanly without errors."""
     import agent_system.api.main as main_mod
-    import agent_system.worker as worker_mod
 
     assert main_mod.app is not None
-    assert callable(worker_mod.execute_task)
     assert Settings is not None
 
 

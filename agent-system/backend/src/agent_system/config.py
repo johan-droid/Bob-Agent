@@ -35,7 +35,6 @@ class Settings(BaseSettings):
     port: int | None = None
     api_session_secret: str = "dev-only-secret-change-me"
     agent_bootstrap_secret: str = "dev-only-secret-change-me"
-    redis_url: str = "redis://localhost:6379/0"
     # CORS origins (comma-separated). Settings-driven; defaults to local UI.
     api_cors_origins: str = "http://localhost:3000"
 
@@ -66,11 +65,9 @@ class Settings(BaseSettings):
     # to comma-separated binary prefixes (empty = any binary, approval-gated).
     heroku_jail: bool = False
     heroku_shell_allowlist: str = ""
-    # Cloud inline execution (no Redis/RQ worker): Telegram goals are driven
-    # in-process via services/cloud.drive_session in a background thread.
-    # Local dev keeps this off (make start runs the real RQ worker).
+    # Inline execution: tasks are driven in-process via task_runner / Orchestrator.
     task_runner_recovery_enabled: bool = True
-    cloud_inline_run: bool = False
+    cloud_inline_run: bool = True
     # Cloud vault: persist memory notes to the database (memory_notes table)
     # instead of the Obsidian file vault (ephemeral on dynos). Local dev
     # keeps the file vault.

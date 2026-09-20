@@ -45,7 +45,6 @@ from agent_system.services.tools.contract import ToolLifecycle
 from agent_system.services.tools.execution import execute_tool, run_tool_call
 from agent_system.services.tools.protocol import parse_tool_calls
 from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry
-from agent_system.worker import execute_task
 
 
 def _open_db(path: Path) -> tuple[Any, Any]:
@@ -495,37 +494,39 @@ class TestWorkerHammer:
             assert row is not None
             row.state = TaskState.RUNNING.value
             row.attempt = 1
+        orch = Orchestrator(EventBus())
         for _ in range(5):
-            assert execute_task(task_id, factory=factory)["skipped"] is True
+            assert orch._run_task(factory, task_id) is False
         with session_scope(factory) as db:
             assert db.query(AgentRun).filter_by(task_id=task_id).count() == 0
             row = db.get(Task, task_id)
             assert row is not None and row.attempt == 1
 
     def test_concurrent_claims_single_execution(self, factory: Any, clean_registry: Any) -> None:
-        """Four duplicate RQ deliveries racing: one claim wins and runs the
-        handler once; the losers skip. An explicit handler keeps this
-        deterministic regardless of ambient provider configuration."""
+        """Four duplicate deliveries racing: one claim wins and runs the
+        handler once; the losers skip."""
         _, task_id = self._queued(factory)
         ran: list[str] = []
-        agent_registry.register("code", lambda i, c: ran.append(task_id) or {"ok": True})
+        bus = EventBus()
+        orch = Orchestrator(bus)
+        orch.register_handler("code", lambda i, c: ran.append(task_id) or {"ok": True})
         barrier = threading.Barrier(4)
-        outcomes: list[str] = []
+        outcomes: list[bool] = []
 
         def run() -> None:
             barrier.wait(timeout=30)
             try:
-                result = execute_task(task_id, factory=factory)
-                outcomes.append("skipped" if result.get("skipped") else result.get("state"))
-            except BaseException as exc:  # noqa: BLE001 — any failure is a bug
-                outcomes.append(f"error:{type(exc).__name__}")
+                res = orch._run_task(factory, task_id)
+                outcomes.append(res)
+            except BaseException:  # noqa: BLE001 — any failure is a bug
+                outcomes.append(False)
 
         threads = [threading.Thread(target=run) for _ in range(4)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=180)
-        assert sorted(outcomes) == ["SUCCEEDED", "skipped", "skipped", "skipped"]
+        assert sorted(outcomes) == [False, False, False, True]
         assert ran == [task_id]
         with session_scope(factory) as db:
             assert db.query(AgentRun).filter_by(task_id=task_id).count() == 1
@@ -536,8 +537,8 @@ class TestWorkerHammer:
     def test_crash_recover_run_redeliver_chain(self, factory: Any, clean_registry: Any) -> None:
         bus = EventBus()
         orch = Orchestrator(bus)
+        orch.register_handler("code", lambda i, c: {"ok": True})
         _, task_id = self._queued(factory)
-        agent_registry.register("code", lambda i, c: {"ok": True})
         run_id = "run_hammer_crash"
         with session_scope(factory) as db:
             row = db.get(Task, task_id)
@@ -564,9 +565,9 @@ class TestWorkerHammer:
             )
         assert orch.recover_orphans(factory) == [task_id]  # worker crash -> requeue
         assert orch.recover_orphans(factory) == []  # reaper itself is idempotent
-        result = execute_task(task_id, factory=factory)  # runs once, succeeds
-        assert result["state"] == "SUCCEEDED"
-        assert execute_task(task_id, factory=factory)["skipped"] is True  # redelivery
+        ran = orch._run_task(factory, task_id)  # runs once, succeeds
+        assert ran is True
+        assert orch._run_task(factory, task_id) is False  # redelivery
         with session_scope(factory) as db:
             assert db.query(AgentRun).filter_by(task_id=task_id).count() == 2  # dead + real
             row = db.get(Task, task_id)

@@ -55,11 +55,9 @@ class TestSubprocessJail:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("JAILTEST_API_KEY", "sk-should-not-leak-1234567890")
-        monkeypatch.setenv("JAILTEST_REDIS_URL", "redis://secret")
         monkeypatch.setenv("DATABASE_URL", "postgres://secret")
         out = SubprocessJail().run(str(tmp_path), "env")
         assert "sk-should-not-leak-1234567890" not in out["stdout"]
-        assert "redis://secret" not in out["stdout"]
         assert "postgres://secret" not in out["stdout"]
 
     def test_timeout_raises(self, tmp_path: Path) -> None:

@@ -831,15 +831,14 @@ class TelegramService:
             chat_id,
             f"Session created: {session_id}\nGoal: {goal[:200]}",
         )
-        # Cloud (CLOUD_INLINE_RUN): no RQ worker, so drive in-process.
+        # Drive session in-process in a background thread.
         # The web request must return fast; Telegram retries slow responses.
-        if self._settings.is_cloud_inline:
-            thread = threading.Thread(
-                target=self._drive_and_report,
-                args=(chat_id, session_id),
-                daemon=True,
-            )
-            thread.start()
+        thread = threading.Thread(
+            target=self._drive_and_report,
+            args=(chat_id, session_id),
+            daemon=True,
+        )
+        thread.start()
 
     def _drive_and_report(self, chat_id: int, session_id: str) -> None:
         try:

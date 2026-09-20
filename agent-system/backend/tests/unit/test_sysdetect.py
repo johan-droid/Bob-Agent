@@ -14,8 +14,8 @@ class TestDetect:
         assert report.arch
         assert report.cpu_count >= 1
         assert report.python_version
-        assert set(report.tools) == {"uv", "git", "docker", "redis-server", "docker-compose"}
-        assert set(report.ports_in_use) == {8000, 6379}
+        assert set(report.tools) == {"uv", "git", "docker", "docker-compose"}
+        assert set(report.ports_in_use) == {8000}
         assert isinstance(report.warnings, list)
 
     def test_python_ok_on_supported_interpreter(self) -> None:

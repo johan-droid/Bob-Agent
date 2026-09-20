@@ -308,11 +308,6 @@ def _section_env(defaults: dict[str, str], out: dict[str, str], yes: bool) -> No
 
     report = sysdetect.detect_environment()
     sysdetect.render_report(report)
-    if not report.redis_reachable and not report.tools["docker-compose"].found:
-        _console.print(
-            "[dim]Tip: start Redis with [bold]make up[/bold] (needs Docker), "
-            "or point REDIS_URL at an existing server.[/dim]"
-        )
     if not yes:
         _console.print("")
 

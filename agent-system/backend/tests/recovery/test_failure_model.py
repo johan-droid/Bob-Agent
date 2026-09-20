@@ -28,7 +28,6 @@ WebSocket-flap matrix still needs live infrastructure by definition.
 
 from __future__ import annotations
 
-import socket
 import threading
 import time
 from datetime import timedelta
@@ -38,7 +37,6 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from redis.exceptions import RedisError
 
 from agent_system.agents import registry as agent_registry
 from agent_system.api.main import app
@@ -63,7 +61,6 @@ from agent_system.services.sandbox import (
 from agent_system.services.task_runner import sweep_backlog
 from agent_system.services.tools.builtin import browser as browser_mod
 from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry
-from agent_system.worker import enqueue_task, execute_task
 
 
 def _open_db(path: Path) -> tuple[Any, Any]:
@@ -222,38 +219,6 @@ class TestApiDies:
 
 
 # ---------------------------------------------------------------------------
-# Redis dies — the queue path fails loudly; work stays durable and recoverable
-# ---------------------------------------------------------------------------
-
-
-class TestRedisDies:
-    def test_enqueue_with_dead_redis_raises_loudly(self, factory: Any) -> None:
-        """Nothing in the runtime enqueues (in-process kicks + sweep do), but
-        the RQ path must never silently drop work: dead Redis raises, and the
-        task sits QUEUED, recoverable by the next sweep."""
-        try:
-            socket.create_connection(("127.0.0.1", 9), timeout=1.0).close()
-            pytest.skip("something answers on 127.0.0.1:9 — not a dead Redis")
-        except OSError:
-            pass
-        bus = EventBus()
-        sup = Supervisor(bus)
-        session_id = sup.create_session(factory, "redis down")
-        task_id = sup.add_task(factory, session_id, "code", "queued")
-        with session_scope(factory) as db:
-            row = db.get(Task, task_id)
-            assert row is not None
-            row.state = TaskState.QUEUED.value
-        with pytest.raises(RedisError):
-            enqueue_task(factory, redis_url="redis://127.0.0.1:9/0", task_id=task_id)
-        # Nothing lost, nothing half-enqueued: still QUEUED, and a sweep
-        # (which never touches Redis) would find exactly this task.
-        assert _task_state(factory, task_id)[0] == "QUEUED"
-        with session_scope(factory) as db:
-            assert db.query(Task).filter_by(state=TaskState.QUEUED.value).count() == 1
-
-
-# ---------------------------------------------------------------------------
 # DB locks — WAL + busy timeout: readers never block, writers serialize
 # ---------------------------------------------------------------------------
 
@@ -341,8 +306,10 @@ class TestLlmTimeout:
             row = db.get(Task, task_id)
             assert row is not None
             row.state = TaskState.QUEUED.value
-        with pytest.raises(TimeoutError):
-            execute_task(task_id, factory=factory)
+        orch = Orchestrator(bus)
+        orch.register_handler("code", timeout_handler)
+        res = orch._run_task(factory, task_id)
+        assert res is False
         with session_scope(factory) as db:
             row = db.get(Task, task_id)
             assert row is not None

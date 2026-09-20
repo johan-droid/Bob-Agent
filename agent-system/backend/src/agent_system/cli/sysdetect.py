@@ -19,8 +19,8 @@ from dataclasses import asdict, dataclass, field
 #: Minimum supported interpreter for the backend (matches pyproject).
 MIN_PYTHON = (3, 12)
 
-#: Ports the stack cares about: API server + Redis/RQ.
-CHECK_PORTS = (8000, 6379)
+#: Ports the stack cares about: API server.
+CHECK_PORTS = (8000,)
 
 #: Version flags tried per tool (first one that works wins).
 _VERSION_FLAGS = ("--version", "-V", "-v", "version")
@@ -51,7 +51,6 @@ class SystemReport:
     python_ok: bool
     tools: dict[str, ToolStatus] = field(default_factory=dict)
     ports_in_use: dict[int, bool] = field(default_factory=dict)
-    redis_reachable: bool = False
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
@@ -119,14 +118,11 @@ def _probe_tool(cmd: str, hint: str) -> ToolStatus:
 
 
 def probe_tools() -> dict[str, ToolStatus]:
-    """Probe the executables the stack needs (uv/git/docker/redis)."""
+    """Probe the executables the stack needs (uv/git/docker)."""
     tools = {
         "uv": _probe_tool("uv", "Install uv: https://docs.astral.sh/uv/#installation"),
         "git": _probe_tool("git", "Install git from https://git-scm.com/downloads"),
-        "docker": _probe_tool("docker", "Install Docker or use SQLite+local Redis instead"),
-        "redis-server": _probe_tool(
-            "redis-server", "No local redis — `make up` provides it via Docker"
-        ),
+        "docker": _probe_tool("docker", "Install Docker for sandbox isolation (optional)"),
     }
     compose = shutil.which("docker-compose")
     compose_plugin = False
@@ -159,23 +155,6 @@ def _port_in_use(port: int) -> bool:
         sock.close()
 
 
-def _redis_reachable() -> bool:
-    """True when something answers on the Redis port (local or via compose)."""
-    host = os.environ.get("REDIS_HOST", "127.0.0.1")
-    try:
-        port = int(os.environ.get("REDIS_PORT", "6379"))
-    except ValueError:
-        port = 6379
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1.5)
-    try:
-        return sock.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-    finally:
-        sock.close()
-
-
 def detect_environment() -> SystemReport:
     """Probe this machine and summarize what setup must do."""
     py = sys.version_info
@@ -183,7 +162,6 @@ def detect_environment() -> SystemReport:
     python_ok = (py.major, py.minor) >= MIN_PYTHON
     tools = probe_tools()
     ports = {p: _port_in_use(p) for p in CHECK_PORTS}
-    redis_ok = _redis_reachable()
 
     warnings: list[str] = []
     if not python_ok:
@@ -192,11 +170,6 @@ def detect_environment() -> SystemReport:
         warnings.append("uv not found — the installer can fetch it automatically.")
     if not tools["git"].found:
         warnings.append("git not found — needed to clone the repo / import skills from git.")
-    if not redis_ok and not tools["docker-compose"].found:
-        warnings.append(
-            "No Redis reachable and no docker compose — the RQ worker needs "
-            "Redis (`make up` starts it via Docker)."
-        )
     if ports.get(8000):
         warnings.append("Port 8000 is already in use — `make start` may fail to bind.")
 
@@ -212,7 +185,6 @@ def detect_environment() -> SystemReport:
         python_ok=python_ok,
         tools=tools,
         ports_in_use=ports,
-        redis_reachable=redis_ok,
         warnings=warnings,
     )
 
@@ -235,15 +207,13 @@ def render_report(report: SystemReport) -> None:
         "Python",
         f"[{('green' if report.python_ok else 'red')}]{py_mark}[/] {report.python_version}",
     )
-    for tool in ("uv", "git", "docker", "docker-compose", "redis-server"):
+    for tool in ("uv", "git", "docker", "docker-compose"):
         status = report.tools[tool]
         if status.found:
             detail = status.version or "found"
             table.add_row(tool, f"[green]✓[/] {detail}")
         else:
             table.add_row(tool, f"[dim]– missing[/dim] [dim]({status.hint})[/dim]")
-    redis_mark = "[green]✓ reachable[/]" if report.redis_reachable else "[dim]– not reachable[/dim]"
-    table.add_row("Redis :6379", redis_mark)
     for port, busy in report.ports_in_use.items():
         table.add_row(f"Port {port}", "[yellow]in use[/]" if busy else "[green]free[/]")
     console.print(table)

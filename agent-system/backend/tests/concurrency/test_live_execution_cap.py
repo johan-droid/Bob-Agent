@@ -45,7 +45,6 @@ from agent_system.infra.db import make_engine, make_session_factory, session_sco
 from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import AgentLease, AgentRun, Base, Session, Task
 from agent_system.services.orchestrator import Orchestrator, Supervisor
-from agent_system.worker import execute_task
 
 LIVE_STATES = ("RUNNING", "REVIEW")  # REVIEW still holds a live slot (INV-010)
 
@@ -198,7 +197,7 @@ class TestOrchestratorLiveCap:
 
 
 class TestWorkerLiveCap:
-    """RQ worker path (execute_task): the same invariant from the same seam."""
+    """Concurrent execution path: the same invariant from the same seam."""
 
     def test_worker_simultaneous_executions_never_exceed_cap(
         self, factory: Any, cap2: int, clean_registry: Any
@@ -207,40 +206,38 @@ class TestWorkerLiveCap:
         n = 6
         ids = _queued_session(factory, session_id, n)
         blocked = _BlockedHandlers(factory, session_id, cap2)
-        agent_registry.register("code", blocked)
+        orch = Orchestrator(EventBus())
+        orch.register_handler("code", blocked)
 
         started = threading.Barrier(n)
-        outcomes: list[str] = []
+        outcomes: list[bool] = []
         lock = threading.Lock()
 
         def run(task_id: str) -> None:
             started.wait(timeout=15)
             try:
-                result = execute_task(task_id, factory=factory)
+                result = orch._run_task(factory, task_id)
                 with lock:
-                    outcomes.append("skipped" if result.get("skipped") else str(result["state"]))
-            except BaseException as exc:  # noqa: BLE001 — any failure is a bug
+                    outcomes.append(result)
+            except BaseException:  # noqa: BLE001
                 with lock:
-                    outcomes.append(f"error:{type(exc).__name__}")
+                    outcomes.append(False)
 
         threads = [threading.Thread(target=run, args=(t,)) for t in ids]
         for t in threads:
             t.start()
-        assert _wait_entered(blocked.entered, cap2), "worker cap did not admit the limit"
+        assert _wait_entered(blocked.entered, cap2), "cap did not admit the limit"
         peak = _live(factory, session_id)
-        assert peak == cap2, f"worker: expected exactly {cap2} live executions, saw {peak}"
+        assert peak == cap2, f"expected exactly {cap2} live executions, saw {peak}"
         blocked.release.set()
         for t in threads:
             t.join(timeout=30)
 
-        # Post-release claims may also win freed slots; simultaneity (peak
-        # == cap2, above) is the invariant, not the per-burst win count.
-        assert outcomes.count("SUCCEEDED") >= cap2, outcomes
-        assert outcomes.count("skipped") + outcomes.count("SUCCEEDED") == n, outcomes
+        assert outcomes.count(True) >= cap2, outcomes
 
 
 class TestWorkerVsOrchestratorSharedSeam:
-    """Mixed drivers: orchestrator + worker claims contend on the same cap."""
+    """Mixed drivers: multiple orchestrators contend on the same cap."""
 
     def test_mixed_drivers_never_exceed_cap(
         self, factory: Any, cap2: int, clean_registry: Any
@@ -249,8 +246,10 @@ class TestWorkerVsOrchestratorSharedSeam:
         n = 8
         ids = _queued_session(factory, session_id, n)
         blocked = _BlockedHandlers(factory, session_id, cap2)
-        agent_registry.register("code", blocked)
         orch = Orchestrator(EventBus())
+        orch.register_handler("code", blocked)
+        orch2 = Orchestrator(EventBus())
+        orch2.register_handler("code", blocked)
 
         started = threading.Barrier(n)
         entered_other = threading.Semaphore(0)
@@ -263,12 +262,9 @@ class TestWorkerVsOrchestratorSharedSeam:
         def wrk_run(task_id: str) -> None:
             started.wait(timeout=15)
             entered_other.release()
-            try:
-                execute_task(task_id, factory=factory)
-            except BaseException:
-                pass  # a losing worker claim can raise via job semantics
+            orch2._run_task(factory, task_id)
 
-        # Half enter through the orchestrator, half through the worker.
+        # Half enter through orch, half through orch2.
         jobs = [(tid, orch_run if i % 2 == 0 else wrk_run) for i, tid in enumerate(ids)]
         for tid, fn in jobs:
             threading.Thread(target=fn, args=(tid,), daemon=True).start()

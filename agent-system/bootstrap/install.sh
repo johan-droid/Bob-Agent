@@ -187,7 +187,7 @@ fi
 
 # Check for docker (warn but don't fail)
 if ! command -v docker >/dev/null 2>&1; then
-  echo "[install] Docker not found — needed for Redis." >&2
+  echo "[install] Docker not found — needed for sandbox container isolation (optional)." >&2
   print_docker_hints
 fi
 
