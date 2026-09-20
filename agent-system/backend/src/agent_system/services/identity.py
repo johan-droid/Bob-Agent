@@ -141,8 +141,12 @@ class IdentityService:
         return IdentityMode(getattr(self._settings, "agent_identity_mode", "local"))
 
     def allowed_user_ids(self) -> set[str]:
-        raw = str(getattr(self._settings, "telegram_allowed_user_ids", "") or "")
-        return {p.strip() for p in raw.split(",") if p.strip()}
+        raw_users = str(getattr(self._settings, "telegram_allowed_user_ids", "") or "")
+        users = {p.strip() for p in raw_users.split(",") if p.strip()}
+        if not users:
+            raw_chats = str(getattr(self._settings, "telegram_allowed_chat_ids", "") or "")
+            users = {p.strip() for p in raw_chats.split(",") if p.strip()}
+        return users
 
     def operator(self) -> Principal:
         if self.mode is IdentityMode.LOCAL:

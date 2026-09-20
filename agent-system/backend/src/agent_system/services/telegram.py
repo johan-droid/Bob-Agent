@@ -618,7 +618,7 @@ class TelegramService:
         """Log a silent denial — no oracle to probing senders (spec §10)."""
         tid = str(from_user.get("id")) if from_user else "unknown"
         _logger.info(
-            "telegram update from chat %s (user %s) ignored (not provisioned)",
+            "gateway.identity.denied update from chat %s (user %s) ignored (not provisioned)",
             chat_id,
             tid,
         )

@@ -32,6 +32,7 @@ engine serves Telegram / Web / CLI / API.
 from __future__ import annotations
 
 import logging
+import threading
 from collections import deque
 from typing import Any
 
@@ -348,6 +349,8 @@ class GatewayExecutor:
         self._settings = settings
         self._factory = factory
         self._bus = bus
+        self._in_flight: set[int] = set()
+        self._in_flight_lock = threading.Lock()
         from agent_system.services.outbox import Outbox
 
         self._outbox = Outbox(factory, settings)
@@ -399,8 +402,9 @@ class GatewayExecutor:
 
     # -- pipeline stages --------------------------------------------------------
 
-    def process_pending(self, limit: int = 20) -> int:
+    def process_pending(self, limit: int = 20, background: bool = False) -> int:
         """Claim and execute unprocessed updates. Returns count processed."""
+        _logger.info("gateway.pending.start limit=%s", limit)
         with session_scope(self._factory) as db:
             pending = (
                 db.query(TelegramUpdate.update_id)
@@ -411,11 +415,19 @@ class GatewayExecutor:
             )
         processed = 0
         for (update_id,) in pending:
+            uid = int(update_id)
+            with self._in_flight_lock:
+                if uid in self._in_flight:
+                    continue
+                self._in_flight.add(uid)
             try:
-                self._process_one(int(update_id))
+                self._process_one(uid, background=background)
                 processed += 1
-            except Exception:
-                _logger.exception("gateway executor failed for update %s", update_id)
+            except Exception as exc:
+                with self._in_flight_lock:
+                    self._in_flight.discard(uid)
+                _logger.exception("gateway executor failed for update %s: %s", update_id, exc)
+        _logger.info("gateway.pending.complete processed=%s", processed)
         return processed
 
     def _resolve_owner(self, account_id: str | None, chat_id: int | None = None) -> str | None:
@@ -533,21 +545,62 @@ class GatewayExecutor:
             if row is not None and row.processing_status != "COMPLETED":
                 row.processing_status = "COMPLETED"
 
-    def _process_one(self, update_id: int) -> None:
+    def _drive_and_finish(self, update_id: int, session_id: str, chat_id: int) -> None:
+        from agent_system.services.cloud import drive_session
+
+        try:
+            _logger.info("telegram.agent.started session_id=%s", session_id)
+            drive_session(self._factory, self._bus, session_id)
+            _logger.info("telegram.task.completed session_id=%s", session_id)
+        except Exception as exc:
+            _logger.exception(
+                "telegram.agent.failed update_id=%s chat_id=%s session_id=%s error=%s",
+                update_id,
+                chat_id,
+                session_id,
+                exc,
+            )
+            self._outbox.enqueue(
+                kind=KIND_RESULT,
+                chat_id=chat_id,
+                text=f"❌ Session failed: {str(exc)[:1000]}",
+            )
+        finally:
+            try:
+                self._relay.flush()
+                self._gateway_done(update_id)
+                self._mark_processed(update_id)
+            finally:
+                with self._in_flight_lock:
+                    self._in_flight.discard(update_id)
+
+    def _process_one(self, update_id: int, background: bool = False) -> None:
         account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
-        _logger.info("telegram.update.claimed update_id=%s chat_id=%s", update_id, chat_id)
+        _logger.info("gateway.update.claimed update_id=%s chat_id=%s", update_id, chat_id)
         owner = self._resolve_owner(account_id, chat_id=chat_id)
-        if not text or chat_id is None or owner is None:
+        if owner is None:
+            _logger.info(
+                "gateway.identity.denied update_id=%s chat_id=%s account_id=%s",
+                update_id,
+                chat_id,
+                account_id,
+            )
             self._mark_processed(update_id)
+            with self._in_flight_lock:
+                self._in_flight.discard(update_id)
+            return
+        if not text or chat_id is None:
+            self._mark_processed(update_id)
+            with self._in_flight_lock:
+                self._in_flight.discard(update_id)
             return
         _logger.info(
-            "telegram.identity.resolved update_id=%s chat_id=%s owner=%s",
+            "gateway.identity.resolved update_id=%s chat_id=%s owner=%s",
             update_id,
             chat_id,
             owner,
         )
-        # Durable ack + exactly one master task, via the normal runtime seams.
-        from agent_system.services.cloud import drive_session, ensure_session_tasks
+        from agent_system.services.cloud import ensure_session_tasks
         from agent_system.services.orchestrator import Supervisor
 
         self._gateway_begin(update_id, chat_id, user_id, message_id)
@@ -570,7 +623,7 @@ class GatewayExecutor:
             task_ids = ensure_session_tasks(self._factory, self._bus, session_id)
             master_task_id = task_ids[0] if task_ids else None
             _logger.info(
-                "telegram.task.created update_id=%s session_id=%s task_id=%s",
+                "gateway.task.created update_id=%s session_id=%s task_id=%s",
                 update_id,
                 session_id,
                 master_task_id,
@@ -582,31 +635,19 @@ class GatewayExecutor:
                 task_id=master_task_id,
             )
             self._gateway_bound(update_id, session_id, master_task_id)
-        try:
-            _logger.info("telegram.agent.started session_id=%s", session_id)
-            drive_session(self._factory, self._bus, session_id)
-            _logger.info("telegram.task.completed session_id=%s", session_id)
-        except Exception as exc:
-            _logger.exception(
-                "telegram.agent.failed update_id=%s chat_id=%s session_id=%s error=%s",
-                update_id,
-                chat_id,
-                session_id,
-                exc,
+
+        if background:
+            import threading
+
+            thread = threading.Thread(
+                target=self._drive_and_finish,
+                args=(update_id, session_id, chat_id),
+                name=f"gateway-drive-{update_id}",
+                daemon=True,
             )
-            # Send failure notification if drive_session threw before emitting task.failed
-            self._outbox.enqueue(
-                kind=KIND_RESULT,
-                chat_id=chat_id,
-                text=f"❌ Session failed: {str(exc)[:1000]}",
-            )
-        finally:
-            # Results reach the outbox here (event subscribers only queued —
-            # the emit happens inside the orchestrator's transaction). The
-            # finally keeps the ack/result path alive even on drive failure.
-            self._relay.flush()
-            self._gateway_done(update_id)
-            self._mark_processed(update_id)
+            thread.start()
+        else:
+            self._drive_and_finish(update_id, session_id, chat_id)
 
     def _mark_processed(self, update_id: int) -> None:
         from agent_system.domain.events import utcnow
@@ -618,7 +659,7 @@ class GatewayExecutor:
 
     # -- recovery ----------------------------------------------------------------
 
-    def recover(self) -> dict[str, int]:
+    def recover(self, background: bool = False) -> dict[str, int]:
         """Restart recovery: resume undelivered work.
 
         - relay replay: events that completed but never reached the outbox
@@ -629,7 +670,7 @@ class GatewayExecutor:
         self._relay.flush()
         redelivered = self._outbox.drain()
         self._outbox.reap_stuck()
-        redriven = self.process_pending()
+        redriven = self.process_pending(background=background)
         return {
             "events_replayed": replayed,
             "outbox_redelivered": redelivered,
