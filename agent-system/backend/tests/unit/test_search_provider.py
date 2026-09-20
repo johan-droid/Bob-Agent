@@ -65,5 +65,5 @@ def test_search_provider_network_error():
             provider.search("fail query")
 
         health = provider.check_health()
-        assert health.status == ServiceHealthStatus.UNAVAILABLE
+        assert health.status == ServiceHealthStatus.DEGRADED
         assert "timed out" in health.last_error

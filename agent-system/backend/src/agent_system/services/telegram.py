@@ -221,8 +221,38 @@ class TelegramService:
             return "webhook"
         return "polling"
 
+    async def register_webhook(self, url: str | None = None) -> bool:
+        """Register Telegram bot API webhook via setWebhook."""
+        if not self.is_configured():
+            return False
+        webhook_url = url or self._settings.effective_telegram_webhook_url
+        if not webhook_url:
+            _logger.warning("Telegram webhook mode active but no webhook URL could be resolved.")
+            return False
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+        endpoint = _API_BASE.format(token=self._token) + "/setWebhook"
+        payload = {
+            "url": webhook_url,
+            "secret_token": self._settings.telegram_webhook_secret,
+            "allowed_updates": ["message", "callback_query"],
+        }
+        try:
+            resp = await self._client.post(endpoint, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("ok"):
+                _logger.info("Successfully registered Telegram webhook: %s", webhook_url)
+                return True
+            else:
+                _logger.warning("Telegram setWebhook API returned error: %s", data)
+                return False
+        except Exception as exc:
+            _logger.warning("Failed to register Telegram webhook (%s): %s", webhook_url, exc)
+            return False
+
     async def start(self) -> None:
-        """Begin listening. In polling mode spawns a background thread + loop."""
+        """Begin listening (spawns polling loop thread or registers webhook)."""
         if not self.is_configured():
             return
         try:
@@ -233,6 +263,8 @@ class TelegramService:
                     target=self._run_polling_loop, args=(self._loop,), daemon=True
                 )
                 self._thread.start()
+            elif self.transport == "webhook":
+                await self.register_webhook()
         except Exception as exc:
             self._startup_error = str(exc)
             _logger.exception("telegram service start failed")

@@ -1,371 +1,175 @@
-# Bob Agent
+# Bob Agent — Telegram-Only Cloud Agent
 
-## Overview
+Bob Agent is a **Telegram-controlled cloud agent** running its computation, orchestration, and tool execution on **Heroku**.
 
-Bob Agent is a **local-first autonomous multi-agent AI system**. You state a goal, and Bob decomposes it into an explicit task DAG, executes each task using a ReAct (Reason+Act) LLM agent with a real tool registry, and every step lands on an inspectable event stream. Your data stays on your machine — no cloud lock-in, no telemetry by default.
+The product operational model is:
 
-Bob Agent provides **two interfaces** for interacting with the system:
-
-- **CLI (Command-Line Interface)** — A powerful terminal REPL with slash commands for power users who prefer keyboard-driven workflows.
-- **Web Dashboard** — A ChatGPT-style admin dashboard built with Next.js for visual task management, configuration, and monitoring.
-
-After the initial CLI setup, you can choose to stick with the CLI or switch to the web interface — or use both simultaneously.
-
-## Features
-
-### Core Capabilities
-
-- **Real LLM Task Execution** — Goals are run through a ReAct loop: the model reasons in text and calls typed tools via fenced code blocks. Works with any LLM provider.
-- **12 LLM Providers + Offline Echo Mode** — OpenAI, Anthropic, Groq, Ollama, OpenRouter, Together, Mistral, Gemini, DeepSeek, HuggingFace, FreeLLMAPI, TokenRouter. Boots with zero keys configured.
-- **Tool Registry** — Shell, file operations, web fetch, memory recall/remember, task inspection, OpenConnector SaaS actions, and MCP servers.
-- **OpenConnector Integration** — Self-hosted connector gateway with 1,000+ SaaS providers and 10,000+ actions via HTTP Runtime API and implicit MCP-over-HTTP server.
-- **MCP Client** — Connect to stdio servers (npx/uvx/local binaries) and streamable HTTP endpoints with session-id replay.
-- **Vault MCP Server** — Bob ships `bob-vault-mcp`, an MCP server that keeps the Obsidian vault updated (notes, daily log, recall) and maintains a dedicated Bob Agent record (`records/bob-agent.md`). Attach it with one `MCP_SERVERS` entry; every call is approval-gated like any other capability.
-- **Pluggable Skills** — Pluggable instruction packs users and agents can create, import, enable, and configure.
-- **SOUL.md Identity** — The agent's character, injected into every model call. Edit one file to change who Bob is.
-- **Approvals + Permission Gate** — Risky actions pause for explicit approval, never slip through silently.
-- **Recordings & Replay, Recipes, Cost Tracking, Telegram Gateway**
-
-### Interfaces
-
-- **CLI Interface** — Full-featured terminal REPL with slash commands including live configuration changes.
-- **Web Dashboard** — ChatGPT-style admin interface with kanban board, chat, approvals, workspaces, vault, settings, and more.
-- **Telegram Gateway** — Interact with Bob via Telegram (polling or webhook mode).
-
-## Installation
-
-### Prerequisites
-
-- **Python 3.12+** — Required for the backend
-- **Node.js 18+** — Required for the web dashboard
-- **Git** — For cloning the repository
-- **Redis** *(optional)* — Only needed for the background RQ worker (durable task queueing, scheduled jobs, Telegram/insights processing). The CLI, API, and web dashboard run without it. `make up` starts Redis + OpenConnector via Docker.
-
-### Windows
-
-#### Option 1: One-Line Installer (Recommended)
-
-```powershell
-irm https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.ps1 | iex
+```
+USER (Telegram app)
+  │
+  ▼
+TELEGRAM
+  │
+  ▼
+HEROKU WEBHOOK (/api/v1/telegram/webhook)
+  │
+  ▼
+TELEGRAM GATEWAY & IDENTITY (AGENT_IDENTITY_MODE=telegram)
+  │
+  ▼
+BOB AGENT CORE & ORCHESTRATOR
+  │
+  ▼
+MODELS + TOOLS + MCP + WEB RESEARCH + CLOUD EXECUTION
+  │
+  ▼
+DURABLE STATE / OUTBOX (Heroku Postgres)
+  │
+  ▼
+TELEGRAM RESPONSE
 ```
 
-The installer checks prerequisites and runs the bootstrapper. A packaged
-`BobAgent-Setup.exe` release is not published yet; use Option 2 (From Source)
-if the one-liner is unavailable.
+Telegram is the **sole user communication and control channel**. Computation, model routing, task execution, tool use, approval enforcement, memory operations, and recovery run entirely in the cloud on Heroku. The user's phone is simply the Telegram client.
 
-#### Option 2: From Source
+---
 
-1. Install [Python 3.12+](https://www.python.org/downloads/windows/) and [Node.js 18+](https://nodejs.org/).
-2. Install [Git](https://git-scm.com/download/win).
-3. Clone the repository:
-   ```powershell
-   git clone https://github.com/johan-droid/Bob-Agent.git
-   cd BobAgent
-   ```
-4. Run the bootstrapper:
-   ```powershell
-   python bootstrap/bootstrap.py --yes
-   ```
+## Capabilities & Architecture
 
-### macOS
+- **Telegram Control Plane** — Operate Bob through Telegram natural-language goals or interactive slash commands (`/start`, `/help`, `/status`, `/cancel`, `/retry`, `/approve`, `/deny`, `/setup`, `/connections`, `/test`, `/rotate`, `/revoke`, `/remove`).
+- **Telegram User Identity (`AGENT_IDENTITY_MODE=telegram`)** — Resolves Telegram users to Bob user accounts, enforcing ownership, permissions, and approval boundaries.
+- **Heroku Cloud Execution** — All agent computation (ReAct loops, model calls, shell execution in jail, MCP servers, web research, scheduled work, memory, approvals) runs on Heroku.
+- **Durable Cloud Persistence** — PostgreSQL stores sessions, tasks, task state, update ledger, memory, credentials, approvals, recovery metadata, and delivery outbox across dyno restarts.
+- **Webhook Production Transport** — Automatic Telegram webhook configuration via `TELEGRAM_WEBHOOK_URL` or `HEROKU_APP_NAME` with secret token validation (`X-Telegram-Bot-Api-Secret-Token`).
+- **Inline Cloud Execution (`CLOUD_INLINE_RUN=true`)** — Tasks execute in-process on the web dyno. No separate Redis or RQ worker process is required.
+- **12+ Model Providers** — Groq, Gemini, OpenRouter, OpenAI, Anthropic, DeepSeek, Together, Mistral, HuggingFace, NIM, OpenCode, and Ollama Cloud.
+- **Administrative CLI (`agentctl`)** — Retained exclusively for administrative maintenance, development, migrations, diagnostics (`agentctl doctor`), and credential setup (`agentctl setup`).
 
-#### Option 1: One-Line Installer (Recommended)
+---
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash
-```
+## Heroku Deployment
 
-The installer checks prerequisites and runs the bootstrapper. A Homebrew tap
-is not published yet; use Option 2 (From Source) if the one-liner is
-unavailable.
+### 1. Prerequisites
+- A [Heroku](https://heroku.com) account.
+- A Telegram bot token from [@BotFather](https://t.me/BotFather).
+- At least one model provider API key (e.g. Groq, Gemini, OpenRouter, OpenAI).
 
-#### Option 2: From Source
+### 2. Deployment Steps
 
-1. Install prerequisites:
+1. **Create Heroku App**
    ```bash
-   brew install python@3.12 node git
+   heroku create my-bob-agent --stack heroku-24
    ```
-2. Clone the repository:
+
+2. **Add Heroku Postgres**
    ```bash
-   git clone https://github.com/johan-droid/Bob-Agent.git
-   cd BobAgent
+   heroku addons:create heroku-postgresql:essential-0 --app my-bob-agent
    ```
-3. Run the bootstrapper:
+
+3. **Set Required Environment Variables**
    ```bash
-   python3 bootstrap/bootstrap.py --yes
+   heroku config:set \
+     AGENT_ENV=production \
+     API_SESSION_SECRET=$(openssl rand -base64 32) \
+     AGENT_BOOTSTRAP_SECRET=$(openssl rand -base64 32) \
+     AGENT_IDENTITY_MODE=telegram \
+     TELEGRAM_BOT_TOKEN="123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" \
+     TELEGRAM_WEBHOOK_SECRET=$(openssl rand -base64 32) \
+     HEROKU_APP_NAME="my-bob-agent" \
+     CLOUD_INLINE_RUN=true \
+     CLOUD_VAULT_DB=true \
+     HEROKU_JAIL=true \
+     TOOLS_SHELL_MODE=sandbox \
+     DEFAULT_PROVIDER=groq \
+     GROQ_API_KEY="gsk_..." \
+     --app my-bob-agent
    ```
 
-### Linux
-
-#### Option 1: One-Line Installer (Recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/johan-droid/Bob-Agent/main/agent-system/bootstrap/install.sh | bash
-```
-
-The installer checks prerequisites and runs the bootstrapper. No distro
-packages (`bob-agent`) exist yet; use Option 2 (From Source) if the one-liner
-is unavailable.
-
-#### Option 2: From Source
-
-1. Install prerequisites:
+4. **Deploy Application**
    ```bash
-   # Debian/Ubuntu
-   sudo apt install python3.12 python3.12-venv nodejs npm git
-
-   # Fedora
-   sudo dnf install python3.12 nodejs npm git
-
-   # Arch
-   sudo pacman -S python nodejs npm git
+   git push heroku main
    ```
-2. Clone the repository:
+   Heroku runs database migrations automatically via the `release` phase in `Procfile` before starting the `web` process.
+
+---
+
+## Telegram Webhook Auto-Configuration
+
+Bob automatically registers its webhook endpoint with Telegram when starting up in webhook mode.
+
+### Webhook URL Resolution
+1. Explicit setting: `TELEGRAM_WEBHOOK_URL` (e.g., `https://my-bob-agent.herokuapp.com/api/v1/telegram/webhook`).
+2. Automatic Heroku setting: `HEROKU_APP_NAME` (resolves to `https://<HEROKU_APP_NAME>.herokuapp.com/api/v1/telegram/webhook`).
+
+On startup, Bob calls Telegram's `setWebhook` API with the secret token (`TELEGRAM_WEBHOOK_SECRET`). Incoming Telegram updates are validated via the `X-Telegram-Bot-Api-Secret-Token` header.
+
+---
+
+## Operating Bob via Telegram
+
+### Natural Language Goals
+Simply text Bob on Telegram:
+- *"Research the latest news on Rust 1.85 and summarize it."*
+- *"Check this repository and diagnose the bug in main.py."*
+- *"Set up an SSH integration for my home server."*
+
+### Telegram Control Commands
+| Command | Action |
+|---------|--------|
+| `/start` | Connect Bob to the chat |
+| `/help` | Show available commands and permissions |
+| `/status` | Summarize active sessions and task statuses |
+| `/cancel <task_id>` | Cancel a running task |
+| `/retry <task_id>` | Re-queue a failed task |
+| `/approve <id>` | Grant a pending approval request |
+| `/deny <id>` | Deny a pending approval request |
+| `/setup [provider]` | Step-by-step interactive integration setup |
+| `/connections` | List active connected integrations |
+| `/test <ref>` | Test connection health (e.g., `/test ssh:vps`) |
+| `/rotate <ref>` | Rotate credential for an integration |
+| `/revoke <ref>` | Revoke access for an integration |
+| `/remove <ref>` | Delete an integration credential |
+
+---
+
+## Smoke-Test Sequence
+
+1. **Verify Health & Readiness**:
    ```bash
-   git clone https://github.com/johan-droid/Bob-Agent.git
-   cd BobAgent
+   curl -s https://my-bob-agent.herokuapp.com/api/v1/health
+   # Expected: {"status": "ok"}
+
+   curl -s https://my-bob-agent.herokuapp.com/api/v1/ready
+   # Expected: {"status": "ok", "ready": true, "mode": "inline", ...}
    ```
-3. Run the bootstrapper:
-   ```bash
-   python3 bootstrap/bootstrap.py --yes
-   ```
 
-## Setup Flow
+2. **Verify Telegram Connection**:
+   - Send `/start` in Telegram → Bob replies: `"Bob Agent connected. Send a goal or use /help."`
 
-After installation, Bob Agent requires initial configuration. The setup flow is designed to get you running quickly while allowing full customization.
+3. **Verify Goal Execution**:
+   - Send a goal: `"Research Python 3.12 release notes and summarize."`
+   - Bob acknowledges, creates a session, executes tasks in Heroku cloud runtime, and returns the result in Telegram.
 
-### Step 1: Initial CLI Setup
+4. **Verify Approvals**:
+   - For high-risk actions, Bob pushes an approval button prompt to Telegram with `Approve` and `Deny` inline buttons. Tap `Approve` or send `/approve <id>`.
 
-Run the setup wizard from your terminal:
+5. **Verify Dyno Restart Recovery**:
+   - Restart dynos (`heroku restart`). Send `/status` in Telegram — sessions, tasks, and identity persist in Postgres.
 
-```bash
-cd agent-system
-make setup
-```
+---
 
-This interactive wizard will:
-- Generate required secrets
-- Configure your LLM provider (or use offline echo mode)
-- Set up authentication
-- Configure storage paths
+## Administrative CLI (`agentctl`)
 
-Alternatively, for a fully automatic setup:
+The CLI is strictly an administrative and diagnostic tool:
 
 ```bash
-python3 bootstrap/bootstrap.py --yes
+cd agent-system/backend
+uv run agentctl doctor       # Probe machine environment & system checks
+uv run agentctl setup        # Interactive credential wizard
+uv run agentctl settings     # View or edit system settings
 ```
 
-### Step 2: Choose Your Interface
-
-After basic CLI setup, you can choose how to interact with Bob Agent:
-
-#### Option A: CLI Only
-
-If you prefer the terminal, you're ready to go:
-
-```bash
-make start    # Start the backend server
-make chat     # Open the interactive REPL
-```
-
-#### Option B: Web Dashboard
-
-To use the web interface:
-
-```bash
-cd ../agent-system/web
-npm install
-npm run dev
-```
-
-Then open your browser and navigate to `http://localhost:3000`.
-
-#### Option C: Both CLI and Web
-
-You can run both interfaces simultaneously — they share the same backend:
-
-```bash
-# Terminal 1: Backend
-cd agent-system
-make start
-
-# Terminal 2: Web Dashboard
-cd agent-system/web
-npm run dev
-
-# Terminal 3: CLI (optional)
-cd agent-system
-make chat
-```
-
-## Usage
-
-### CLI Interface
-
-The CLI provides a powerful REPL with slash commands:
-
-```bash
-make chat
-```
-
-**Common CLI Commands:**
-- `/help` — Show available commands
-- `/model set <provider> [model]` — Switch LLM provider on the fly
-- `/settings set <key> <value>` — Change any configuration live
-- `/tools` — List available tools and their status
-- `/memory <fact>` — Store a fact in the vault
-- `/recall <query>` — Search the vault for relevant facts
-- `/approve <id>` — Approve a pending action
-
-**AgentCTL Commands:**
-```bash
-agentctl sessions list          # List all sessions
-agentctl tasks list --session <id>  # List tasks in a session
-agentctl approvals list         # List pending approvals
-agentctl settings list          # List all settings
-agentctl skills list            # List available skills
-```
-
-### Web Dashboard
-
-The web dashboard provides a ChatGPT-style interface at `http://localhost:3000`.
-
-**Dashboard Pages:**
-- **Chat** — Interactive chat interface with the agent
-- **Kanban** — Visual task board showing task states
-- **Approvals** — Review and approve/deny risky actions
-- **Workspaces** — Browse and manage workspace files
-- **Vault** — View and search memory notes
-- **Settings** — Configure all aspects of the system
-- **Cost** — Track LLM usage and costs
-- **Schedule** — Manage scheduled jobs
-- **Recipes** — Create and execute reusable workflows
-- **Insights** — View generated insights and analytics
-
-## Configuration
-
-### Configuration Methods
-
-Bob Agent can be configured in multiple ways:
-
-1. **Web Dashboard** — Navigate to Settings page for a visual configuration interface
-2. **CLI** — Use `agentctl settings` commands
-3. **Environment Variables** — Set in `.env.local` file
-4. **Setup Wizard** — Run `make setup` or `agentctl settings wizard`
-
-### Key Configuration Options
-
-| Category | Key | Description |
-|----------|-----|-------------|
-| **Core** | `DEFAULT_PROVIDER` | LLM provider (echo, openai, anthropic, groq, etc.) |
-| **Core** | `API_PORT` | Backend HTTP port (default: 8000) |
-| **Core** | `REDIS_URL` | Redis connection URL (only used by the background worker) |
-| **Auth** | `AGENT_BOOTSTRAP_SECRET` | Secret for API authentication |
-| **Tools** | `TOOLS_REQUIRE_APPROVAL` | Require approval for risky actions |
-| **Tools** | `TOOLS_SHELL_MODE` | Shell execution mode (sandbox/local/off) |
-| **Storage** | `VAULT_PATH` | Path to the Obsidian vault |
-| **Integrations** | `OPENCONNECTOR_BASE_URL` | OpenConnector gateway URL |
-| **Integrations** | `MCP_SERVERS` | MCP servers configuration (JSON) |
-| **Telegram** | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| **Cost** | `DAILY_BUDGET_USD` | Daily spending limit |
-
-### Configuration Precedence
-
-```
-Environment Variables > .env.local > .env > Built-in Defaults
-```
-
-### Provider Configuration
-
-Bob Agent supports 12+ LLM providers. Configure at least one:
-
-```bash
-# OpenAI
-agentctl settings set OPENAI_API_KEY sk-...
-
-# Anthropic
-agentctl settings set ANTHROPIC_API_KEY sk-ant-...
-
-# Groq (generous free tier)
-agentctl settings set GROQ_API_KEY gsk-...
-
-# Ollama (local, keyless)
-agentctl settings set OLLAMA_BASE_URL http://localhost:11434/v1
-
-# Offline echo mode (no API key required)
-agentctl settings set DEFAULT_PROVIDER echo
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### CLI Issues
-
-| Symptom | Solution |
-|---------|----------|
-| `make chat` → "No API token…" | Run `make setup`, then restart `make start` |
-| `Port 8000 in use` | Stop the other process or set `API_PORT` to a different value |
-| Worker errors on Redis | Run `make up` to start Redis via Docker |
-| Provider test fails | Check `settings get <PROVIDER>_BASE_URL` and verify your API key |
-| `settings check` fails | Check for typos in `.env.local`; use `settings unset` to reset |
-
-#### Web Dashboard Issues
-
-| Symptom | Solution |
-|---------|----------|
-| Dashboard won't load | Ensure backend is running (`make start`) |
-| "Backend unreachable" error | Check that `AGENT_SYSTEM_API_URL` points to your backend |
-| Blank page or errors | Check browser console for errors; ensure Node.js 18+ is installed |
-| Changes not saving | Verify write permissions to `.env.local` |
-| WebSocket errors | Check that the backend is running and accessible |
-
-#### Platform-Specific Issues
-
-**Windows:**
-- If `make` is not recognized, use Git Bash or WSL
-- For Python errors, ensure Python is added to PATH during installation
-- If ports are blocked, run PowerShell as Administrator
-
-**macOS:**
-- If `python3` is not found, install Xcode Command Line Tools: `xcode-select --install`
-- For permission errors, avoid using `sudo` with npm; fix permissions instead
-- If Homebrew Python is used, ensure it's in your PATH
-
-**Linux:**
-- If `uv` is not found, install it: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- For Redis connection errors, ensure Redis is running: `sudo systemctl start redis`
-- Check firewall settings if ports are blocked
-
-### Getting Help
-
-- Run `agentctl doctor` for an environment probe
-- Run `settings check` to validate your configuration
-- Check the logs in the `data/` directory
-- Open an issue on GitHub with the output of `agentctl doctor`
+---
 
 ## License
 
-This project is licensed under the MIT License.
-
-## Project Structure
-
-```
-Bob Agent/
-├── agent-system/           # Main application
-│   ├── backend/            # FastAPI backend + agent logic
-│   │   └── src/agent_system/
-│   │       ├── agents/     # ReAct agent + specialists
-│   │       ├── services/   # Tools, MCP, OpenConnector, etc.
-│   │       ├── api/        # FastAPI routes
-│   │       ├── cli/        # agentctl commands
-│   │       ├── infra/      # Database, events
-│   │       └── domain/     # Core logic
-│   ├── web/                # Next.js dashboard
-│   ├── bootstrap/          # One-shot installer
-│   ├── docs/               # Documentation
-│   ├── skills/             # Built-in skills
-│   └── tests/              # Test suite
-├── README.md
-└── .gitignore
-```
+This project is licensed under the MIT License. See `LICENSE` for details.

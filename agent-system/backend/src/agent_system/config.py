@@ -160,6 +160,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_allowed_chat_ids: str = ""
     telegram_webhook_secret: str | None = None
+    telegram_webhook_url: str = ""
+    heroku_app_name: str = ""
 
     # LLM providers (optional; system boots fine without any).
     # OpenAI-style compatibility; per-provider keys + configurable base URLs.
@@ -274,12 +276,43 @@ class Settings(BaseSettings):
             )
         env = (self.agent_env or "").lower()
         raw_env = (_os.environ.get("AGENT_ENV", "") or "").lower()
-        if (env == "production" or raw_env == "production") and using_default:
-            raise RuntimeError(
-                "Refusing to start with default dev secrets in production: "
-                "set API_SESSION_SECRET and AGENT_BOOTSTRAP_SECRET."
-            )
+        if env == "production" or raw_env == "production":
+            if using_default:
+                raise RuntimeError(
+                    "Refusing to start with default dev secrets in production: "
+                    "set API_SESSION_SECRET and AGENT_BOOTSTRAP_SECRET."
+                )
+            if not self.telegram_bot_token:
+                raise RuntimeError(
+                    "Incomplete Telegram production configuration: "
+                    "TELEGRAM_BOT_TOKEN is required in production."
+                )
+            if not self.telegram_webhook_secret:
+                raise RuntimeError(
+                    "Incomplete Telegram production configuration: "
+                    "TELEGRAM_WEBHOOK_SECRET is required in production."
+                )
+            if (self.agent_identity_mode or "").lower() != "telegram":
+                raise RuntimeError(
+                    "Incomplete Telegram production configuration: "
+                    "AGENT_IDENTITY_MODE must be set to 'telegram' in production."
+                )
         return self
+
+    @property
+    def effective_telegram_webhook_url(self) -> str:
+        """Resolve full webhook endpoint URL based on settings or Heroku app name."""
+        if self.telegram_webhook_url:
+            url = self.telegram_webhook_url.strip()
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            if not url.endswith("/api/v1/telegram/webhook"):
+                url = url.rstrip("/") + "/api/v1/telegram/webhook"
+            return url
+        if self.heroku_app_name:
+            app_name = self.heroku_app_name.strip()
+            return f"https://{app_name}.herokuapp.com/api/v1/telegram/webhook"
+        return ""
 
     @property
     def allowed_chat_ids(self) -> set[int]:
