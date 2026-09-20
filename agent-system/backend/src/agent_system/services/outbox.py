@@ -82,6 +82,7 @@ class Outbox:
             )
             db.add(row)
             db.flush()
+            logger.info("outbox.created outbox_id=%s chat_id=%s kind=%s", row.id, chat_id, kind)
             logger.info(
                 "telegram.outbox.created outbox_id=%s chat_id=%s kind=%s", row.id, chat_id, kind
             )
@@ -137,6 +138,7 @@ class Outbox:
         token = self._settings.telegram_bot_token
         if not token:
             return False
+        logger.info("outbox.send.start outbox_id=%s chat_id=%s", row.id, row.chat_id)
         logger.info("telegram.outbox.sent outbox_id=%s chat_id=%s", row.id, row.chat_id)
         if client is None and (token.startswith("test:") or token == "mock"):
             return self._mark_delivered(row)
@@ -163,6 +165,12 @@ class Outbox:
             )
             resp.raise_for_status()
         except Exception as exc:
+            logger.warning(
+                "outbox.send.failure outbox_id=%s chat_id=%s error=%s",
+                row.id,
+                row.chat_id,
+                _scrub_error(exc),
+            )
             logger.warning(
                 "telegram.delivery.failed outbox_id=%s chat_id=%s error=%s",
                 row.id,
@@ -201,6 +209,7 @@ class Outbox:
             )
             db.commit()
             if affected > 0:
+                logger.info("outbox.send.success outbox_id=%s chat_id=%s", row.id, row.chat_id)
                 logger.info(
                     "telegram.response.delivered outbox_id=%s chat_id=%s", row.id, row.chat_id
                 )

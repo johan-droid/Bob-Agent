@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     from agent_system.services.outbox import Outbox
 
                     executor = GatewayExecutor(settings, recovery_factory, recovery_bus)
-                    executor.recover()
+                    executor.recover(background=True)
                     Outbox(recovery_factory, settings).drain()
                 except Exception as exc:
                     import logging as _logging
