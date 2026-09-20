@@ -142,6 +142,12 @@ class TelegramService:
         )
         # Outbox — None when no DB factory (tests, ephemeral local).
         self._outbox = Outbox(session_factory, settings) if session_factory else None
+        # Gateway executor for update -> session/task execution pipeline
+        from agent_system.services.gateway import GatewayExecutor
+
+        self._executor = (
+            GatewayExecutor(settings, session_factory, bus) if session_factory else None
+        )
         # Backward-compat chat-id allowlist for local / pre-identity mode.
         self._allowed = settings.allowed_chat_ids
         self._token = settings.telegram_bot_token
@@ -256,6 +262,8 @@ class TelegramService:
         if not self.is_configured():
             return
         try:
+            if self._executor is not None:
+                self._executor.start()
             self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
             if self.transport == "polling":
                 self._loop = asyncio.new_event_loop()
@@ -283,6 +291,8 @@ class TelegramService:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        if self._executor is not None:
+            self._executor.stop()
 
     def _run_polling_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
@@ -457,13 +467,13 @@ class TelegramService:
         update_id = update.get("update_id")
         message = update.get("message")
         callback = update.get("callback_query")
+        uid = int(update_id) if update_id is not None else None
         if message:
-            await self._handle_message(message)
+            await self._handle_message(message, update_id=uid)
         elif callback:
-            await self._handle_callback(callback)
-        # No message/callback payload still counts as handled (no-op).
-        if update_id is not None:
-            self._mark_processed(int(update_id))
+            await self._handle_callback(callback, update_id=uid)
+        elif uid is not None:
+            self._mark_processed(uid)
 
     def _log_update(self, update: dict[str, Any]) -> bool:
         """Record the update in the ingest ledger. Returns True to process.
@@ -529,40 +539,63 @@ class TelegramService:
             if row is not None and row.processed_at is None:
                 row.processed_at = utcnow()
 
-    async def _handle_message(self, message: dict[str, Any]) -> None:
+    async def _handle_message(self, message: dict[str, Any], update_id: int | None = None) -> None:
         chat = message.get("chat", {})
         from_chat = chat.get("id")
         from_user = message.get("from", {})
         text = (message.get("text") or "").strip()
         if from_chat is None:
+            if update_id is not None:
+                self._mark_processed(update_id)
             return
         principal = self._resolve_principal(from_chat, from_user)
         if principal is None:
             self._audit_denied(from_chat, from_user)
+            if update_id is not None:
+                self._mark_processed(update_id)
             return
         if not text:
+            if update_id is not None:
+                self._mark_processed(update_id)
             return
         if await self._handle_active_setup_step(principal, from_chat, text):
+            if update_id is not None:
+                self._mark_processed(update_id)
             return
-        await self._dispatch_command(principal, from_chat, text)
+        lower = text.lower().split()
+        cmd_name = lower[0] if lower else ""
+        if cmd_name not in self._commands:
+            await self._create_session(principal, from_chat, text, update_id=update_id)
+            return
+        try:
+            await self._dispatch_command(principal, from_chat, text)
+        finally:
+            if update_id is not None:
+                self._mark_processed(update_id)
 
-    async def _handle_callback(self, callback: dict[str, Any]) -> None:
-        from_chat = callback.get("message", {}).get("chat", {}).get("id")
-        from_user = callback.get("from", {})
-        data = callback.get("data") or ""
-        chat_id = from_chat or from_user.get("id")
-        if chat_id is None:
-            return
-        principal = self._resolve_principal(chat_id, from_user)
-        if principal is None:
-            self._audit_denied(chat_id, from_user)
-            return
-        if data.startswith("approve:"):
-            approval_id = data.split(":", 1)[1]
-            await self._cmd_approve_run(principal, chat_id, approval_id, approve=True)
-        elif data.startswith("deny:"):
-            approval_id = data.split(":", 1)[1]
-            await self._cmd_approve_run(principal, chat_id, approval_id, approve=False)
+    async def _handle_callback(
+        self, callback: dict[str, Any], update_id: int | None = None
+    ) -> None:
+        try:
+            from_chat = callback.get("message", {}).get("chat", {}).get("id")
+            from_user = callback.get("from", {})
+            data = callback.get("data") or ""
+            chat_id = from_chat or from_user.get("id")
+            if chat_id is None:
+                return
+            principal = self._resolve_principal(chat_id, from_user)
+            if principal is None:
+                self._audit_denied(chat_id, from_user)
+                return
+            if data.startswith("approve:"):
+                approval_id = data.split(":", 1)[1]
+                await self._cmd_approve_run(principal, chat_id, approval_id, approve=True)
+            elif data.startswith("deny:"):
+                approval_id = data.split(":", 1)[1]
+                await self._cmd_approve_run(principal, chat_id, approval_id, approve=False)
+        finally:
+            if update_id is not None:
+                self._mark_processed(update_id)
 
     def _audit_denied(self, chat_id: int, from_user: dict[str, Any] | None) -> None:
         """Log a silent denial — no oracle to probing senders (spec §10)."""
@@ -842,7 +875,25 @@ class TelegramService:
 
     # -- core handlers (kept from legacy, identity-wired) -------------------
 
-    async def _create_session(self, principal: Principal, chat_id: int, goal: str) -> None:
+    async def _create_session(
+        self,
+        principal: Principal,
+        chat_id: int,
+        goal: str,
+        update_id: int | None = None,
+    ) -> None:
+        if self._executor is not None and update_id is not None:
+            # Delegate to GatewayExecutor pipeline in background thread.
+            # Do NOT mark processed here — GatewayExecutor marks processed
+            # after execution finishes (ensuring crash recovery if dyno restarts).
+            thread = threading.Thread(
+                target=self._run_executor_for_update,
+                args=(update_id,),
+                daemon=True,
+            )
+            thread.start()
+            return
+
         owner_id = principal.user_id
         try:
             session_id = self._supervisor.create_session(
@@ -850,6 +901,8 @@ class TelegramService:
             )
         except Exception as exc:
             await self._send(chat_id, f"Failed to create session: {exc}")
+            if update_id is not None:
+                self._mark_processed(update_id)
             return
         # Durable chat<->session mapping: lets the terminal-result relay find
         # this chat after a restart (Telegram Gateway E2E, additive).
@@ -861,7 +914,7 @@ class TelegramService:
             _logger.exception("telegram: session-chat mapping failed (session %s)", session_id)
         await self._send(
             chat_id,
-            f"Session created: {session_id}\nGoal: {goal[:200]}",
+            f"Task accepted: {session_id}\nGoal: {goal[:200]}",
         )
         # Drive session in-process in a background thread.
         # The web request must return fast; Telegram retries slow responses.
@@ -871,6 +924,17 @@ class TelegramService:
             daemon=True,
         )
         thread.start()
+        if update_id is not None:
+            self._mark_processed(update_id)
+
+    def _run_executor_for_update(self, update_id: int) -> None:
+        try:
+            if self._executor is not None:
+                self._executor._process_one(update_id)
+                if self._outbox is not None:
+                    self._outbox.drain()
+        except Exception as exc:
+            _logger.exception("Telegram gateway execution failed for update %s: %s", update_id, exc)
 
     def _drive_and_report(self, chat_id: int, session_id: str) -> None:
         try:
@@ -1071,8 +1135,8 @@ class TelegramService:
                 },
             )
             resp.raise_for_status()
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.warning("direct _send_sync failed for chat %s: %s", chat_id, exc)
 
     async def _send_direct(
         self,
@@ -1113,7 +1177,8 @@ class TelegramService:
         for chat_id in self._authorized_chat_ids():
             try:
                 await self._send(chat_id, text, reply_markup=reply_markup)
-            except Exception:
+            except Exception as exc:
+                _logger.warning("broadcast send failed for chat %s: %s", chat_id, exc)
                 continue
 
     async def send_approval_request(self, record: ApprovalRecord) -> None:

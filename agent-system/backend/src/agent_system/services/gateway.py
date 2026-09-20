@@ -418,7 +418,7 @@ class GatewayExecutor:
                 _logger.exception("gateway executor failed for update %s", update_id)
         return processed
 
-    def _resolve_owner(self, account_id: str | None) -> str | None:
+    def _resolve_owner(self, account_id: str | None, chat_id: int | None = None) -> str | None:
         """Authenticate the ledger account: TelegramAccount -> active Bob user.
 
         The telegram user id in an update payload is identity, never
@@ -426,27 +426,41 @@ class GatewayExecutor:
         Unknown, inactive or blocked accounts are never executed (deny by
         default, no oracle to probing senders).
         """
-        if not account_id:
-            return None
-        from agent_system.infra.models import TelegramAccount, User
+        from agent_system.services.identity import IdentityMode
 
-        with session_scope(self._factory) as db:
-            row = (
-                db.query(
-                    TelegramAccount.user_id,
-                    TelegramAccount.role.label("acct_role"),
-                    User.is_active,
-                    User.role.label("user_role"),
+        identity_mode = getattr(self._settings, "agent_identity_mode", "local")
+
+        # 1. DB lookup if account_id is present
+        if account_id:
+            from agent_system.infra.models import TelegramAccount, User
+
+            with session_scope(self._factory) as db:
+                row = (
+                    db.query(
+                        TelegramAccount.user_id,
+                        TelegramAccount.role.label("acct_role"),
+                        User.is_active,
+                        User.role.label("user_role"),
+                    )
+                    .join(User, TelegramAccount.user_id == User.id)
+                    .filter(TelegramAccount.telegram_user_id == str(account_id))
+                    .one_or_none()
                 )
-                .join(User, TelegramAccount.user_id == User.id)
-                .filter(TelegramAccount.telegram_user_id == str(account_id))
-                .one_or_none()
-            )
-            if row is None or not row.is_active:
-                return None
-            if row.user_role == Role.BLOCKED.value or row.acct_role == Role.BLOCKED.value:
-                return None
-            return str(row.user_id)
+                if row is not None:
+                    if (
+                        not row.is_active
+                        or str(row.user_role) == Role.BLOCKED.value
+                        or str(row.acct_role) == Role.BLOCKED.value
+                    ):
+                        return None
+                    return str(row.user_id)
+
+        # 2. Local mode fallback (chat-id allowlist)
+        if identity_mode == "local" or identity_mode == IdentityMode.LOCAL.value:
+            if chat_id is not None and chat_id in self._settings.allowed_chat_ids:
+                return "local"
+
+        return None
 
     # -- gateway state (telegram_gateway_messages) -------------------------------
 
@@ -501,7 +515,7 @@ class GatewayExecutor:
 
     def _process_one(self, update_id: int) -> None:
         account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
-        owner = self._resolve_owner(account_id)
+        owner = self._resolve_owner(account_id, chat_id=chat_id)
         if not text or chat_id is None or owner is None:
             self._mark_processed(update_id)
             return
@@ -528,7 +542,7 @@ class GatewayExecutor:
             self._outbox.enqueue(
                 kind=KIND_TASK_ACK,
                 chat_id=chat_id,
-                text=f"Task created: {master_task_id or session_id}\nGoal: {text[:200]}",
+                text=f"Task accepted: {master_task_id or session_id}\nGoal: {text[:200]}",
                 task_id=master_task_id,
             )
             self._gateway_bound(update_id, session_id, master_task_id)
