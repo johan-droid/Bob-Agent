@@ -200,7 +200,7 @@ def setup(
 @app.command("doctor")
 @run_command
 def doctor() -> Any:
-    """Probe the machine (OS, Python, uv/git/docker/redis, ports) and report."""
+    """Probe the machine (OS, Python, uv/git/docker, ports) and report."""
     from agent_system.cli import sysdetect
 
     report = sysdetect.detect_environment()

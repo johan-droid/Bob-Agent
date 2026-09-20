@@ -45,7 +45,6 @@ GROUP_ORDER = (
 _GROUPS: dict[str, str] = {
     "agent_env": "core",
     "api_port": "core",
-    "redis_url": "core",
     "api_session_secret": "auth",
     "agent_bootstrap_secret": "auth",
     "telegram_bot_token": "telegram",
@@ -94,7 +93,6 @@ _GROUPS: dict[str, str] = {
 _HELP: dict[str, str] = {
     "agent_env": "Environment name (dev/prod).",
     "api_port": "Backend HTTP port.",
-    "redis_url": "Redis URL for the RQ worker queue.",
     "api_session_secret": "Signs API tokens (minted via POST /api/v1/auth/token).",
     "agent_bootstrap_secret": "Bootstrap secret accepted by POST /api/v1/auth/token.",
     "anthropic_api_key": "Anthropic key (claude-sonnet-4-5).",

@@ -78,14 +78,9 @@ def _ingest_update(factory: Any, update_id: int, chat_id: int, tg_user: str, tex
 def test_cloud_inline_run_true_without_redis(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """Mode A: CLOUD_INLINE_RUN=true without Redis.
-
-    App boots healthily, Redis health is NOT_CONFIGURED, and Redis client is never created.
-    """
+    """Inline execution without Redis: app boots healthily."""
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-    monkeypatch.setenv("CLOUD_INLINE_RUN", "true")
-    monkeypatch.setenv("REDIS_URL", "")
     clear_settings_cache()
 
     try:
@@ -98,7 +93,7 @@ def test_cloud_inline_run_true_without_redis(
         registry = HealthRegistry(settings)
         health = registry.check_all(timeout=1.0)
         assert health["status"] == "ok"
-        assert health["services"]["redis"]["status"] == "NOT_CONFIGURED"
+        assert health["mode"] == "inline"
 
         with TestClient(app) as client:
             resp = client.get("/api/v1/health")
@@ -242,27 +237,12 @@ def test_restart_recovery_expired_lease_and_no_duplicate_execution(
         clear_settings_cache()
 
 
-def test_mode_b_cloud_inline_false_requires_redis_and_worker_guard(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Mode B: CLOUD_INLINE_RUN=false needs REDIS_URL; worker refuses CLOUD_INLINE_RUN=true."""
-    monkeypatch.setenv("CLOUD_INLINE_RUN", "true")
+def test_inline_execution_mode_is_default() -> None:
+    """Inline execution mode is standard and default."""
     clear_settings_cache()
-
     try:
-        from agent_system.worker import main as worker_main
-
-        err_msg = "Worker process cannot start when CLOUD_INLINE_RUN=true"
-        with pytest.raises(RuntimeError, match=err_msg):
-            worker_main()
-
-        # Now test CLOUD_INLINE_RUN=false with empty REDIS_URL
-        monkeypatch.setenv("CLOUD_INLINE_RUN", "false")
-        monkeypatch.setenv("REDIS_URL", "")
-        clear_settings_cache()
-
-        with pytest.raises(RuntimeError, match="REDIS_URL is required when CLOUD_INLINE_RUN=false"):
-            worker_main()
+        settings = get_settings()
+        assert settings.is_cloud_inline is True
     finally:
         clear_settings_cache()
 

@@ -17,7 +17,6 @@ from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import Base, Task
 from agent_system.services.orchestrator import Orchestrator, Supervisor
 from agent_system.services.verifier import Verifier
-from agent_system.worker import execute_task
 
 
 def _setup_db(tmp_path: Any) -> Any:
@@ -62,23 +61,23 @@ def test_orchestrator_verifier_crash_fails_task(tmp_path: Any) -> None:
         assert "verifier crashed" in task.last_error
 
 
-def test_worker_verifier_crash_fails_task(tmp_path: Any) -> None:
+def test_verifier_crash_during_execution_fails_task(tmp_path: Any) -> None:
     factory = _setup_db(tmp_path)
     bus = EventBus()
     sup = Supervisor(bus)
-    session_id = sup.create_session(factory, "test worker verifier crash")
+    session_id = sup.create_session(factory, "test verifier crash")
     task_id = sup.add_task(factory, session_id, "llm", "llm task")
 
     sup.plan(factory, session_id)
 
-    with patch(
-        "agent_system.services.verifier.Verifier.verify",
-        side_effect=RuntimeError("worker verifier crash"),
-    ):
-        with patch("agent_system.agents.react_agent.install"):
-            with patch("agent_system.agents.registry.run_agent", return_value={"output": "hello"}):
-                res = execute_task(task_id, factory=factory)
-                assert res["state"] == "FAILED"
+    # Broken verifier that raises an exception
+    mock_verifier = MagicMock()
+    mock_verifier.verify.side_effect = RuntimeError("verifier crash during run")
+
+    orch = Orchestrator(bus, verifier=mock_verifier)
+    orch.register_handler("llm", lambda task_input, ctx: {"output": "hello"})
+
+    orch.run_ready_tasks(factory, session_id)
 
     with factory() as db:
         task = db.get(Task, task_id)

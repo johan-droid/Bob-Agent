@@ -33,7 +33,6 @@ from agent_system.services.external_services.mcp_openconnector import (
 )
 from agent_system.services.external_services.mongodb import MongoDBAdapter
 from agent_system.services.external_services.postgres import PostgresService
-from agent_system.services.external_services.redis_service import RedisService
 from agent_system.services.external_services.search import DuckDuckGoSearchProvider
 from agent_system.services.external_services.storage import (
     LocalStorageProvider,
@@ -61,7 +60,6 @@ class HealthRegistry:
     def _initialize_default_services(self) -> None:
         # Core & Databases
         self.register(PostgresService(self.settings.database_url))
-        self.register(RedisService(self.settings))
         self.register(MongoDBAdapter(self.settings))
 
         # Storage
@@ -128,9 +126,7 @@ class HealthRegistry:
                     }
                     all_ok = False
 
-        is_cloud_inline = getattr(self.settings, "is_cloud_inline", False)
         db_check = results.get("postgresql") or results.get("database") or {}
-        redis_check = results.get("redis") or {}
 
         db_ok = db_check.get("status") in (
             "OK",
@@ -138,15 +134,7 @@ class HealthRegistry:
             "NOT_CONFIGURED",
         ) and db_check.get("reachable", True)
 
-        if is_cloud_inline or not redis_check.get("configured", False):
-            is_ready = db_ok
-        else:
-            redis_ok = redis_check.get("status") in (
-                "OK",
-                "DISABLED",
-                "NOT_CONFIGURED",
-            ) and redis_check.get("reachable", True)
-            is_ready = db_ok and redis_ok
+        is_ready = db_ok
 
         if not is_ready:
             status_str = "not_ready"
@@ -158,7 +146,7 @@ class HealthRegistry:
         return {
             "status": status_str,
             "ready": is_ready,
-            "mode": "inline" if is_cloud_inline else "rq_worker",
+            "mode": "inline",
             "services": results,
             "checks": {
                 k: v.get("status") in ("OK", "DISABLED", "NOT_CONFIGURED")

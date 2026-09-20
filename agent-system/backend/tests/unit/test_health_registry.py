@@ -15,8 +15,8 @@ def test_health_registry_check_all():
 
     # Verify key services are present
     assert "sqlite" in services or "postgresql" in services or "database" in services
-    assert "redis" in services
     assert "mongodb" in services
+    assert res["mode"] == "inline"
     assert "storage_local" in services
     assert "llm_groq" in services
     assert "telegram" in services

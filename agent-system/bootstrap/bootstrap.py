@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Bob Agent one-shot bootstrapper — stdlib only, Windows/Linux/macOS.
 
-Detects the machine, installs what's missing (Python 3.12+, uv, git,
-Redis-via-Docker), fetches the repo, then hands off to ``agentctl setup``
+Detects the machine, installs what's missing (Python 3.12+, uv, git),
+fetches the repo, then hands off to ``agentctl setup``
 which remembers your answers for next time.
 
 Run from a checkout (no network needed)::
 
-    python3 bootstrap/bootstrap.py [--yes] [--skip-setup] [--no-docker]
+    python3 bootstrap/bootstrap.py [--yes] [--skip-setup]
 
 Or as a one-liner once published (override the base with BOB_REPO_URL)::
 
@@ -194,7 +194,6 @@ def detect() -> dict[str, object]:
         "git": shutil.which("git"),
         "docker": shutil.which("docker"),
         "package_manager": detect_package_manager(),
-        "redis_up": tcp_open("127.0.0.1", 6379),
         "port_8000_busy": tcp_open("127.0.0.1", 8000),
     }
     compose = shutil.which("docker-compose")
@@ -418,81 +417,6 @@ def step_migrate(repo: str) -> None:
         log("Migrations done.")
 
 
-def step_redis(repo: str, assume_yes: bool, no_docker: bool) -> None:
-    if tcp_open("127.0.0.1", 6379):
-        log("Redis already reachable on :6379.")
-        return
-    if no_docker:
-        warn("Redis not reachable and --no-docker given — the RQ worker will fail; start Redis manually.")
-        _print_redis_hints()
-        return
-
-    # Check for Docker (preferred method)
-    has_docker = shutil.which("docker") is not None
-    has_compose = shutil.which("docker-compose") is not None or _has_compose_plugin()
-
-    if has_docker and has_compose:
-        log("Starting Redis via `docker compose up -d`…")
-        rc = run(["docker", "compose", "up", "-d"], cwd=repo)
-        if rc.returncode != 0:
-            rc = run(["docker-compose", "up", "-d"], cwd=repo)
-        if rc.returncode != 0:
-            warn(f"`docker compose up` failed:\n{rc.stderr[-2000:]}")
-            _print_redis_hints()
-        else:
-            log("Redis container started.")
-        return
-
-    # No Docker — offer platform-specific alternatives
-    if not has_docker:
-        warn("Docker not found — Redis requires Docker or manual installation.")
-    elif not has_compose:
-        warn("Docker Compose not found — install it or start Redis manually.")
-
-    _print_redis_hints()
-
-
-def _print_redis_hints() -> None:
-    """Print platform-specific Redis installation hints."""
-    system = platform.system()
-    log("Redis installation options:")
-
-    if system == "Linux":
-        mgr = linux_pkg_manager()
-        if mgr == "apt-get":
-            log("  Ubuntu/Debian: sudo apt-get install -y redis-server")
-            log("                  sudo systemctl enable --now redis-server")
-        elif mgr == "dnf":
-            log("  Fedora: sudo dnf install -y redis")
-            log("          sudo systemctl enable --now redis")
-        elif mgr == "pacman":
-            log("  Arch: sudo pacman -S redis")
-            log("        sudo systemctl enable --now redis")
-        elif mgr == "apk":
-            log("  Alpine: sudo apk add redis")
-            log("          sudo rc-update add redis default && sudo rc-service redis start")
-        else:
-            log("  Install Redis via your distribution's package manager.")
-        log("  Or use Docker: https://docs.docker.com/get-docker/")
-    elif system == "Darwin":
-        if shutil.which("brew"):
-            log("  macOS: brew install redis")
-            log("         brew services start redis")
-        else:
-            log("  Install Homebrew: https://brew.sh")
-            log("  Then: brew install redis && brew services start redis")
-        log("  Or use Docker: https://docs.docker.com/get-docker/")
-    elif system == "Windows":
-        log("  Windows options:")
-        log("    1. Use Docker (recommended): https://docs.docker.com/get-docker/")
-        log("    2. Use WSL2: wsl --install, then install Redis in WSL")
-        log("    3. Download Redis for Windows: https://github.com/microsoftarchive/redis/releases")
-        log("    4. Use Memurai (Redis-compatible): https://www.memurai.com/")
-    else:
-        log("  Install Redis: https://redis.io/download")
-        log("  Or use Docker: https://docs.docker.com/get-docker/")
-
-
 def _has_compose_plugin() -> bool:
     try:
         return run(["docker", "compose", "version"]).returncode == 0
@@ -523,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dir", default=None, help="Checkout directory")
     parser.add_argument("--yes", action="store_true", help="Auto-install + non-interactive setup")
     parser.add_argument("--skip-setup", action="store_true", help="Skip the setup wizard")
-    parser.add_argument("--no-docker", action="store_true", help="Do not start Redis via Docker")
+    parser.add_argument("--no-docker", action="store_true", help="Deprecated (no-op)")
     args = parser.parse_args(argv)
 
     info = detect()
@@ -555,11 +479,10 @@ def main(argv: list[str] | None = None) -> int:
     repo = ensure_repo(args)
     step_sync(repo)
     step_migrate(repo)
-    step_redis(repo, args.yes, args.no_docker)
     step_setup(repo, args.yes, args.skip_setup)
 
     print()
-    log("Done. Next:  `make start`  (API :8000 + RQ worker)")
+    log("Done. Next:  `make start`  (API :8000)")
     return 0
 
 

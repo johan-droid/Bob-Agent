@@ -1,16 +1,4 @@
 services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    volumes:
-      - redis_data:/data
-
   # Optional: OpenConnector connector gateway (1,000+ SaaS providers via
   # Actions + MCP). Set OPENCONNECTOR_BASE_URL=http://localhost:3000 in
   # .env.local to expose it to the agent. Generate secrets first:
@@ -28,5 +16,4 @@ services:
       - openconnector_data:/app/data
 
 volumes:
-  redis_data:
   openconnector_data:

@@ -126,7 +126,7 @@ function Install-Python {
 function Test-Docker {
     $docker = Get-Command docker -ErrorAction SilentlyContinue
     if (-not $docker) {
-        Write-Host "[install] Docker not found. Docker is needed for Redis." -ForegroundColor Yellow
+        Write-Host "[install] Docker not found. Docker is needed for sandbox container isolation (optional)." -ForegroundColor Yellow
         Write-Host "  Install options:" -ForegroundColor Yellow
         Write-Host "    1. Docker Desktop: https://www.docker.com/products/docker-desktop/" -ForegroundColor Yellow
         Write-Host "    2. Via winget: winget install -e --id Docker.DockerDesktop" -ForegroundColor Yellow

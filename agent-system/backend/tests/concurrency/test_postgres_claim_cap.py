@@ -40,7 +40,6 @@ from agent_system.infra.db import make_engine, make_session_factory, session_sco
 from agent_system.infra.event_bus import EventBus
 from agent_system.infra.models import Base, Session, Task
 from agent_system.services.orchestrator import Orchestrator, Supervisor
-from agent_system.worker import execute_task
 
 LIVE_STATES = ("RUNNING", "REVIEW")
 PG_LOCK_KEY = 721834917563402  # must match orchestrator._PG_CLAIM_LOCK_KEY
@@ -214,20 +213,11 @@ class TestPostgresClaimCap:
 
         started = threading.Barrier(attempts)
 
-        def run_attempt(task_id: str, use_worker: bool) -> None:
+        def run_attempt(task_id: str) -> None:
             started.wait(timeout=60)
-            if use_worker:
-                try:
-                    execute_task(task_id, factory=factory)
-                except Exception:
-                    pass  # refusal paths may surface as job errors — not cap breaches
-            else:
-                orch._run_task(factory, task_id)
+            orch._run_task(factory, task_id)
 
-        threads = [
-            threading.Thread(target=run_attempt, args=(tid, i % 2 == 0))
-            for i, tid in enumerate(ids)
-        ]
+        threads = [threading.Thread(target=run_attempt, args=(tid,)) for tid in ids]
         for t in threads:
             t.start()
 

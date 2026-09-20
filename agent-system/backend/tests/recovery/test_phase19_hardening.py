@@ -237,14 +237,15 @@ class TestBatchPartialFailure:
 
 class TestWorkerDoubleDelivery:
     def test_execute_task_idempotent_on_nonqueued(self, factory: Any) -> None:
-        """Worker receiving a task twice skips the duplicate (already handled)."""
-        from agent_system.worker import execute_task
+        """Task execution on non-QUEUED task skips duplicate (already handled)."""
+        from agent_system.services.orchestrator import Orchestrator
 
         bus = EventBus()
+        orch = Orchestrator(bus)
         with session_scope(factory) as db:
             from agent_system.infra.models import Session
 
             db.add(Session(id="ses_w", goal="worker", status="ACTIVE"))
         task_id = _seed_task(factory, bus, "ses_w", state="SUCCEEDED")
-        result = execute_task(task_id=task_id, factory=factory)
-        assert result["skipped"] is True
+        ran = orch._run_task(factory, task_id)
+        assert ran is False
