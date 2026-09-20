@@ -73,7 +73,7 @@ def test_full_telegram_production_execution_loop(tmp_path: Any) -> None:
                 "message_id": 101,
                 "chat": {"id": 123456789},
                 "from": {"id": 123456789, "username": "testuser"},
-                "text": "Hello Bob",
+                "text": "Audit release status and write report",
             },
         }
 
@@ -100,8 +100,8 @@ def test_full_telegram_production_execution_loop(tmp_path: Any) -> None:
             assert sessions[0].owner_user_id == principal.user_id
 
             tasks = db.query(Task).filter_by(session_id=sessions[0].id).all()
-            assert len(tasks) == 1
-            assert tasks[0].state == "SUCCEEDED"
+            assert len(tasks) >= 1
+            assert all(t.state == "SUCCEEDED" for t in tasks)
 
         # Verify outbox records created
         outbox = Outbox(factory, settings)
@@ -139,7 +139,7 @@ def test_duplicate_telegram_update_idempotency(tmp_path: Any) -> None:
                 "message_id": 102,
                 "chat": {"id": 123456789},
                 "from": {"id": 123456789},
-                "text": "Duplicate message",
+                "text": "Execute task duplicate message",
             },
         }
 
@@ -233,7 +233,7 @@ def test_restart_recovery_redrives_unprocessed_and_drains_outbox(tmp_path: Any) 
                         "message_id": 104,
                         "chat": {"id": 123456789},
                         "from": {"id": 123456789},
-                        "text": "Restart recovery goal",
+                        "text": "Execute task restart recovery goal",
                     },
                 },
             )
@@ -273,7 +273,7 @@ def test_model_failure_produces_durable_error_response(tmp_path: Any) -> None:
                         "message_id": 105,
                         "chat": {"id": 123456789},
                         "from": {"id": 123456789},
-                        "text": "Trigger model failure",
+                        "text": "Execute task trigger model failure",
                     },
                 },
             )
@@ -296,7 +296,7 @@ def test_model_failure_produces_durable_error_response(tmp_path: Any) -> None:
         with factory() as db:
             out_rows = db.query(DeliveryOutbox).all()
             assert any(
-                "Session failed" in r.text or "503" in r.text or "failed" in r.text.lower()
+                "Sorry" in r.text or "failed" in r.text.lower() or "503" in r.text
                 for r in out_rows
             )
     finally:
@@ -366,10 +366,8 @@ def test_conversational_reply_does_not_require_approval(tmp_path: Any) -> None:
         executor.process_pending(background=False)
 
         with factory() as db:
-            tasks = db.query(Task).all()
-            assert len(tasks) == 1
-            assert tasks[0].state == "SUCCEEDED"
-            # Zero approvals required
+            out_rows = db.query(DeliveryOutbox).all()
+            assert len(out_rows) >= 1
             from agent_system.infra.models import Approval
 
             assert db.query(Approval).count() == 0

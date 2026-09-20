@@ -745,6 +745,7 @@ class Orchestrator:
         state: TaskState,
         result: dict[str, Any],
     ) -> None:
+        was_terminal = False
         with session_scope(factory) as db:
             task = db.get(Task, task_id)
             run = db.get(AgentRun, run_id)
@@ -757,6 +758,7 @@ class Orchestrator:
                     # surface the already-recorded terminal state — never raise
                     # a stale-transition error from a completion race.
                     effective = current
+                    was_terminal = True
                 else:
                     validate_transition(current, state)
                     effective = state
@@ -780,34 +782,39 @@ class Orchestrator:
                 run.result_json = result
             if lease is not None:
                 db.delete(lease)
-            event_type = {
-                TaskState.SUCCEEDED: "task.completed",
-                TaskState.FAILED: "task.failed",
-                TaskState.CANCELLED: "task.cancelled",
-            }[effective]
-            self._bus.emit(
-                Event(
-                    type=event_type,
-                    session_id=session_id,
-                    task_id=task_id,
-                    agent_run_id=run_id,
-                    actor=agent_type,
-                    payload=result,
-                ),
-                db,
-            )
-            self._bus.emit(
-                Event(
-                    type="agent.completed"
-                    if effective == TaskState.SUCCEEDED
-                    else ("agent.failed" if effective == TaskState.FAILED else "agent.terminated"),
-                    session_id=session_id,
-                    task_id=task_id,
-                    agent_run_id=run_id,
-                    actor=agent_type,
-                ),
-                db,
-            )
+            if not was_terminal:
+                event_type = {
+                    TaskState.SUCCEEDED: "task.completed",
+                    TaskState.FAILED: "task.failed",
+                    TaskState.CANCELLED: "task.cancelled",
+                }[effective]
+                self._bus.emit(
+                    Event(
+                        type=event_type,
+                        session_id=session_id,
+                        task_id=task_id,
+                        agent_run_id=run_id,
+                        actor=agent_type,
+                        payload=result,
+                    ),
+                    db,
+                )
+                self._bus.emit(
+                    Event(
+                        type="agent.completed"
+                        if effective == TaskState.SUCCEEDED
+                        else (
+                            "agent.failed"
+                            if effective == TaskState.FAILED
+                            else "agent.terminated"
+                        ),
+                        session_id=session_id,
+                        task_id=task_id,
+                        agent_run_id=run_id,
+                        actor=agent_type,
+                    ),
+                    db,
+                )
         self._cancel_requested.discard(task_id)
 
     # -- cancellation -------------------------------------------------------
