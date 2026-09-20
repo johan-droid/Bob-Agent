@@ -3,7 +3,57 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class FailureCategory(str, Enum):  # noqa: UP042
+    AUTH_FAILURE = "AUTH_FAILURE"
+    INVALID_MODEL = "INVALID_MODEL"
+    INVALID_REQUEST = "INVALID_REQUEST"
+    RATE_LIMIT = "RATE_LIMIT"
+    TIMEOUT = "TIMEOUT"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    SERVER_ERROR = "SERVER_ERROR"
+    NOT_FOUND = "NOT_FOUND"
+    CAPABILITY_MISMATCH = "CAPABILITY_MISMATCH"
+    UNKNOWN = "UNKNOWN"
+
+
+def classify_error(exc_or_msg: Any, status_code: int | None = None) -> tuple[FailureCategory, bool]:
+    """Classify model invocation failure into category and retryability.
+
+    Returns (FailureCategory, is_retryable).
+    """
+    msg = str(exc_or_msg or "").lower()
+    code = status_code
+    if (
+        code is None
+        and hasattr(exc_or_msg, "response")
+        and hasattr(exc_or_msg.response, "status_code")
+    ):
+        code = int(exc_or_msg.response.status_code)
+
+    if (
+        code in (401, 403)
+        or "unauthorized" in msg
+        or "invalid api key" in msg
+        or "authentication" in msg
+    ):
+        return FailureCategory.AUTH_FAILURE, False
+    if code == 404 or "not found" in msg or "does not exist" in msg or "unknown model" in msg:
+        return FailureCategory.NOT_FOUND, False
+    if code == 422 or "invalid_request_error" in msg or "bad request" in msg or code == 400:
+        return FailureCategory.INVALID_REQUEST, False
+    if code == 429 or "rate_limit" in msg or "rate limit" in msg or "quota" in msg:
+        return FailureCategory.RATE_LIMIT, True
+    if "timeout" in msg or "timed out" in msg:
+        return FailureCategory.TIMEOUT, True
+    if "connection" in msg or "network" in msg or "connecterror" in msg:
+        return FailureCategory.NETWORK_ERROR, True
+    if code is not None and code >= 500:
+        return FailureCategory.SERVER_ERROR, True
+    return FailureCategory.UNKNOWN, True
 
 
 @dataclass
@@ -161,10 +211,12 @@ def request_for_mode(mode: str = "auto", task_type: str = "general") -> RoutingR
 
 
 __all__ = [
-    "request_for_mode",
+    "FailureCategory",
     "RoutingDecision",
     "RoutingRequest",
+    "classify_error",
     "rank_candidates",
+    "request_for_mode",
     "request_for_role",
     "route",
 ]

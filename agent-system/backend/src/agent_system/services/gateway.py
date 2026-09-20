@@ -416,16 +416,10 @@ class GatewayExecutor:
         processed = 0
         for (update_id,) in pending:
             uid = int(update_id)
-            with self._in_flight_lock:
-                if uid in self._in_flight:
-                    continue
-                self._in_flight.add(uid)
             try:
-                self._process_one(uid, background=background)
-                processed += 1
+                if self._process_one(uid, background=background):
+                    processed += 1
             except Exception as exc:
-                with self._in_flight_lock:
-                    self._in_flight.discard(uid)
                 _logger.exception("gateway executor failed for update %s: %s", update_id, exc)
         _logger.info("gateway.pending.complete processed=%s", processed)
         return processed
@@ -574,7 +568,12 @@ class GatewayExecutor:
                 with self._in_flight_lock:
                     self._in_flight.discard(update_id)
 
-    def _process_one(self, update_id: int, background: bool = False) -> None:
+    def _process_one(self, update_id: int, background: bool = False) -> bool:
+        with self._in_flight_lock:
+            if update_id in self._in_flight:
+                _logger.info("gateway.update.in_flight_skip update_id=%s", update_id)
+                return False
+            self._in_flight.add(update_id)
         account_id, chat_id, user_id, message_id, text = self._owner_and_chat(update_id)
         _logger.info("gateway.update.claimed update_id=%s chat_id=%s", update_id, chat_id)
         owner = self._resolve_owner(account_id, chat_id=chat_id)
@@ -588,12 +587,12 @@ class GatewayExecutor:
             self._mark_processed(update_id)
             with self._in_flight_lock:
                 self._in_flight.discard(update_id)
-            return
+            return True
         if not text or chat_id is None:
             self._mark_processed(update_id)
             with self._in_flight_lock:
                 self._in_flight.discard(update_id)
-            return
+            return True
         _logger.info(
             "gateway.identity.resolved update_id=%s chat_id=%s owner=%s",
             update_id,
@@ -648,6 +647,7 @@ class GatewayExecutor:
             thread.start()
         else:
             self._drive_and_finish(update_id, session_id, chat_id)
+        return True
 
     def _mark_processed(self, update_id: int) -> None:
         from agent_system.domain.events import utcnow
