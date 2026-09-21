@@ -84,6 +84,7 @@ class NoteMeta:
     task_id: str | None = None
     session_id: str | None = None
     agent_run_id: str | None = None
+    owner_user_id: str | None = None
     tags: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)  # wiki-link targets
 
@@ -101,6 +102,7 @@ def _scrub_meta(meta: NoteMeta) -> NoteMeta:
         task_id=meta.task_id,
         session_id=meta.session_id,
         agent_run_id=meta.agent_run_id,
+        owner_user_id=meta.owner_user_id,
         tags=[scrub_text(t) for t in (meta.tags or [])],
         links=[scrub_text(link) for link in (meta.links or [])],
     )
@@ -396,12 +398,15 @@ class DbNoteStore:
         if len(content.encode("utf-8")) > MAX_NOTE_BYTES:
             raise MemoryError(f"note exceeds {MAX_NOTE_BYTES} bytes")
         note_id = _ids.new_memory_id()
+        layer_str = (
+            safe_meta.layer.value if hasattr(safe_meta.layer, "value") else str(safe_meta.layer)
+        )
         with _scope(self._factory) as db:
             db.add(
                 _Row(
                     id=note_id,
                     title=safe_meta.title,
-                    layer=safe_meta.layer.value,
+                    layer=layer_str,
                     source=safe_meta.source,
                     tags_json=list(safe_meta.tags or []),
                     links_json=list(safe_meta.links or []),
@@ -409,17 +414,29 @@ class DbNoteStore:
                     session_id=safe_meta.session_id,
                     task_id=safe_meta.task_id,
                     agent_run_id=safe_meta.agent_run_id,
+                    owner_user_id=safe_meta.owner_user_id,
                 )
             )
         return note_id
 
-    def recall(self, query: str, limit: int = 3) -> list[dict[str, Any]]:
+    def recall(
+        self,
+        query: str,
+        limit: int = 3,
+        owner_user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         from agent_system.infra.db import session_scope as _scope
         from agent_system.infra.models import MemoryNote as _Row
 
         terms = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2]
         with _scope(self._factory) as db:
-            rows = db.query(_Row).order_by(_Row.created_at.desc()).limit(500).all()
+            q = db.query(_Row)
+            if owner_user_id is not None:
+                q = q.filter(_Row.owner_user_id == str(owner_user_id))
+            if session_id is not None:
+                q = q.filter(_Row.session_id == str(session_id))
+            rows = q.order_by(_Row.created_at.desc()).limit(500).all()
             scored = [
                 (
                     sum((row.title + "\n" + row.body).lower().count(t) for t in terms)

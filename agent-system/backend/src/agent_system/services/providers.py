@@ -990,6 +990,33 @@ def build_model_router(
         adapter = build_adapter(name, settings, key)
         if adapter is not None:
             router.register_adapter(name, adapter)
+
+    # If the default provider adapter is not registered or is unconfigured ollama without
+    # a key, fall back to echo
+    if router.default_provider not in router._adapters or (
+        router.default_provider == "ollama" and not settings.provider_api_key("ollama")
+    ):
+        registered_non_ollama = [k for k in router._adapters.keys() if k != "ollama"]
+        if registered_non_ollama:
+            first_avail = registered_non_ollama[0]
+            router.default_provider = first_avail
+            spec = provider_spec(first_avail)
+            router.default_model = spec.default_model if spec else "echo-default"
+        else:
+            from agent_system.services.model_router import EchoProvider, ModelInfo
+
+            router.register_adapter("echo", EchoProvider())
+            router.default_provider = "echo"
+            router.default_model = "echo-default"
+            router.pricing.register(
+                ModelInfo(
+                    model_id="echo-default",
+                    provider="echo",
+                    input_cost_per_1m=0.0,
+                    output_cost_per_1m=0.0,
+                )
+            )
+
     router.registry.set_rule(
         SelectionRule(task_type="default", primary=router.default_model, fallback=None)
     )
