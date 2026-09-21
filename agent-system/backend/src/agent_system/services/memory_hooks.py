@@ -104,14 +104,21 @@ def remember_outcome(
 
 
 def recall_recent(
-    settings: Any, query: str, limit: int = 3, factory: Any = None
+    settings: Any,
+    query: str,
+    limit: int = 3,
+    factory: Any = None,
+    owner_user_id: str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Keyword-ranked recent vault notes (newest + most overlap first)."""
     if _use_db(settings, factory):
         from agent_system.services.memory import DbNoteStore
 
         try:
-            return DbNoteStore(factory).recall(query, limit)
+            return DbNoteStore(factory).recall(
+                query, limit, owner_user_id=owner_user_id, session_id=session_id
+            )
         except Exception:
             return []  # memory must never break execution
     from agent_system.services.memory import scrub_text

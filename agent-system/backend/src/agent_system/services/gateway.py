@@ -422,10 +422,20 @@ class GatewayExecutor:
     def process_pending(self, limit: int = 20, background: bool = False) -> int:
         """Claim and execute unprocessed updates. Returns count processed."""
         _logger.info("gateway.pending.start limit=%s", limit)
+        from sqlalchemy import select
+
         with session_scope(self._factory) as db:
+            active_statuses = ("IN_PROGRESS", "DISPATCHED", "COMPLETED")
+            claimed_stmt = select(TelegramGatewayMessage.telegram_update_id).where(
+                TelegramGatewayMessage.telegram_update_id.isnot(None),
+                TelegramGatewayMessage.processing_status.in_(active_statuses),
+            )
             pending = (
                 db.query(TelegramUpdate.update_id)
-                .filter(TelegramUpdate.processed_at.is_(None))
+                .filter(
+                    TelegramUpdate.processed_at.is_(None),
+                    ~TelegramUpdate.update_id.in_(claimed_stmt),
+                )
                 .order_by(TelegramUpdate.update_id)
                 .limit(limit)
                 .all()
@@ -629,6 +639,8 @@ class GatewayExecutor:
             chat_id,
             owner,
         )
+
+        from agent_system.domain.events import utcnow
         from agent_system.domain.tasks import TaskState
         from agent_system.services.classifier import classify_request_type
         from agent_system.services.cloud import ensure_session_tasks
@@ -638,7 +650,35 @@ class GatewayExecutor:
         req_type = classify_request_type(text)
         _logger.info("gateway.request.classified update_id=%s req_type=%s", update_id, req_type)
 
-        self._gateway_begin(update_id, chat_id, user_id, message_id)
+        # Atomic DB-level claim check on TelegramGatewayMessage
+        with session_scope(self._factory) as db:
+            tgm = (
+                db.query(TelegramGatewayMessage)
+                .filter(TelegramGatewayMessage.telegram_update_id == update_id)
+                .one_or_none()
+            )
+            claimed_states = ("IN_PROGRESS", "DISPATCHED", "COMPLETED")
+            if tgm is not None and tgm.processing_status in claimed_states:
+                if tgm.received_at and (utcnow() - tgm.received_at).total_seconds() < 600:
+                    _logger.info("gateway.update.db_claimed_skip update_id=%s", update_id)
+                    with self._in_flight_lock:
+                        self._in_flight.discard(update_id)
+                    return False
+            if tgm is None:
+                db.add(
+                    TelegramGatewayMessage(
+                        id=new_id("tgm"),
+                        telegram_update_id=update_id,
+                        chat_id=str(chat_id) if chat_id else None,
+                        user_id=user_id,
+                        message_id=message_id,
+                        received_at=utcnow(),
+                        processing_status="IN_PROGRESS",
+                    )
+                )
+            else:
+                tgm.processing_status = "IN_PROGRESS"
+            db.commit()
 
         # -------------------------------------------------------------------
         # Lightweight CHAT Path
@@ -675,6 +715,27 @@ class GatewayExecutor:
             except Exception:
                 pass
 
+            connected_integrations: list[str] = []
+            if self._factory:
+                try:
+                    from agent_system.services.capabilities import CapabilityRegistry
+                    from agent_system.services.credentials import CredentialStore
+
+                    vault = CredentialStore(self._factory)
+                    registry = CapabilityRegistry(vault)
+                    caps = registry.get_user_capabilities(owner or "local")
+                    connected_integrations = [c.provider for c in caps if c.status == "healthy"]
+                except Exception:
+                    pass
+
+            if "google" in connected_integrations or "gmail" in connected_integrations:
+                prompt_lines.append("System Context: Google/Gmail integration IS connected.")
+            else:
+                prompt_lines.append(
+                    "System Context: Google/Gmail integration is NOT connected. "
+                    "If asked about Gmail, clearly state it is not connected (/setup google)."
+                )
+
             prompt_lines.append(f"\nUser: {text}")
             prompt = "\n".join(prompt_lines)
 
@@ -688,31 +749,29 @@ class GatewayExecutor:
                     model_id = getattr(inv, "model_id", None) or router.default_model
                     lat_ms = getattr(inv, "latency_ms", None)
                     latency_s = float(lat_ms) / 1000.0 if lat_ms is not None else None
+                    clean_answer = sanitize_telegram_message(answer)
+                    footer = format_model_footer(provider, model_id, latency_s)
+                    final_text = (
+                        f"{clean_answer}\n\n{footer}"
+                        if footer not in clean_answer
+                        else clean_answer
+                    )
                 else:
                     err_detail = getattr(inv, "error", None) or "Model returned empty response."
                     _logger.warning("gateway.chat.failed error=%s", err_detail)
-                    answer = (
+                    clean_answer = (
                         "I'm sorry, I encountered an issue reaching the model service "
                         "to respond to your message. Please try again shortly."
                     )
-                    provider = getattr(inv, "provider", None) or "groq"
-                    model_id = getattr(inv, "model_id", None) or router.default_model
-                    latency_s = 0.2
+                    final_text = clean_answer
             except Exception as exc:
                 _logger.warning("gateway.chat.fallback error=%s", exc)
-                answer = (
+                clean_answer = (
                     "I'm sorry, I encountered an issue reaching the model service "
                     "to respond to your message. Please try again shortly."
                 )
-                provider = "groq"
-                model_id = "default"
-                latency_s = 0.2
+                final_text = clean_answer
 
-            clean_answer = sanitize_telegram_message(answer)
-            footer = format_model_footer(provider, model_id, latency_s)
-            final_text = (
-                f"{clean_answer}\n\n{footer}" if footer not in clean_answer else clean_answer
-            )
             save_chat_message(self._factory, chat_id, "assistant", clean_answer)
 
             self._outbox.enqueue(kind=KIND_RESULT, chat_id=chat_id, text=final_text[:4000])
