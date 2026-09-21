@@ -991,7 +991,8 @@ def build_model_router(
         if adapter is not None:
             router.register_adapter(name, adapter)
 
-    # If the default provider adapter is not registered or is unconfigured ollama without a key, fall back to echo
+    # If the default provider adapter is not registered or is unconfigured ollama without
+    # a key, fall back to echo
     if router.default_provider not in router._adapters or (
         router.default_provider == "ollama" and not settings.provider_api_key("ollama")
     ):
