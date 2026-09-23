@@ -30,7 +30,7 @@
       "required": true
     },
     "DEFAULT_PROVIDER": {
-      "value": "groq"
+      "value": "gemini"
     },
     "GROQ_API_KEY": {
       "required": true
@@ -39,10 +39,13 @@
       "required": true
     },
     "TOOLS_SHELL_MODE": {
-      "value": "local"
+      "value": "sandbox"
     },
     "HEROKU_JAIL": {
       "value": "true"
+    },
+    "HEROKU_SHELL_ALLOWLIST": {
+      "value": "python3,pytest,ruff,git,ls,cat"
     },
     "TOOLS_REQUIRE_APPROVAL": {
       "value": "true"
@@ -95,8 +98,14 @@
     "TELEGRAM_ALLOWED_USER_IDS": {
       "required": true
     },
+    "BOB_MASTER_ENCRYPTION_KEY": {
+      "generator": "secret"
+    },
+    "API_CORS_ORIGINS": {
+      "value": "https://localhost:3000"
+    },
     "HEROKU_APP_NAME": {
-      "value": "firecrow-project-migrated"
+      "value": ""
     }
   }
 }

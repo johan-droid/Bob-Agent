@@ -30,7 +30,7 @@
       "required": true
     },
     "DEFAULT_PROVIDER": {
-      "value": "groq"
+      "value": "gemini"
     },
     "GROQ_API_KEY": {
       "required": true
