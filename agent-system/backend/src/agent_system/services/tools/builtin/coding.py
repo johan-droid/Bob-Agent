@@ -407,6 +407,15 @@ def _build_command(root: Path) -> str | None:
 
 
 def _register_verify(registry: ToolRegistry, name: str, description: str, handler: Any) -> None:
+    def _scope(args: dict[str, Any]) -> str:
+        import hashlib
+
+        explicit = str((args or {}).get("command") or "").strip()
+        if explicit:
+            digest = hashlib.sha256(explicit.encode("utf-8")).hexdigest()[:16]
+            return f"coding:{name}:{digest}"
+        return f"coding:{name}"
+
     registry.register(
         Tool(
             name=name,
@@ -422,7 +431,7 @@ def _register_verify(registry: ToolRegistry, name: str, description: str, handle
             },
             risk="execute",
             handler=handler,
-            scope=f"coding:{name}",
+            scope=_scope,
             group=GROUP,
         )
     )

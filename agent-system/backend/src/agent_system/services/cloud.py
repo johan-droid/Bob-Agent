@@ -116,7 +116,11 @@ def ensure_session_tasks(
 
 
 def drive_session(
-    factory: Any, bus: Any, session_id: str, max_rounds: int = MAX_DRIVE_ROUNDS
+    factory: Any,
+    bus: Any,
+    session_id: str,
+    max_rounds: int = MAX_DRIVE_ROUNDS,
+    settings: Any = None,
 ) -> dict[str, Any]:
     """Run a session's tasks in-process until quiescent (bounded rounds).
 
@@ -137,14 +141,18 @@ def drive_session(
     from agent_system.agents import react_agent
     from agent_system.services.orchestrator import Orchestrator
 
+    if settings is None:
+        from agent_system.config import get_settings
+
+        settings = get_settings()
     try:
         react_agent.install()
     except Exception:
         pass
-    orch = Orchestrator(bus)
+    orch = Orchestrator(bus, settings=settings)
     orch.register_handler("llm", react_agent.llm_react_handler)
     orch.recover_orphans(factory)
-    ensure_session_tasks(factory, bus, session_id)
+    ensure_session_tasks(factory, bus, session_id, settings=settings)
     for _ in range(max(1, max_rounds)):
         started = orch.run_ready_tasks(factory, session_id)
         with session_scope(factory) as db:
@@ -191,7 +199,14 @@ def retry_task_queued(factory: Any, bus: Any, task_id: str) -> str:
         # Raises InvalidTransitionError for non-retryable states (same rule
         # as the REST retry endpoint) — never coerced.
         validate_transition(current, TaskState.QUEUED)
-        row.state = TaskState.QUEUED.value
+        claimed = (
+            db.query(Task)
+            .filter(Task.id == task_id, Task.state == current.value)
+            .update({"state": TaskState.QUEUED.value}, synchronize_session=False)
+        )
+        if claimed == 0:
+            raise LookupError(f"task {task_id} changed concurrently; retry again")
+        db.refresh(row)
         bus.emit(
             Event(
                 type="task.queued",

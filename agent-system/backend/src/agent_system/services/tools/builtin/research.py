@@ -33,17 +33,47 @@ USER_AGENT = "BobAgent/0.1 (+local research capability)"
 
 def _http_get(url: str, timeout: float = 20.0) -> str:
     import httpx
+    import ipaddress
 
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    # SSRF guard: block metadata + loopback + private nets + non-http ports.
+    blocked_hosts = {"localhost", "metadata.google.internal"}
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ToolError(f"refusing blocked fetch target: {host}")
+    except ValueError:
+        pass
+    if host in blocked_hosts or host.endswith(".internal") or host == "169.254.169.254":
+        raise ToolError(f"refusing blocked fetch target: {host}")
+    if parsed.port is not None and parsed.port not in (80, 443):
+        raise ToolError("refusing non-standard port for research fetch")
     try:
         with httpx.Client(
             timeout=timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": USER_AGENT},
         ) as client:
             response = client.get(url)
+            # Same-origin redirects only, max 2 hops, re-validated.
+            hops = 0
+            while response.is_redirect and hops < 2:
+                loc = response.headers.get("location", "")
+                if not loc.startswith(("http://", "https://")):
+                    raise ToolError("refusing non-http redirect")
+                if urlparse(loc).hostname != parsed.hostname:
+                    raise ToolError("refusing cross-origin redirect")
+                response = client.get(loc)
+                hops += 1
             response.raise_for_status()
-            return response.text
+            text = response.text
+            if len(text) > MAX_TEXT_CHARS * 4:
+                text = text[: MAX_TEXT_CHARS * 4]
+            return text
     except Exception as exc:
+        if isinstance(exc, ToolError):
+            raise
         raise ToolError(f"fetch failed for {url}: {scrub(str(exc))[:300]}") from exc
 
 

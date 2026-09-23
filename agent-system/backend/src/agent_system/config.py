@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     port: int | None = None
     api_session_secret: str = "dev-only-secret-change-me"
     agent_bootstrap_secret: str = "dev-only-secret-change-me"
+    # Dedicated vault KEK. If empty, credentials.py falls back to the API
+    # session secret (key-reuse — logged as a warning; set this in prod).
+    bob_master_encryption_key: str = ""
     # CORS origins (comma-separated). Settings-driven; defaults to local UI.
     api_cors_origins: str = "http://localhost:3000"
 
@@ -166,6 +169,10 @@ class Settings(BaseSettings):
     # LLM providers (optional; system boots fine without any).
     # OpenAI-style compatibility; per-provider keys + configurable base URLs.
     anthropic_api_key: str | None = None
+    # Custom Anthropic-compatible gateway (e.g. a proxy at a non-Anthropic
+    # domain): ANTHROPIC_BASE_URL overrides the official api.anthropic.com
+    # endpoint, matching the official SDK's env-var convention.
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
     openai_api_key: str | None = None
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
@@ -179,13 +186,20 @@ class Settings(BaseSettings):
     mistral_api_key: str | None = None
     mistral_base_url: str = "https://api.mistral.ai/v1"
     gemini_api_key: str | None = None
+    # Documented alias: GEMINI_API_KEY and GOOGLE_API_KEY are both accepted
+    # (Google AI Studio issues the same key under either name).
+    # Supported env vars (explicit, documented): GOOGLE_API_KEY /
+    # GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, OPENCODE_API_KEY.
+    # Gemini transports: native :generateContent (default base .../v1beta)
+    # or the OpenAI-compatible layer .../v1beta/openai (set GEMINI_BASE_URL
+    # to https://generativelanguage.googleapis.com/v1beta/openai to use it;
+    # Bob auto-selects Bearer auth + chat/completions in that case).
+    google_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     huggingface_api_key: str | None = None
     huggingface_base_url: str = "https://router.huggingface.co/hf-inference/v1"
-    freellmapi_api_key: str | None = None
-    freellmapi_base_url: str = "http://localhost:3001/v1"
     tokenrouter_api_key: str | None = None
     tokenrouter_base_url: str = "https://api.tokenrouter.io/v1"
 
@@ -216,7 +230,7 @@ class Settings(BaseSettings):
     ollama_cloud_api_key: str | None = None
     ollama_cloud_base_url: str = "https://ollama.com/v1"
     opencode_api_key: str | None = None
-    opencode_base_url: str = "https://opencode.ai/api/v1"
+    opencode_base_url: str = "https://opencode.ai/zen/v1"
     llm_max_fallback_attempts: int = 3
     llm_provider_order: str = ""
     swarm_enabled: bool = True
@@ -347,10 +361,9 @@ class Settings(BaseSettings):
             "openrouter": self.openrouter_api_key,
             "together": self.together_api_key,
             "mistral": self.mistral_api_key,
-            "gemini": self.gemini_api_key,
+            "gemini": self.gemini_api_key or self.google_api_key,
             "deepseek": self.deepseek_api_key,
             "huggingface": self.huggingface_api_key,
-            "freellmapi": self.freellmapi_api_key,
             "tokenrouter": self.tokenrouter_api_key,
             "nim": self.nim_api_key,
             "ollama_cloud": self.ollama_cloud_api_key,

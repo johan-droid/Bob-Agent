@@ -173,7 +173,7 @@ class TestApiDies:
             kicked: list[str] = []
             monkeypatch.setattr(
                 "agent_system.services.task_runner.kick_task",
-                lambda factory, bus, task_id: kicked.append(task_id) or True,
+                lambda factory, bus, task_id, settings=None: kicked.append(task_id) or True,
             )
             bus = EventBus()
             orch = Orchestrator(bus)
@@ -201,7 +201,7 @@ class TestApiDies:
             ran: list[str] = []
             orch = Orchestrator(EventBus())
             orch.register_handler("code", lambda i, c: ran.append(i.get("t", "?")) or {"ok": True})
-            monkeypatch.setattr(runner_mod, "_build_orchestrator", lambda bus: orch)
+            monkeypatch.setattr(runner_mod, "_build_orchestrator", lambda bus, settings=None: orch)
             # The lifespan sequence, verbatim: requeue expired leases, then
             # kick everything QUEUED (real kicks, real driver threads).
             assert Orchestrator(EventBus()).recover_orphans(factory2) == [running_id]

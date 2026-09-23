@@ -15,7 +15,8 @@ from agent_system.services.tool_errors import ToolError
 
 def allowed_roots(settings: Any) -> list[Path]:
     """Every root a capability may touch for this deployment, resolved."""
-    roots = [Path.cwd() / "workspaces", Path.cwd() / "outputs", Path.cwd()]
+    # Never include bare cwd: it would make the whole repo writable.
+    roots = [Path.cwd() / "workspaces", Path.cwd() / "outputs"]
     extra = str(getattr(settings, "tools_fs_roots", "") or "")
     for part in extra.split(","):
         part = part.strip()

@@ -404,6 +404,39 @@ class DbApprovalStore:
             )
             return (cast(Any, result).rowcount or 0) > 0
 
+    def decide_atomic(
+        self,
+        approval_id: str,
+        *,
+        decision: str,
+        policy: str,
+        decided_by: str,
+        reason: str | None,
+        decided_at: datetime,
+    ) -> bool:
+        """Conditional UPDATE ... WHERE decision='PENDING'. True iff we won."""
+        from sqlalchemy import update as sa_update
+
+        from agent_system.infra.db import session_scope
+        from agent_system.infra.models import Approval as ApprovalRow
+
+        with session_scope(self._factory) as db:
+            result = db.execute(
+                sa_update(ApprovalRow)
+                .where(
+                    ApprovalRow.id == approval_id,
+                    ApprovalRow.decision == Decision.PENDING.value,
+                )
+                .values(
+                    decision=decision,
+                    policy=policy,
+                    decided_by=decided_by,
+                    reason=reason,
+                    decided_at=decided_at,
+                )
+            )
+            return (cast(Any, result).rowcount or 0) > 0
+
 
 class PermissionGate:
     """The one authoritative approval store and evaluator (v3.1 §12–§13).
@@ -490,6 +523,8 @@ class PermissionGate:
         Multi-user isolation: when ``owner_user_id`` is set on the approval,
         only that owner (or an admin) may decide it. Unknown deciders receive
         a ``ValueError`` so the API layer can return 404/403.
+        Concurrency: DB-backed gates use a conditional UPDATE ... WHERE
+        decision='PENDING' so concurrent approve/deny yields one winner.
         """
         record = self._store.get(approval_id)
         if record is None:
@@ -512,18 +547,40 @@ class PermissionGate:
             return record
         if is_dangerous_scope(record.scope) or policy is Policy.DENY:
             # Cannot approve a default-deny scope, nor approve with DENY.
-            record.decision = Decision.DENIED
-            record.reason = reason or (
+            new_decision = Decision.DENIED
+            new_reason = reason or (
                 "default-deny scope" if is_dangerous_scope(record.scope) else "denied"
             )
+        else:
+            new_decision = Decision.APPROVED if approve else Decision.DENIED
+            new_reason = reason
+        # Atomic path for DB store: first writer wins, losers get fresh row.
+        decide_atomic = getattr(self._store, "decide_atomic", None)
+        if callable(decide_atomic):
+            decided_at = utcnow()
+            won = decide_atomic(
+                approval_id,
+                decision=new_decision.value,
+                policy=policy.value,
+                decided_by=decided_by,
+                reason=new_reason,
+                decided_at=decided_at,
+            )
+            fresh = self._store.get(approval_id)
+            if fresh is not None:
+                self._records[fresh.approval_id] = fresh
+                return fresh
+            # Fallthrough (row vanished): return in-memory view.
+            record.decision = new_decision
+            record.policy = policy
             record.decided_by = decided_by
-            record.decided_at = utcnow()
-            self._persist(record)
+            record.reason = new_reason
+            record.decided_at = decided_at
             return record
-        record.decision = Decision.APPROVED if approve else Decision.DENIED
+        record.decision = new_decision
         record.policy = policy
         record.decided_by = decided_by
-        record.reason = reason
+        record.reason = new_reason
         record.decided_at = utcnow()
         self._persist(record)
         return record
@@ -531,21 +588,36 @@ class PermissionGate:
     def check(self, req: ApprovalRequest) -> tuple[bool, ApprovalRecord | None]:
         """Check for a live grant covering this request.
 
-        Honors the grant's policy: ALLOW_ONCE is consumed here (atomically for
-        the DB store), ALLOW_SESSION requires a matching session, and
-        ALLOW_WORKSPACE requires a matching workspace.
+        Honors the grant's policy: ALLOW_ONCE is consumed atomically via
+        mark_consumed (one winner under concurrency), ALLOW_SESSION requires
+        a matching session, and ALLOW_WORKSPACE requires a matching workspace.
+        Owner isolation: grants only match requests from the same owner.
         """
         now = utcnow()
         for record in self._store.grants_for(req.scope):
             if record.is_expired(now) or record.consumed:
+                continue
+            # Owner isolation: never consume another user's grant.
+            if (
+                record.owner_user_id is not None
+                and req.owner_user_id is not None
+                and record.owner_user_id != req.owner_user_id
+            ):
                 continue
             if record.policy is Policy.ALLOW_SESSION and record.session_id != req.session_id:
                 continue
             if record.policy is Policy.ALLOW_WORKSPACE and record.workspace_id != req.workspace_id:
                 continue
             if record.policy is Policy.ALLOW_ONCE:
+                # Atomic consume: losers skip to next grant.
+                try:
+                    won = self._store.mark_consumed(record.approval_id, now)
+                except Exception:
+                    won = False
+                if not won:
+                    # Re-read: winner already consumed it.
+                    continue
                 record.consumed = True
-                self._persist(record)
             self._records[record.approval_id] = record
             return True, record
         return False, None

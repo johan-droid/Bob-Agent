@@ -68,9 +68,18 @@ async def a2a_delegate(body: DelegateBody, request: Request) -> dict[str, Any]:
 @a2a_router.post("/callback")
 async def a2a_callback(request: Request) -> dict[str, Any]:
     """Receive an external agent's signed result (HMAC-verified, no bearer needed)."""
+    import logging as _logging
+
     svc = getattr(request.app.state, "a2a", None)
     if svc is None or not svc.enabled:
         raise HTTPException(status_code=503, detail="A2A delegation is off (A2A_ENABLED=false)")
+    # Body-size cap (signed envelopes are small).
+    try:
+        clen = request.headers.get("content-length")
+        if clen is not None and int(clen) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="envelope too large")
+    except ValueError:
+        pass
     try:
         envelope: dict[str, Any] = await request.json()
     except Exception:
@@ -79,7 +88,10 @@ async def a2a_callback(request: Request) -> dict[str, Any]:
         outcome: dict[str, Any] = svc.handle_callback(envelope)
         return outcome
     except A2AError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail="invalid envelope") from exc
+    except Exception:
+        _logging.getLogger(__name__).exception("a2a callback failed")
+        raise HTTPException(status_code=500, detail="internal error") from None
 
 
 @a2a_router.get("/delegations", dependencies=[Depends(get_authenticator)])

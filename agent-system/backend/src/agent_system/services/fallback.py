@@ -323,14 +323,58 @@ def invoke_with_fallback(
     stream: bool = False,
 ) -> Any:
     """Try candidates in order; same task/worker/context every attempt."""
-    from agent_system.services.fallback_ledger import should_fallback
-    from agent_system.services.provider_health import never_fallback_reason
+    import logging as _logging
 
-    attempts = list(candidates or [])[: max(1, max_attempts)]
+    from agent_system.services.fallback_ledger import should_fallback
+    from agent_system.services.provider_health import (
+        ProviderHealth,
+        classify_provider_error,
+        never_fallback_reason,
+    )
+
+    _log = _logging.getLogger(__name__)
+    # Deduplicate identical provider/model pairs: Bob-level fallback must not
+    # loop back onto the same failing upstream (e.g. Bob → OpenRouter →
+    # same provider → Bob retries OpenRouter). Track attempts by identity.
+    seen: set[tuple[str, str]] = set()
+    # Rebuild without duplicates, preserving order.
+    unique_candidates: list[tuple[str, str]] = []
+    skipped_dupes: list[dict[str, Any]] = []
+    for provider, model_id in candidates or []:
+        key = (str(provider), str(model_id))
+        if key in seen:
+            skipped_dupes.append(
+                {
+                    "provider": key[0],
+                    "model_id": key[1],
+                    "ok": False,
+                    "skipped": "duplicate candidate",
+                }
+            )
+            continue
+        seen.add(key)
+        unique_candidates.append((key[0], key[1]))
+    attempts = unique_candidates[: max(1, max_attempts)]
     history: list[dict[str, Any]] = []
+    history.extend(skipped_dupes)
     last: Any = None
     ledger_on = bool(task_id and worker_id) and _ledger_enabled(factory)
+    #: Providers whose authentication failed mid-chain. A 401/403 applies to
+    #: every model behind the same key — remaining candidates of that provider
+    #: are skipped without a network call (no retry storm), while fallback to
+    #: *other* providers stays allowed (their keys may be fine).
+    auth_dead_providers: set[str] = set()
     for attempt_no, (provider, model_id) in enumerate(attempts, start=1):
+        if provider in auth_dead_providers:
+            history.append(
+                {
+                    "provider": provider,
+                    "model_id": model_id,
+                    "ok": False,
+                    "skipped": "authentication failed earlier for this provider",
+                }
+            )
+            continue
         attempt_id = f"{worker_id or task_id or 'worker'}:attempt:{attempt_no}"
         started = time.monotonic()
         if ledger_on and task_id and worker_id:
@@ -359,11 +403,21 @@ def invoke_with_fallback(
                 factory, task_id, worker_id, attempt_no, provider, model_id, err, latency
             )
             _report_failure(health, provider, model_id, err)
+            if classify_provider_error(err) == ProviderHealth.AUTH_FAILED:
+                auth_dead_providers.add(provider)
             history.append(
                 {"provider": provider, "model_id": model_id, "ok": False, "error": err[:300]}
             )
             stop = never_fallback_reason(err)
             if stop is None and should_fallback(err, attempt_no, max_attempts):
+                _log.warning(
+                    "[LLM] fallback provider=%s model=%s attempt=%s task_id=%s error=%s",
+                    provider,
+                    model_id,
+                    attempt_no,
+                    task_id,
+                    str(err)[:200],
+                )
                 _emit_fallback(
                     bus,
                     factory,
@@ -414,6 +468,8 @@ def invoke_with_fallback(
             factory, task_id, worker_id, attempt_no, provider, model_id, err, lat
         )
         _report_failure(health, provider, model_id, err)
+        if classify_provider_error(err) == ProviderHealth.AUTH_FAILED:
+            auth_dead_providers.add(provider)
         history.append(
             {"provider": provider, "model_id": model_id, "ok": False, "error": err[:300]}
         )

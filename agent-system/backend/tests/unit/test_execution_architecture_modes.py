@@ -176,6 +176,10 @@ def test_restart_recovery_expired_lease_and_no_duplicate_execution(
     db_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("CLOUD_INLINE_RUN", "true")
+    # Hermetic offline drive: ambient developer credentials must not leak
+    # real network calls into this deterministic recovery contract.
+    monkeypatch.setenv("DEFAULT_PROVIDER", "echo")
+    monkeypatch.setenv("DEFAULT_MODEL", "echo-default")
     clear_settings_cache()
 
     try:
@@ -260,6 +264,10 @@ def test_redis_never_touched_by_inline_telegram_path(
     monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("CLOUD_INLINE_RUN", "true")
     monkeypatch.setenv("REDIS_URL", "redis://invalid-host-should-never-be-touched:6379/0")
+    # Hermetic offline drive: the no-Redis contract must not depend on live
+    # provider keys that may exist on a developer machine.
+    monkeypatch.setenv("DEFAULT_PROVIDER", "echo")
+    monkeypatch.setenv("DEFAULT_MODEL", "echo-default")
     clear_settings_cache()
 
     try:

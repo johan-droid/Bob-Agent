@@ -385,7 +385,7 @@ class TestRetryHammer:
         kicked: list[str] = []
         monkeypatch.setattr(
             "agent_system.services.task_runner.kick_task",
-            lambda factory, bus, task_id: kicked.append(task_id) or True,
+            lambda factory, bus, task_id, settings=None: kicked.append(task_id) or True,
         )
         task_id = self._failed_task(client)
         first = client.post(f"/api/v1/tasks/{task_id}/retry")
@@ -405,7 +405,7 @@ class TestRetryHammer:
         kicked: list[str] = []
         monkeypatch.setattr(
             "agent_system.services.task_runner.kick_task",
-            lambda factory, bus, task_id: kicked.append(task_id) or True,
+            lambda factory, bus, task_id, settings=None: kicked.append(task_id) or True,
         )
         task_id = self._failed_task(client)
         barrier = threading.Barrier(2)
@@ -433,7 +433,7 @@ class TestRetryHammer:
         later retry re-kicks instead of 409ing as 'already queued'."""
         calls = {"n": 0}
 
-        def flaky_kick(factory: Any, bus: Any, task_id: str) -> bool:
+        def flaky_kick(factory: Any, bus: Any, task_id: str, settings: Any = None) -> bool:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("kick crashed")
@@ -457,7 +457,7 @@ class TestRetryHammer:
         kicked: list[str] = []
         monkeypatch.setattr(
             "agent_system.services.task_runner.kick_task",
-            lambda factory, bus, task_id: kicked.append(task_id) or True,
+            lambda factory, bus, task_id, settings=None: kicked.append(task_id) or True,
         )
         task_id = self._failed_task(client)
         factory = client.app.state.session_factory

@@ -12,11 +12,22 @@ from agent_system.config import get_settings
 
 
 @pytest.fixture()
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # Hermetic contract runtime: endpoint-kicked background threads must run
+    # the deterministic echo tier, never ambient developer credentials.
+    # Otherwise kicked tasks burn real network timeouts on worker threads
+    # that outlive the test and trip lifespan shutdown ("Task runner
+    # shutdown timed out") in unrelated later teardowns.
+    from agent_system.config import clear_settings_cache
+
+    monkeypatch.setenv("DEFAULT_PROVIDER", "echo")
+    monkeypatch.setenv("DEFAULT_MODEL", "echo-default")
+    clear_settings_cache()
     with TestClient(app) as client:
         token = client.app.state.authenticator.bootstrap_token  # type: ignore[attr-defined]
         client.headers["Authorization"] = f"Bearer {token}"
         yield client
+    clear_settings_cache()
 
 
 class TestAuth:

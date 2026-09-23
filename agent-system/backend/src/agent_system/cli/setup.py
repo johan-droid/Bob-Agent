@@ -54,8 +54,10 @@ _KEY_ENV = {
     "gemini": "GEMINI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "huggingface": "HUGGINGFACE_API_KEY",
-    "freellmapi": "FREELLMAPI_API_KEY",
     "tokenrouter": "TOKENROUTER_API_KEY",
+    "nim": "NIM_API_KEY",
+    "ollama_cloud": "OLLAMA_CLOUD_API_KEY",
+    "opencode": "OPENCODE_API_KEY",
 }
 _BASE_ENV = {
     "groq": "GROQ_BASE_URL",
@@ -66,8 +68,10 @@ _BASE_ENV = {
     "gemini": "GEMINI_BASE_URL",
     "deepseek": "DEEPSEEK_BASE_URL",
     "huggingface": "HUGGINGFACE_BASE_URL",
-    "freellmapi": "FREELLMAPI_BASE_URL",
     "tokenrouter": "TOKENROUTER_BASE_URL",
+    "nim": "NIM_BASE_URL",
+    "ollama_cloud": "OLLAMA_CLOUD_BASE_URL",
+    "opencode": "OPENCODE_BASE_URL",
 }
 _ORDER = (
     "openai",
@@ -80,8 +84,10 @@ _ORDER = (
     "gemini",
     "deepseek",
     "huggingface",
-    "freellmapi",
     "tokenrouter",
+    "nim",
+    "ollama_cloud",
+    "opencode",
 )
 
 

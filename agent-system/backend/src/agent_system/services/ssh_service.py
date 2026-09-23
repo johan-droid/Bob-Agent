@@ -96,23 +96,9 @@ class SSHService:
                 extra={"hostname": hostname, "port": port, "error": str(exc)},
             )
 
-        # Fallback for offline/mock test environments where socket cannot connect
-        try:
-            raw_host_key = f"ssh-ed25519-key-{hostname}-{port}".encode()
-            fp_bytes = hashlib.sha256(raw_host_key).digest()
-            fp_b64 = base64.b64encode(fp_bytes).decode("utf-8").rstrip("=")
-            return SSHHostFingerprint(
-                hostname=hostname,
-                port=port,
-                fingerprint_sha256=f"SHA256:{fp_b64}",
-                host_key_type="ssh-ed25519",
-            )
-        except Exception as exc:
-            logger.error(
-                "ssh_fingerprint_fetch_failed",
-                extra={"hostname": hostname, "port": port, "error": str(exc)},
-            )
-            return None
+        # Fail-closed: no synthetic fingerprint when the probe fails.
+        # Callers treat None as "unverifiable" and must abort when verify_host=True.
+        return None
 
     def execute_command(
         self,
@@ -193,7 +179,7 @@ class SSHService:
             exit_code = 0
             try:
                 client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.set_missing_host_key_policy(paramiko.RejectPolicy())
                 pkey = None
                 if private_key:
                     for key_cls in (
@@ -223,10 +209,17 @@ class SSHService:
                 stdout_str = _stdout.read().decode("utf-8", errors="replace")
                 stderr_str = _stderr.read().decode("utf-8", errors="replace")
                 client.close()
-            except Exception:
-                # Fallback for unreachable offline test fixtures
-                stdout_str = f"[ssh:{connection_name}@{hostname}] executed: {command}"
-                exit_code = 0
+            except Exception as exc:
+                # Fail-closed: never fake success. Surface the error so the
+                # agent cannot believe an unreachable host ran the command.
+                return SSHExecutionResult(
+                    connection_name=connection_name,
+                    exit_code=1,
+                    stdout="",
+                    stderr=str(exc),
+                    host_verified=False,
+                    error=f"SSH execution failed for {hostname}:{port}: {exc}",
+                )
 
             return SSHExecutionResult(
                 connection_name=connection_name,

@@ -12,7 +12,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from agent_system.api.deps import get_authenticator
+from agent_system.api.deps import (
+    apply_owner_filter,
+    enforce_owner_row,
+    enforce_session_visible,
+    enforce_task_visible,
+    get_authenticator,
+    get_principal,
+    owner_id,
+)
 from agent_system.config import get_settings
 from agent_system.domain import ids
 from agent_system.domain.events import Event, utcnow
@@ -105,42 +113,87 @@ class BatchCreate(BaseModel):
 
 
 @authenticated_features.post("/batches", status_code=201)
-def create_batch(body: BatchCreate, request: Request) -> dict[str, Any]:
+def create_batch(
+    body: BatchCreate,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.batching import BatchError, TaskBatcher
 
     factory = request.app.state.session_factory
+    # Owner check: all batched tasks + session must belong to the caller.
+    with session_scope(factory) as db:
+        enforce_session_visible(db, body.session_id, principal)
+        for tid in body.task_ids:
+            enforce_task_visible(db, tid, principal)
     batcher = TaskBatcher(_bus(request))
     try:
         result = batcher.create_batch(factory, body.session_id, body.task_ids, body.batch_type)
     except BatchError as exc:
         status = 409 if "compatib" in str(exc).lower() else 404
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+        raise HTTPException(status_code=status, detail="batch error") from exc
+    # Stamp owner on the batch row for list/get/cancel isolation.
+    try:
+        from agent_system.infra.models import TaskBatch
+
+        with session_scope(factory) as db:
+            row = db.get(TaskBatch, str(result.get("batch_id")))
+            if row is not None and getattr(row, "owner_user_id", None) is None:
+                row.owner_user_id = owner_id(principal)
+    except Exception:
+        pass
     _emit(request, "task.queued", "batcher", {"batch_id": result["batch_id"]})
     return result
 
 
 @authenticated_features.post("/batches/{batch_id}/cancel")
-def cancel_batch(batch_id: str, request: Request) -> dict[str, Any]:
+def cancel_batch(
+    batch_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.batching import BatchError, TaskBatcher
 
     factory = request.app.state.session_factory
+    try:
+        from agent_system.infra.models import TaskBatch
+
+        with session_scope(factory) as db:
+            enforce_owner_row(db.get(TaskBatch, batch_id), principal, "batch")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     batcher = TaskBatcher(_bus(request))
     try:
         result = batcher.cancel_batch(factory, batch_id)
     except BatchError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="batch not found") from exc
     return result
 
 
 @authenticated_features.get("/batches/{batch_id}")
-def get_batch(batch_id: str, request: Request) -> dict[str, Any]:
+def get_batch(
+    batch_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.batching import batch_status
 
     factory = request.app.state.session_factory
     try:
+        from agent_system.infra.models import TaskBatch
+
+        with session_scope(factory) as db:
+            enforce_owner_row(db.get(TaskBatch, batch_id), principal, "batch")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
         return batch_status(factory, batch_id)
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="batch not found") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +210,15 @@ class RecipeCreate(BaseModel):
 
 
 @authenticated_features.post("/recipes", status_code=201)
-def create_recipe(body: RecipeCreate, request: Request) -> dict[str, Any]:
+def create_recipe(
+    body: RecipeCreate,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.recipes import RecipeEngine, RecipeError
 
+    if len(str(body.task_dag)) > 100 * 1024:
+        raise HTTPException(status_code=413, detail="task_dag too large")
     factory = request.app.state.session_factory
     engine = RecipeEngine(_bus(request))
     try:
@@ -172,23 +231,59 @@ def create_recipe(body: RecipeCreate, request: Request) -> dict[str, Any]:
             tags=body.tags,
         )
     except RecipeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail="invalid recipe") from exc
+    try:
+        from agent_system.infra.models import Recipe as _R
+
+        with session_scope(factory) as db:
+            row = db.get(_R, str(recipe.get("recipe_id") or recipe.get("id") or ""))
+            if row is not None:
+                row.owner_user_id = owner_id(principal)
+    except Exception:
+        pass
     return recipe
 
 
 @authenticated_features.get("/recipes")
-def list_recipes(request: Request) -> list[dict[str, Any]]:
+def list_recipes(
+    request: Request, principal: Annotated[Any, Depends(get_principal)]
+) -> list[dict[str, Any]]:
     from agent_system.services.recipes import RecipeEngine
 
     factory = request.app.state.session_factory
-    return RecipeEngine(_bus(request)).list_recipes(factory)
+    rows = RecipeEngine(_bus(request)).list_recipes(factory)
+    # Owner filter when the engine does not scope itself.
+    try:
+        from agent_system.infra.models import Recipe as _R
+
+        with session_scope(factory) as db:
+            allowed = {
+                r.id
+                for r in apply_owner_filter(db.query(_R), _R, principal).all()
+            }
+        return [r for r in rows if str(r.get("recipe_id") or r.get("id")) in allowed]
+    except Exception:
+        return rows
 
 
 @authenticated_features.get("/recipes/{recipe_id}")
-def get_recipe(recipe_id: str, request: Request) -> dict[str, Any]:
+def get_recipe(
+    recipe_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.recipes import RecipeEngine
 
     factory = request.app.state.session_factory
+    try:
+        from agent_system.infra.models import Recipe as _R
+
+        with session_scope(factory) as db:
+            enforce_owner_row(db.get(_R, recipe_id), principal, "recipe")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     recipe = RecipeEngine(_bus(request)).get_recipe(factory, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="recipe not found")
@@ -196,34 +291,61 @@ def get_recipe(recipe_id: str, request: Request) -> dict[str, Any]:
 
 
 class RecipeExecute(BaseModel):
-    params: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict, max_length=20)
 
 
 @authenticated_features.post("/recipes/{recipe_id}/execute")
-def execute_recipe(recipe_id: str, body: RecipeExecute, request: Request) -> dict[str, Any]:
+def execute_recipe(
+    recipe_id: str,
+    body: RecipeExecute,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.recipes import RecipeEngine, RecipeError
 
     factory = request.app.state.session_factory
+    try:
+        from agent_system.infra.models import Recipe as _R
+
+        with session_scope(factory) as db:
+            enforce_owner_row(db.get(_R, recipe_id), principal, "recipe")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     engine = RecipeEngine(_bus(request))
     try:
         result = engine.execute(factory, recipe_id, body.params)
     except RecipeError as exc:
         status = 404 if "not found" in str(exc) else 409
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+        raise HTTPException(status_code=status, detail="recipe error") from exc
     _emit(request, "recipe.started", "recipe", {"recipe_id": recipe_id, **result})
     return result
 
 
 @authenticated_features.post("/recipes/{recipe_id}/cancel")
-def cancel_recipe_run(recipe_id: str, request: Request) -> dict[str, Any]:
+def cancel_recipe_run(
+    recipe_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.services.recipes import RecipeEngine, RecipeError
 
     factory = request.app.state.session_factory
+    try:
+        from agent_system.infra.models import Recipe as _R
+
+        with session_scope(factory) as db:
+            enforce_owner_row(db.get(_R, recipe_id), principal, "recipe")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     engine = RecipeEngine(_bus(request))
     try:
         result = engine.cancel_run(factory, recipe_id)
     except RecipeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="recipe error") from exc
     return result
 
 
@@ -306,10 +428,14 @@ def generate_insight(body: InsightGenerate, request: Request) -> dict[str, Any]:
 
 
 @authenticated_features.get("/insights")
-def list_insights(request: Request, include_archived: bool = False) -> list[dict[str, Any]]:
+def list_insights(
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        query = db.query(Insight)
+        query = apply_owner_filter(db.query(Insight), Insight, principal)
         if not include_archived:
             query = query.filter(Insight.archived_at.is_(None))
         rows = query.order_by(Insight.generated_at.desc()).limit(100).all()
@@ -327,12 +453,14 @@ def list_insights(request: Request, include_archived: bool = False) -> list[dict
 
 
 @authenticated_features.post("/insights/{insight_id}/archive")
-def archive_insight(insight_id: str, request: Request) -> dict[str, Any]:
+def archive_insight(
+    insight_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        row = db.get(Insight, insight_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="insight not found")
+        row = enforce_owner_row(db.get(Insight, insight_id), principal, "insight")
         row.archived_at = utcnow()
         return {"insight_id": insight_id, "archived": True}
 
@@ -393,7 +521,13 @@ class ScheduleCreate(BaseModel):
 
 
 @authenticated_features.post("/schedule", status_code=201)
-def create_scheduled_job(body: ScheduleCreate, request: Request) -> dict[str, Any]:
+def create_scheduled_job(
+    body: ScheduleCreate,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
+    if len(str(body.schedule)) > 10 * 1024 or len(str(body.payload)) > 10 * 1024:
+        raise HTTPException(status_code=413, detail="schedule/payload too large")
     factory = request.app.state.session_factory
     job_id = ids.new_id("job")
     with session_scope(factory) as db:
@@ -404,6 +538,7 @@ def create_scheduled_job(body: ScheduleCreate, request: Request) -> dict[str, An
                 kind=body.kind,
                 schedule_json=body.schedule,
                 payload_json=body.payload,
+                owner_user_id=owner_id(principal),
             )
         )
     return {
@@ -416,10 +551,16 @@ def create_scheduled_job(body: ScheduleCreate, request: Request) -> dict[str, An
 
 
 @authenticated_features.get("/schedule")
-def list_scheduled_jobs(request: Request) -> list[dict[str, Any]]:
+def list_scheduled_jobs(
+    request: Request, principal: Annotated[Any, Depends(get_principal)]
+) -> list[dict[str, Any]]:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        rows = db.query(ScheduledJob).order_by(ScheduledJob.created_at.desc()).all()
+        rows = apply_owner_filter(
+            db.query(ScheduledJob).order_by(ScheduledJob.created_at.desc()),
+            ScheduledJob,
+            principal,
+        ).all()
         return [
             {
                 "job_id": r.id,
@@ -435,12 +576,14 @@ def list_scheduled_jobs(request: Request) -> list[dict[str, Any]]:
 
 
 @authenticated_features.delete("/schedule/{job_id}", status_code=204)
-def delete_scheduled_job(job_id: str, request: Request) -> None:
+def delete_scheduled_job(
+    job_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> None:
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        row = db.get(ScheduledJob, job_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="job not found")
+        row = enforce_owner_row(db.get(ScheduledJob, job_id), principal, "job")
         db.delete(row)
 
 
@@ -610,6 +753,46 @@ def test_model_provider(body: ProviderTestRequest, request: Request) -> dict[str
     settings = get_settings()
     result = test_provider(settings, body.provider, model=body.model, prompt=body.prompt)
     return result
+
+
+@authenticated_features.post("/model-routing/diagnose")
+def diagnose_model_provider(body: ProviderTestRequest, request: Request) -> dict[str, Any]:
+    """Staged provider self-test: credentials/endpoint/model/completion/stream/tools.
+
+    Identifies the exact failing stage instead of a single "provider failed";
+    responses never contain API keys.
+    """
+    from agent_system.services.providers import diagnose_provider
+
+    settings = get_settings()
+    return diagnose_provider(settings, body.provider, model=body.model, prompt=body.prompt)
+
+
+@authenticated_features.get("/model-routing/diagnostics")
+def provider_diagnostics(request: Request) -> dict[str, Any]:
+    """Configuration report per provider: configured or missing, never the secret."""
+    from agent_system.services.providers import configured_providers, provider_spec
+
+    settings = get_settings()
+    providers: dict[str, Any] = {}
+    for entry in configured_providers(settings):
+        key = entry["key"]
+        spec = provider_spec(key)
+        env_var = f"{str(key).upper()}_API_KEY"
+        if key == "gemini":
+            env_var = "GEMINI_API_KEY (or GOOGLE_API_KEY)"
+        elif key == "ollama":
+            env_var = "— (keyless)"
+        providers[key] = {
+            "label": entry["label"],
+            "configured": entry["configured"],
+            "needs_key": entry["needs_key"],
+            "env_var": env_var,
+            "default_model": spec.default_model if spec else entry.get("default_model"),
+            "api_surface": spec.api_surface if spec else "chat",
+            "free_tier": entry.get("free_tier", False),
+        }
+    return {"providers": providers}
 
 
 # re-exported for type checkers

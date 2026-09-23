@@ -574,10 +574,15 @@ class GatewayExecutor:
             self._factory, self._outbox, chat_id, session_id, self._bus
         )
         presenter.start()
+        from agent_system.services.telegram import send_chat_action_sync as _typing
+
+        _typing(getattr(self._settings, "telegram_bot_token", None), chat_id)
 
         try:
             _logger.info("telegram.agent.started session_id=%s", session_id)
-            drive_session(self._factory, self._bus, session_id)
+            # The executor's own settings govern the whole drive
+            # (single-config execution — never a divergent ambient read).
+            drive_session(self._factory, self._bus, session_id, settings=self._settings)
             _logger.info("telegram.task.completed session_id=%s", session_id)
         except Exception as exc:
             _logger.exception(
@@ -693,7 +698,11 @@ class GatewayExecutor:
                 save_chat_message,
             )
 
-            self._outbox.enqueue(kind="typing", chat_id=chat_id, text="")
+            from agent_system.services.telegram import send_chat_action_sync
+
+            send_chat_action_sync(
+                getattr(self._settings, "telegram_bot_token", None), chat_id
+            )
             save_chat_message(self._factory, chat_id, "user", text)
             history = load_chat_history(self._factory, chat_id, limit=10)
 
@@ -742,7 +751,16 @@ class GatewayExecutor:
             try:
                 _, soul_text = load_soul(getattr(self._settings, "soul_path", "") or None)
                 router = build_model_router(self._bus, self._settings, soul_text=soul_text or None)
-                inv = router.invoke(self._factory, router.default_model, prompt, agent_type="chat")
+                # 60s per attempt; the router fails over across providers
+                # (llm_max_fallback_attempts) instead of hanging on one.
+                inv = router.invoke(
+                    self._factory,
+                    router.default_model,
+                    prompt,
+                    agent_type="chat",
+                    timeout=60,
+                    fallback=True,
+                )
                 if inv.ok and inv.output:
                     answer = inv.output
                     provider = getattr(inv, "provider", None) or "groq"

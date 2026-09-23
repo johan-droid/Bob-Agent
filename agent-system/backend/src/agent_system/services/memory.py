@@ -138,6 +138,8 @@ class ObsidianVaultWriter:
             fm["session_id"] = meta.session_id
         if meta.agent_run_id:
             fm["agent_run_id"] = meta.agent_run_id
+        if meta.owner_user_id:
+            fm["owner_user_id"] = meta.owner_user_id
         return fm
 
     @staticmethod
@@ -434,6 +436,10 @@ class DbNoteStore:
             q = db.query(_Row)
             if owner_user_id is not None:
                 q = q.filter(_Row.owner_user_id == str(owner_user_id))
+            else:
+                # Fail-closed: anonymous callers only see legacy unowned rows,
+                # never another user's notes.
+                q = q.filter(_Row.owner_user_id.is_(None))
             if session_id is not None:
                 q = q.filter(_Row.session_id == str(session_id))
             rows = q.order_by(_Row.created_at.desc()).limit(500).all()

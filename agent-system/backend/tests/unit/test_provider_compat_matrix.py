@@ -46,6 +46,7 @@ from agent_system.services.model_router import (
 from agent_system.services.providers import (
     PROVIDERS,
     AnthropicAdapter,
+    GeminiAdapter,
     OpenAICompatibleAdapter,
     build_adapter,
 )
@@ -115,7 +116,6 @@ EXPECTED_WIRE: dict[str, dict[str, Any]] = {
     "mistral": _OPENAI_NATIVE_PAYLOAD,
     "deepseek": _OPENAI_NATIVE_PAYLOAD,
     "huggingface": _OPENAI_NATIVE_PAYLOAD,
-    "freellmapi": _OPENAI_NATIVE_PAYLOAD,
     "tokenrouter": _OPENAI_NATIVE_PAYLOAD,
     "nim": _OPENAI_NATIVE_PAYLOAD,
     "ollama_cloud": _OPENAI_NATIVE_PAYLOAD,
@@ -515,6 +515,52 @@ class TestSSEStreamingAssembly:
         assert len(tool_calls) == 1
         assert tool_calls[0] == {
             "id": "toolu_01",
+            "name": _CALL_NAME,
+            "arguments": json.dumps(_CALL_ARGS),
+        }
+
+    def test_gemini_streaming_assembles_text_and_function_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        evt1 = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "working "},
+                                {
+                                    "functionCall": {
+                                        "name": _CALL_NAME,
+                                        "args": _CALL_ARGS,
+                                    }
+                                },
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3},
+            }
+        )
+        evt2 = json.dumps(
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}
+                ]
+            }
+        )
+        self._mock_client_stream(monkeypatch, [f"data: {evt1}", f"data: {evt2}"])
+
+        adapter = GeminiAdapter(PROVIDERS["gemini"], api_key="x")
+        chunks, usage, tool_calls = adapter.stream("gemini-3.6-flash", "hi")
+
+        assert "".join(chunks) == "working done"
+        assert usage == {"input_tokens": 2, "output_tokens": 3}
+        assert isinstance(tool_calls, list)
+        assert len(tool_calls) == 1
+        assert tool_calls[0] == {
+            "id": "call_native_1",
             "name": _CALL_NAME,
             "arguments": json.dumps(_CALL_ARGS),
         }

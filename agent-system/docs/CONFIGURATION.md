@@ -35,8 +35,6 @@ is generated from the `Settings` model, so this table cannot drift:
 | ANTHROPIC_API_KEY | str | yes | (secret) | Anthropic key (claude-sonnet-4-5). |
 | DEEPSEEK_API_KEY | str | yes | (secret) | DeepSeek key (deepseek-chat). |
 | DEEPSEEK_BASE_URL | str | no | https://api.deepseek.com/v1 | DeepSeek endpoint. |
-| FREELLMAPI_API_KEY | str | yes | (secret) | Self-hosted FreeLLMAPI key (http://localhost:3001). |
-| FREELLMAPI_BASE_URL | str | no | http://localhost:3001/v1 | FreeLLMAPI endpoint. |
 | GEMINI_API_KEY | str | yes | (secret) | Google AI Studio key — free Gemini flash. |
 | GEMINI_BASE_URL | str | no | https://generativelanguage.googleapis.com/v1beta | Gemini endpoint (native API). |
 | GROQ_API_KEY | str | yes | (secret) | Groq key — generous free tier (llama-3.3-70b). |

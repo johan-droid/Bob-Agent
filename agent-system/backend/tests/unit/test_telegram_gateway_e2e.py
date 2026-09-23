@@ -46,10 +46,16 @@ def _factory(tmp_path: Any, name: str = "gw.db") -> Any:
 
 
 def _settings(tmp_path: Any) -> Settings:
+    # Hermetic offline runtime: the gateway E2E proves durability, not live
+    # providers. Pinning echo keeps ambient developer credentials (a local
+    # .env.local with real keys) from leaking real network calls into the
+    # drive — the "echo provider ran offline" contract asserted below.
     return Settings(
         workspaces_root=str(tmp_path / "workspaces"),
         skills_dir=str(tmp_path / "skills"),
         telegram_bot_token="test:token",
+        default_provider="echo",
+        default_model="echo-default",
     )
 
 

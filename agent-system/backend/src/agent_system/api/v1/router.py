@@ -65,9 +65,16 @@ def ready(response: Response) -> dict[str, Any]:
     from agent_system.api.main import api_ready
 
     data = api_ready()
-    if data.get("status") == "not_ready" or not data.get("ready", True):
+    ok = not (data.get("status") == "not_ready" or not data.get("ready", True))
+    if not ok:
         response.status_code = 503
-    return data
+    # Minimal unauth surface: status + per-service ok booleans only.
+    # Detailed configured/reachable/last_error stay behind authenticated
+    # /api/v1/ready-dependency-check.
+    checks = data.get("checks")
+    if not isinstance(checks, dict):
+        checks = {}
+    return {"status": data.get("status", "ok"), "ready": bool(data.get("ready", ok)), "checks": checks}
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +92,25 @@ _TOKEN_ATTEMPTS: dict[str, list[float]] = {}
 _TOKEN_LOCK = _threading.Lock()
 _TOKEN_MAX_ATTEMPTS = 10
 _TOKEN_WINDOW_SECONDS = 60.0
+
+# Generic hot-POST limiter: max 60 creates/min/IP for sessions/tasks.
+_HOT_ATTEMPTS: dict[str, list[float]] = {}
+_HOT_LOCK = _threading.Lock()
+_HOT_MAX = 60
+_HOT_WINDOW = 60.0
+
+
+def _check_hot_rate_limit(request: Request, scope: str) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{scope}:{client_ip}"
+    now = _time.monotonic()
+    with _HOT_LOCK:
+        hist = [t for t in _HOT_ATTEMPTS.get(key, []) if now - t < _HOT_WINDOW]
+        if len(hist) >= _HOT_MAX:
+            _HOT_ATTEMPTS[key] = hist
+            raise HTTPException(status_code=429, detail="too many requests")
+        hist.append(now)
+        _HOT_ATTEMPTS[key] = hist
 
 
 def _check_token_rate_limit(request: Request) -> None:
@@ -114,6 +140,35 @@ def mint_token(body: TokenRequest, request: Request) -> dict[str, str]:
     return {"token": token}
 
 
+class UserTokenRequest(BaseModel):
+    session_secret: str = Field(min_length=1, max_length=500)
+    telegram_user_id: str = Field(min_length=1, max_length=40)
+
+
+@router.post("/auth/token/user")
+def mint_user_token(body: UserTokenRequest, request: Request) -> dict[str, str]:
+    """Mint a token bound to one Bob user (prevents ?principal impersonation).
+
+    Requires the bootstrap secret AND a provisioned, non-blocked telegram user.
+    The returned bearer is bound to that user's Bob user_id; get_principal()
+    loads the owner directly and rejects a mismatched ?principal=.
+    """
+    _check_token_rate_limit(request)
+    expected = get_settings().agent_bootstrap_secret
+    if not hmac_compare(body.session_secret, expected):
+        raise HTTPException(status_code=403, detail="invalid session secret")
+    from agent_system.services.identity import IdentityService
+
+    settings = get_settings()
+    factory = request.app.state.session_factory
+    identity = IdentityService(factory, settings)
+    principal = identity.resolve(body.telegram_user_id.strip())
+    if principal is None or not principal.is_authenticated or principal.user_id is None:
+        raise HTTPException(status_code=403, detail="unknown or blocked principal")
+    auth: Authenticator = request.app.state.authenticator
+    return {"token": auth.mint_user_token(principal.user_id)}
+
+
 def hmac_compare(a: str, b: str) -> bool:
     import hmac as _hmac
 
@@ -139,6 +194,7 @@ class SessionOut(BaseModel):
 def create_session(
     body: SessionCreate, request: Request, principal: Annotated[Any, Depends(get_principal)]
 ) -> SessionOut:
+    _check_hot_rate_limit(request, "sessions")
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     session_id = ids.new_session_id()
@@ -308,8 +364,8 @@ class TaskCreate(BaseModel):
     session_id: str
     task_type: str = Field(pattern=r"^[A-Za-z0-9_]{1,40}$")
     title: str = Field(min_length=1, max_length=500)
-    input: dict[str, Any] = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list)
+    input: dict[str, Any] = Field(default_factory=dict, max_length=50)
+    depends_on: list[str] = Field(default_factory=list, max_length=50)
     agent_type: str | None = None
     idempotency_key: str | None = Field(default=None, max_length=80)
 
@@ -362,12 +418,20 @@ def _fresh_task_out(factory: Any, task_id: str) -> TaskOut | None:
 def create_task(
     body: TaskCreate, request: Request, principal: Annotated[Any | None, Depends(get_principal)]
 ) -> TaskOut:
+    _check_hot_rate_limit(request, "tasks")
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
-    # Idempotency (v3.1 §10):
+    # Idempotency (v3.1 §10) — owner-scoped to prevent cross-user oracle/squat.
     if body.idempotency_key:
         with session_scope(factory) as db:
-            existing = db.query(Task).filter_by(idempotency_key=body.idempotency_key).first()
+            q = db.query(Task).filter_by(idempotency_key=body.idempotency_key)
+            mode = getattr(principal, "mode", None)
+            if mode is not None and getattr(mode, "value", "local") != "local":
+                uid = getattr(principal, "user_id", None)
+                if uid is None:
+                    raise HTTPException(status_code=401, detail="principal required")
+                q = q.filter(Task.owner_user_id == uid)
+            existing = q.first()
             if existing is not None:
                 return _task_out(existing)
     task_id = ids.new_task_id()
@@ -402,8 +466,16 @@ def create_task(
         # row instead of a 500, so a retried request converges.
         if body.idempotency_key is not None:
             with session_scope(factory) as db:
-                existing = db.query(Task).filter_by(idempotency_key=body.idempotency_key).first()
+                q2 = db.query(Task).filter_by(idempotency_key=body.idempotency_key)
+                mode2 = getattr(principal, "mode", None)
+                if mode2 is not None and getattr(mode2, "value", "local") != "local":
+                    uid2 = getattr(principal, "user_id", None)
+                    if uid2 is not None:
+                        q2 = q2.filter(Task.owner_user_id == uid2)
+                existing = q2.first()
                 if existing is not None:
+                    # Verify session visibility before returning converged row.
+                    _ = enforce_session_visible(db, existing.session_id, principal)
                     return _task_out(existing)
         raise HTTPException(status_code=409, detail="conflicting concurrent write") from None
     # Pure create: the task stays PENDING until something explicitly queues it
@@ -412,9 +484,10 @@ def create_task(
     return _task_out(task)
 
 
-@router.get("/tasks")
+@authenticated.get("/tasks")
 def list_tasks(
     request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
     session_id: str | None = None,
     state: str | None = None,
     limit: Annotated[int, Query(le=200)] = 50,
@@ -422,7 +495,17 @@ def list_tasks(
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
         query = db.query(Task)
+        # Owner isolation: telegram principals only see their own rows.
+        # Local operator keeps single-operator behavior (incl. legacy NULL rows).
+        mode = getattr(principal, "mode", None)
+        if mode is not None and getattr(mode, "value", "local") != "local":
+            uid = getattr(principal, "user_id", None)
+            if uid is None:
+                return []
+            query = query.filter(Task.owner_user_id == uid)
         if session_id:
+            # Session filter must still respect ownership: verify visibility first.
+            _ = enforce_session_visible(db, session_id, principal)
             query = query.filter_by(session_id=session_id)
         if state:
             query = query.filter_by(state=state.upper())
@@ -575,11 +658,13 @@ def retry_task(
                 )
     # Retry is explicit operator intent to run: kick in-process execution.
     # The response is a fresh read; failures land on the task row + events,
-    # never on this HTTP call.
+    # never on this HTTP call. Settings resolve synchronously here so the
+    # worker thread inherits this request's config (single-config execution).
     try:
+        from agent_system.config import get_settings
         from agent_system.services.task_runner import kick_task
 
-        kick_task(factory, bus, task_id)
+        kick_task(factory, bus, task_id, settings=get_settings())
     except Exception as exc:
         logging.getLogger(__name__).exception("Retry kickoff failed for %s", task_id)
         raise HTTPException(status_code=503, detail="execution kickoff failed") from exc
@@ -609,7 +694,15 @@ def run_task(
                 validate_transition(current, TaskState.QUEUED)
             except InvalidTransitionError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            row.state = TaskState.QUEUED.value
+            # Conditional claim: concurrent cancel/transition wins => 409.
+            claimed = (
+                db.query(Task)
+                .filter(Task.id == task_id, Task.state == current.value)
+                .update({"state": TaskState.QUEUED.value}, synchronize_session=False)
+            )
+            if claimed == 0:
+                raise HTTPException(status_code=409, detail="state changed concurrently")
+            db.refresh(row)
             bus.emit(
                 Event(
                     type="task.queued",
@@ -623,9 +716,10 @@ def run_task(
         elif current != TaskState.QUEUED:
             raise HTTPException(status_code=409, detail=f"cannot run task in state {current.value}")
     try:
+        from agent_system.config import get_settings
         from agent_system.services.task_runner import kick_task
 
-        kick_task(factory, bus, task_id)
+        kick_task(factory, bus, task_id, settings=get_settings())
     except Exception as exc:
         logging.getLogger(__name__).exception("Run kickoff failed for %s", task_id)
         raise HTTPException(status_code=503, detail="execution kickoff failed") from exc
@@ -742,8 +836,10 @@ def list_approvals(
     mode = getattr(principal, "mode", None)
     if mode is not None and mode.value != "local":
         uid = getattr(principal, "user_id", None)
-        if uid is not None:
-            records = [r for r in records if r.owner_user_id == uid or r.owner_user_id is None]
+        if uid is None:
+            return []
+        # Strict: legacy NULL-owner rows are NOT shared across users.
+        records = [r for r in records if r.owner_user_id == uid]
     return [_approval_out(r) for r in records]
 
 
@@ -841,7 +937,12 @@ class WorkspaceOut(BaseModel):
 
 
 @authenticated.post("/workspaces", status_code=201)
-def create_workspace(body: dict[str, Any], request: Request) -> WorkspaceOut:
+def create_workspace(
+    body: dict[str, Any],
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> WorkspaceOut:
+    from agent_system.api.deps import owner_id
     from agent_system.services.workspaces import WorkspaceManager
 
     factory = request.app.state.session_factory
@@ -852,7 +953,7 @@ def create_workspace(body: dict[str, Any], request: Request) -> WorkspaceOut:
     manager = WorkspaceManager(settings.workspaces_dir)
     manager.create(ws_id)
     with session_scope(factory) as db:
-        db.add(Workspace(id=ws_id, name=name, status="CREATED"))
+        db.add(Workspace(id=ws_id, name=name, status="CREATED", owner_user_id=owner_id(principal)))
         bus.emit(
             Event(type="workspace.created", actor="user", payload={"workspace_id": ws_id}),
             db,
@@ -861,14 +962,19 @@ def create_workspace(body: dict[str, Any], request: Request) -> WorkspaceOut:
 
 
 @authenticated.get("/workspaces")
-def list_workspaces(request: Request) -> list[WorkspaceOut]:
+def list_workspaces(
+    request: Request, principal: Annotated[Any | None, Depends(get_principal)]
+) -> list[WorkspaceOut]:
+    from agent_system.api.deps import apply_owner_filter
     from agent_system.services.workspaces import WorkspaceManager
 
     factory = request.app.state.session_factory
     settings = request.app.state.settings
     manager = WorkspaceManager(settings.workspaces_dir)
     with session_scope(factory) as db:
-        rows = db.query(Workspace).order_by(Workspace.created_at.desc()).all()
+        rows = apply_owner_filter(
+            db.query(Workspace).order_by(Workspace.created_at.desc()), Workspace, principal
+        ).all()
         out: list[WorkspaceOut] = []
         for r in rows:
             try:
@@ -888,15 +994,19 @@ def list_workspaces(request: Request) -> list[WorkspaceOut]:
 
 
 @authenticated.get("/workspaces/{workspace_id}/tree")
-def workspace_tree(workspace_id: str, request: Request) -> dict[str, Any]:
+def workspace_tree(
+    workspace_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, Any]:
+    from agent_system.api.deps import enforce_owner_row
     from agent_system.services.workspaces import WorkspaceManager
 
     factory = request.app.state.session_factory
     settings = request.app.state.settings
     manager = WorkspaceManager(settings.workspaces_dir)
     with session_scope(factory) as db:
-        if db.get(Workspace, workspace_id) is None:
-            raise HTTPException(status_code=404, detail="workspace not found")
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     try:
         files = manager.tree(workspace_id)
     except Exception as exc:
@@ -905,12 +1015,21 @@ def workspace_tree(workspace_id: str, request: Request) -> dict[str, Any]:
 
 
 @authenticated.get("/workspaces/{workspace_id}/file")
-def read_workspace_file(workspace_id: str, request: Request, path: str) -> dict[str, Any]:
+def read_workspace_file(
+    workspace_id: str,
+    request: Request,
+    path: str,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, Any]:
     import base64
 
+    from agent_system.api.deps import enforce_owner_row
     from agent_system.services.workspaces import WorkspaceManager
 
+    factory = request.app.state.session_factory
     settings = request.app.state.settings
+    with session_scope(factory) as db:
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     manager = WorkspaceManager(settings.workspaces_dir)
     try:
         content = manager.read_file(workspace_id, path)
@@ -932,15 +1051,21 @@ class WorkspaceWrite(BaseModel):
 
 @authenticated.put("/workspaces/{workspace_id}/file")
 def write_workspace_file(
-    workspace_id: str, body: WorkspaceWrite, request: Request
+    workspace_id: str,
+    body: WorkspaceWrite,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> dict[str, Any]:
     import base64
 
+    from agent_system.api.deps import enforce_owner_row
     from agent_system.services.workspaces import WorkspaceManager
 
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     settings = request.app.state.settings
+    with session_scope(factory) as db:
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     manager = WorkspaceManager(settings.workspaces_dir)
     try:
         content = base64.b64decode(body.content_b64)
@@ -963,10 +1088,18 @@ def write_workspace_file(
 
 
 @authenticated.get("/workspaces/{workspace_id}/fingerprint")
-def workspace_fingerprint(workspace_id: str, request: Request) -> dict[str, str]:
+def workspace_fingerprint(
+    workspace_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, str]:
+    from agent_system.api.deps import enforce_owner_row
     from agent_system.services.workspaces import WorkspaceManager
 
+    factory = request.app.state.session_factory
     settings = request.app.state.settings
+    with session_scope(factory) as db:
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     manager = WorkspaceManager(settings.workspaces_dir)
     try:
         return {"workspace_id": workspace_id, "fingerprint": manager.fingerprint(workspace_id)}
@@ -975,7 +1108,12 @@ def workspace_fingerprint(workspace_id: str, request: Request) -> dict[str, str]
 
 
 @authenticated.delete("/workspaces/{workspace_id}", status_code=204)
-def delete_workspace(workspace_id: str, request: Request) -> None:
+def delete_workspace(
+    workspace_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> None:
+    from agent_system.api.deps import enforce_owner_row
     from agent_system.services.workspaces import WorkspaceManager
 
     factory = request.app.state.session_factory
@@ -983,8 +1121,7 @@ def delete_workspace(workspace_id: str, request: Request) -> None:
     settings = request.app.state.settings
     manager = WorkspaceManager(settings.workspaces_dir)
     with session_scope(factory) as db:
-        if db.get(Workspace, workspace_id) is None:
-            raise HTTPException(status_code=404, detail="workspace not found")
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     manager.delete(workspace_id)
     with session_scope(factory) as db:
         ws = db.get(Workspace, workspace_id)
@@ -1008,16 +1145,45 @@ class SandboxExec(BaseModel):
 
 
 @authenticated.post("/workspaces/{workspace_id}/exec")
-def sandbox_exec(workspace_id: str, body: SandboxExec, request: Request) -> dict[str, Any]:
+def sandbox_exec(
+    workspace_id: str,
+    body: SandboxExec,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> dict[str, Any]:
+    from agent_system.services.permissions import ApprovalRequest, Policy, Risk
     from agent_system.services.sandbox import DockerSandbox, SandboxUnavailableError
     from agent_system.services.workspaces import WorkspaceManager
 
     bus: EventBus = request.app.state.event_bus
     factory = request.app.state.session_factory
     settings = request.app.state.settings
+    gate: Any = getattr(request.app.state, "gate", None)
+    # Approval gate: direct exec must not bypass TOOLS_REQUIRE_APPROVAL.
+    if gate is not None and bool(getattr(settings, "tools_require_approval", True)):
+        scope = f"shell:{body.command[:60]}"
+        req = ApprovalRequest(
+            requested_action=f"workspace exec: {body.command[:200]}",
+            risk=Risk.HIGH,
+            scope=scope,
+            requester="api",
+            workspace_id=workspace_id,
+            context={},
+            owner_user_id=(getattr(principal, "user_id", None) if principal else None),
+        )
+        decision = gate.authorize(req)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"approval required: {decision.approval_id}",
+            )
+    # Network is never granted via this endpoint: force isolation.
+    if body.network:
+        raise HTTPException(status_code=403, detail="network exec not allowed via API")
     with session_scope(factory) as db:
-        if db.get(Workspace, workspace_id) is None:
-            raise HTTPException(status_code=404, detail="workspace not found")
+        from agent_system.api.deps import enforce_owner_row
+
+        enforce_owner_row(db.get(Workspace, workspace_id), principal, "workspace")
     manager = WorkspaceManager(settings.workspaces_dir)
     try:
         ws_path = manager.path(workspace_id)
@@ -1028,7 +1194,7 @@ def sandbox_exec(workspace_id: str, body: SandboxExec, request: Request) -> dict
     except SandboxUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     result = sandbox.run(
-        str(ws_path), body.command, timeout_seconds=body.timeout_seconds, network=body.network
+        str(ws_path), body.command, timeout_seconds=body.timeout_seconds, network=False
     )
     with session_scope(factory) as db:
         bus.emit(
@@ -1059,12 +1225,21 @@ class ArtifactOut(BaseModel):
 
 
 @authenticated.get("/artifacts")
-def list_artifacts(request: Request, task_id: str | None = None) -> list[ArtifactOut]:
+def list_artifacts(
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+    task_id: str | None = None,
+) -> list[ArtifactOut]:
+    from agent_system.api.deps import apply_owner_filter, enforce_transitive_task
+
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
+        if task_id:
+            enforce_transitive_task(db, task_id, principal)
         query = db.query(Artifact)
         if task_id:
             query = query.filter_by(task_id=task_id)
+        query = apply_owner_filter(query, Artifact, principal)
         rows = query.order_by(Artifact.created_at.desc()).limit(200).all()
         return [
             ArtifactOut(
@@ -1096,14 +1271,19 @@ class EventOut(BaseModel):
 @authenticated.get("/events")
 def list_events(
     request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
     after_sequence: int = 0,
     type: str | None = None,
     session_id: str | None = None,
     limit: Annotated[int, Query(le=500)] = 200,
 ) -> list[EventOut]:
+    from agent_system.api.deps import _is_telegram, enforce_session_visible, owner_id
+
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     with session_scope(factory) as db:
+        if session_id and _is_telegram(principal):
+            enforce_session_visible(db, session_id, principal)
         # session_id is pushed into the SQL WHERE clause (indexed) instead
         # of Python post-filtering; limit is capped at 500 rows per page.
         events = bus.replay_after(
@@ -1113,6 +1293,28 @@ def list_events(
             limit=limit,
             session_id=session_id,
         )
+        if _is_telegram(principal):
+            # Post-filter to owned sessions/tasks only.
+            from agent_system.infra.models import Session, Task
+
+            uid = owner_id(principal)
+            owned_sessions = {
+                r[0]
+                for r in db.query(Session.id).filter(Session.owner_user_id == uid).all()
+            }
+            filtered = []
+            for e in events:
+                if e.session_id is not None:
+                    if str(e.session_id) not in owned_sessions:
+                        continue
+                elif e.task_id is not None:
+                    t = db.get(Task, str(e.task_id))
+                    if t is None or str(t.session_id) not in owned_sessions:
+                        continue
+                else:
+                    continue  # session-less global events hidden in telegram mode
+                filtered.append(e)
+            events = filtered
         return [
             EventOut(
                 event_id=e.event_id,
@@ -1168,13 +1370,17 @@ class VaultNoteCreate(BaseModel):
 @authenticated.get("/vault/notes")
 def list_vault_notes(
     request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
     layer: str | None = None,
     search: str | None = None,
 ) -> list[VaultNoteOut]:
+    from agent_system.api.deps import _is_telegram, owner_id as _oid4
     from agent_system.services.memory import MemoryLayer, ObsidianVaultWriter
 
     settings = request.app.state.settings
     writer = ObsidianVaultWriter(Path(settings.vault_path))
+    telegram_mode = _is_telegram(principal)
+    caller_owner = _oid4(principal)
     mem_layer = None
     if layer:
         try:
@@ -1188,6 +1394,11 @@ def list_vault_notes(
         try:
             data = writer.read_note(p)
             fm = data.get("frontmatter") or {}
+            if telegram_mode:
+                # Fail-closed: hide notes owned by others and legacy notes
+                # with no owner stamp.
+                if fm.get("owner_user_id") != caller_owner:
+                    continue
             title = str(fm.get("title") or p.stem)
             tags = [str(t) for t in fm.get("tags") or []]
             note_layer = str(fm.get("layer") or p.parent.name.upper())
@@ -1224,18 +1435,24 @@ def list_vault_notes(
 def get_vault_note(
     request: Request,
     path: str,
+    principal: Annotated[Any | None, Depends(get_principal)],
 ) -> VaultNoteDetail:
+    from agent_system.api.deps import _is_telegram, owner_id as _oid5
     from agent_system.services.memory import ObsidianVaultWriter
 
     settings = request.app.state.settings
     writer = ObsidianVaultWriter(Path(settings.vault_path))
     target = (writer.root / path).resolve()
-    if not str(target).startswith(str(writer.root.resolve())):
-        raise HTTPException(status_code=400, detail="invalid path")
+    try:
+        target.relative_to(writer.root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid path") from None
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="note not found")
     data = writer.read_note(target)
     fm = data.get("frontmatter") or {}
+    if _is_telegram(principal) and fm.get("owner_user_id") != _oid5(principal):
+        raise HTTPException(status_code=404, detail="note not found")
     rel_path = str(target.relative_to(writer.root))
     return VaultNoteDetail(
         name=target.name,
@@ -1254,10 +1471,21 @@ def get_vault_note(
 
 
 @authenticated.post("/vault/notes", status_code=201)
-def create_vault_note(body: VaultNoteCreate, request: Request) -> VaultNoteDetail:
+def create_vault_note(
+    body: VaultNoteCreate,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> VaultNoteDetail:
+    from agent_system.api.deps import enforce_transitive_session, enforce_transitive_task, owner_id
     from agent_system.services.memory import MemoryLayer, NoteMeta, ObsidianVaultWriter
 
+    if len(body.body) > 100 * 1024:
+        raise HTTPException(status_code=413, detail="note body too large")
     settings = request.app.state.settings
+    factory = request.app.state.session_factory
+    with session_scope(factory) as db:
+        enforce_transitive_task(db, body.task_id, principal)
+        enforce_transitive_session(db, body.session_id, principal)
     writer = ObsidianVaultWriter(Path(settings.vault_path))
     try:
         layer_enum = MemoryLayer(body.layer.upper())
@@ -1270,6 +1498,7 @@ def create_vault_note(body: VaultNoteCreate, request: Request) -> VaultNoteDetai
         source=body.source,
         task_id=body.task_id,
         session_id=body.session_id,
+        owner_user_id=owner_id(principal),
         tags=body.tags,
         links=body.links,
     )
@@ -1294,14 +1523,35 @@ def create_vault_note(body: VaultNoteCreate, request: Request) -> VaultNoteDetai
 
 
 @authenticated.delete("/vault/notes", status_code=204)
-def delete_vault_note(request: Request, path: str) -> None:
+def delete_vault_note(
+    request: Request,
+    path: str,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> None:
+    from agent_system.api.deps import _is_telegram, owner_id as _oid3
     from agent_system.services.memory import ObsidianVaultWriter
 
     settings = request.app.state.settings
     writer = ObsidianVaultWriter(Path(settings.vault_path))
     target = (writer.root / path).resolve()
-    if not str(target).startswith(str(writer.root.resolve())):
-        raise HTTPException(status_code=400, detail="invalid path")
+    try:
+        target.relative_to(writer.root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid path") from None
+    if _is_telegram(principal) and target.exists() and target.is_file():
+        try:
+            data = writer.read_note(target)
+            fm = data.get("frontmatter") or {}
+            note_owner = fm.get("owner_user_id")
+            uid = _oid3(principal)
+            if note_owner is not None and note_owner != uid:
+                raise HTTPException(status_code=404, detail="note not found")
+            if note_owner is None and uid is not None:
+                raise HTTPException(status_code=404, detail="note not found")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     if target.exists() and target.is_file():
         target.unlink()
 
@@ -1363,12 +1613,20 @@ def list_templates(request: Request) -> list[TemplateOut]:
 
 
 @authenticated.post("/templates", status_code=201)
-def create_template(body: TemplateCreate, request: Request) -> TemplateOut:
+def create_template(
+    body: TemplateCreate,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> TemplateOut:
     import json
 
+    from agent_system.api.deps import enforce_owner_row, owner_id
     from agent_system.services.workspaces import TemplateManager, WorkspaceManager
 
     settings = request.app.state.settings
+    factory = request.app.state.session_factory
+    with session_scope(factory) as db:
+        enforce_owner_row(db.get(Workspace, body.workspace_id), principal, "workspace")
     ws_mgr = WorkspaceManager(settings.workspaces_dir)
     ws_path = ws_mgr.path(body.workspace_id)
     if not ws_path.exists():
@@ -1386,6 +1644,7 @@ def create_template(body: TemplateCreate, request: Request) -> TemplateOut:
                 "workspace_id": body.workspace_id,
                 "created_at": now_str,
                 "skipped": tpl_mgr.last_skipped,
+                "owner_user_id": owner_id(principal),
             },
             indent=2,
         ),
@@ -1401,12 +1660,35 @@ def create_template(body: TemplateCreate, request: Request) -> TemplateOut:
 
 
 @authenticated.post("/templates/{template_id}/restore", status_code=201)
-def restore_template(template_id: str, body: TemplateRestore, request: Request) -> WorkspaceOut:
+def restore_template(
+    template_id: str,
+    body: TemplateRestore,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> WorkspaceOut:
+    import json as _json
+
+    from agent_system.api.deps import _is_telegram, owner_id
     from agent_system.services.workspaces import TemplateManager, WorkspaceManager
 
     factory = request.app.state.session_factory
     bus: EventBus = request.app.state.event_bus
     settings = request.app.state.settings
+    # Owner check on file-based template meta (fail-closed in telegram mode).
+    if _is_telegram(principal):
+        meta = Path(settings.templates_dir) / f"{template_id}.json"
+        try:
+            data = _json.loads(meta.read_text(encoding="utf-8"))
+            meta_owner = data.get("owner_user_id")
+            uid = owner_id(principal)
+            if meta_owner is not None and meta_owner != uid:
+                raise HTTPException(status_code=404, detail="template not found")
+            if meta_owner is None and uid is not None:
+                raise HTTPException(status_code=404, detail="template not found")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     ws_id = ids.new_workspace_id()
     name = str(body.workspace_name or f"restored-{template_id[:8]}")[:100]
 
@@ -1421,7 +1703,9 @@ def restore_template(template_id: str, body: TemplateRestore, request: Request) 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     with session_scope(factory) as db:
-        db.add(Workspace(id=ws_id, name=name, status="CREATED"))
+        from agent_system.api.deps import owner_id as _oid
+
+        db.add(Workspace(id=ws_id, name=name, status="CREATED", owner_user_id=_oid(principal)))
         bus.emit(
             Event(
                 type="workspace.restored",
@@ -1444,8 +1728,28 @@ def restore_template(template_id: str, body: TemplateRestore, request: Request) 
 
 
 @authenticated.delete("/templates/{template_id}", status_code=204)
-def delete_template(template_id: str, request: Request) -> None:
+def delete_template(
+    template_id: str,
+    request: Request,
+    principal: Annotated[Any | None, Depends(get_principal)],
+) -> None:
+    import json as _json2
+
+    from agent_system.api.deps import _is_telegram, owner_id as _oid2
+
     settings = request.app.state.settings
+    if _is_telegram(principal):
+        meta = Path(settings.templates_dir) / f"{template_id}.json"
+        try:
+            data = _json2.loads(meta.read_text(encoding="utf-8"))
+            if data.get("owner_user_id") not in (None, _oid2(principal)) and _oid2(principal) is not None:
+                raise HTTPException(status_code=404, detail="template not found")
+            if data.get("owner_user_id") is None and _oid2(principal) is not None:
+                raise HTTPException(status_code=404, detail="template not found")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     tpl_dir = Path(settings.templates_dir)
     archive = tpl_dir / f"{template_id}.tar.gz"
     meta = tpl_dir / f"{template_id}.json"

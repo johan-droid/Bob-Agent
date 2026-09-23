@@ -93,7 +93,9 @@ def test_capacity_is_acquired_before_thread_creation(
             return []
 
     monkeypatch.setattr(task_runner, "_semaphore", threading.BoundedSemaphore(1))
-    monkeypatch.setattr(task_runner, "_build_orchestrator", lambda bus: BlockingOrchestrator())
+    monkeypatch.setattr(
+        task_runner, "_build_orchestrator", lambda bus, settings=None: BlockingOrchestrator()
+    )
     try:
         assert task_runner.kick_task(factory, bus, tasks[0])
         assert started.wait(5)

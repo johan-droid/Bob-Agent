@@ -48,8 +48,8 @@ def _settings_service() -> tuple[
     Callable[..., list[dict[str, Any]]],
     Callable[..., dict[str, Any]],
 ]:
-    """Lazy import to avoid circular deps at module load."""
-    from agent_system.cli.settings import (
+    """Pure-cloud settings service — no CLI import (see services.settings_store)."""
+    from agent_system.services.settings_store import (
         _GROUPS,
         _HELP,
         get_setting,
@@ -61,10 +61,10 @@ def _settings_service() -> tuple[
 
 
 @settings_router.get("/settings")
-def list_all_settings(request: Request, show_secrets: bool = False) -> list[SettingsGroupOut]:
-    """List every setting, grouped by area. Secrets masked unless show_secrets."""
+def list_all_settings(request: Request) -> list[SettingsGroupOut]:
+    """List every setting, grouped by area. Secrets always masked via API."""
     _GROUPS, _HELP, _, list_settings, _ = _settings_service()
-    rows = list_settings(show_secrets=show_secrets)
+    rows = list_settings(show_secrets=False)
     grouped: dict[str, list[SettingOut]] = {}
     for row in rows:
         group = row.get("group", "other")
@@ -75,11 +75,11 @@ def list_all_settings(request: Request, show_secrets: bool = False) -> list[Sett
 
 
 @settings_router.get("/settings/{key}")
-def get_one_setting(request: Request, key: str, show_secrets: bool = False) -> SettingOut:
-    """Get a single setting by key."""
+def get_one_setting(request: Request, key: str) -> SettingOut:
+    """Get a single setting by key (secrets masked)."""
     _, _, get_setting, _, _ = _settings_service()
     try:
-        row = get_setting(key, show_secrets=show_secrets)
+        row = get_setting(key, show_secrets=False)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return SettingOut(**row)

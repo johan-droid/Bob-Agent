@@ -133,7 +133,9 @@ class McpStdioClient:
         self._lock = threading.Lock()
 
     def _start(self) -> None:
-        env = dict(os.environ)
+        from agent_system.services.sandbox import _scrubbed_env
+
+        env = _scrubbed_env()
         env.update(self.config.env)
         try:
             self._proc = subprocess.Popen(

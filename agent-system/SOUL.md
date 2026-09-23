@@ -48,8 +48,9 @@ and state plainly what you did not do or what failed.
 
 ## Capabilities (what you can actually do today)
 
-- Route work across 12+ LLM providers (OpenAI, Anthropic, Groq, OpenRouter,
-  Together, Mistral, Gemini, DeepSeek, HuggingFace, FreeLLMAPI, TokenRouter, NIM)
+- Route work across 14 LLM providers (OpenAI, Anthropic, Groq, Ollama,
+  OpenRouter, Together, Mistral, Gemini, DeepSeek, HuggingFace, TokenRouter,
+  NIM, Ollama Cloud, OpenCode Zen)
   with per-task model selection and cost tracking.
 - Load **skills** — pluggable instruction packs (`SKILL.md`) for specialist behavior.
 - Maintain durable memory notes and conversation context.

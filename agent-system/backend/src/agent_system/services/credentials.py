@@ -57,11 +57,16 @@ def _derive_master_key_bytes(raw_secret: str) -> bytes:
 def get_master_key_bytes() -> bytes:
     """Resolve 256-bit master encryption key from Settings."""
     settings = get_settings()
-    master_secret = (
-        getattr(settings, "bob_master_encryption_key", None)
-        or settings.api_session_secret
-        or settings.agent_bootstrap_secret
+    dedicated = (getattr(settings, "bob_master_encryption_key", "") or "").strip()
+    if dedicated:
+        return _derive_master_key_bytes(dedicated)
+    # Key-reuse fallback (auth secret doubles as vault KEK). Warn loudly;
+    # operators should set BOB_MASTER_ENCRYPTION_KEY to separate them.
+    logger.warning(
+        "vault_key_reuse",
+        extra={"reason": "BOB_MASTER_ENCRYPTION_KEY unset; deriving vault key from API secret"},
     )
+    master_secret = settings.api_session_secret or settings.agent_bootstrap_secret
     return _derive_master_key_bytes(master_secret)
 
 

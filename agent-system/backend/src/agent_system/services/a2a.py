@@ -88,18 +88,19 @@ def verify_envelope(
     if not hmac.compare_digest(str(envelope["signature"]), expected):
         raise A2AError("A2A signature mismatch (forged or wrong secret)")
     issued = body.get("issued_at")
-    if issued is not None:
-        try:
-            from datetime import datetime
+    if issued is None:
+        raise A2AError("A2A envelope missing issued_at (replay protection required)")
+    try:
+        from datetime import datetime
 
-            issued_at = datetime.fromisoformat(str(issued))
-            age = (utcnow() - issued_at).total_seconds()
-            if abs(age) > max_age_seconds:
-                raise A2AError("stale A2A envelope (replay window exceeded)")
-        except A2AError:
-            raise
-        except Exception as exc:
-            raise A2AError(f"unparseable A2A issued_at: {exc}") from exc
+        issued_at = datetime.fromisoformat(str(issued))
+        age = (utcnow() - issued_at).total_seconds()
+        if abs(age) > max_age_seconds:
+            raise A2AError("stale A2A envelope (replay window exceeded)")
+    except A2AError:
+        raise
+    except Exception as exc:
+        raise A2AError(f"unparseable A2A issued_at: {exc}") from exc
     return body
 
 
@@ -228,9 +229,40 @@ class A2AService:
 
     def handle_callback(self, envelope: dict[str, Any]) -> dict[str, Any]:
         """Verify a result envelope and complete the task (callback URL target)."""
+        import hashlib as _hashlib
+        import json as _json
+
         from agent_system.domain.events import utcnow
 
         body = verify_envelope(envelope, self._secret)
+        # Replay dedup: same signed body delivered N times processes once.
+        envelope_hash = _hashlib.sha256(
+            _json.dumps(body, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if self._factory is not None:
+            try:
+                from agent_system.infra.db import session_scope
+                from agent_system.infra.models import A2AProcessedEnvelope
+
+                with session_scope(self._factory) as db:
+                    if db.get(A2AProcessedEnvelope, envelope_hash) is not None:
+                        delegation_id = str(body.get("delegation_id") or "")
+                        return {
+                            "delegation_id": delegation_id,
+                            "task_id": self._delegations.get(delegation_id).task_id
+                            if self._delegations.get(delegation_id)
+                            else None,
+                            "status": "duplicate",
+                        }
+                    db.add(
+                        A2AProcessedEnvelope(
+                            envelope_hash=envelope_hash,
+                            delegation_id=str(body.get("delegation_id") or "")[:80],
+                            created_at=utcnow(),
+                        )
+                    )
+            except Exception:
+                pass
         delegation_id = str(body.get("delegation_id") or "")
         delegation = self._delegations.get(delegation_id)
         if delegation is None:
@@ -240,6 +272,7 @@ class A2AService:
         delegation.status = "done"
         delegation.result = result
         task_id = delegation.task_id
+        transitioned = False
         if self._factory is not None:
             from agent_system.domain.tasks import TaskState, validate_transition
             from agent_system.infra.db import session_scope
@@ -252,6 +285,11 @@ class A2AService:
                     task.state = TaskState.SUCCEEDED.value
                     task.completed_at = utcnow()
                     task.result_json = result
+                    transitioned = True
+        # Only emit completion when the task actually transitioned; otherwise
+        # a replayed/duplicate callback would emit phantom task.completed.
+        if not transitioned:
+            return {"delegation_id": delegation_id, "task_id": task_id, "status": "done"}
         self._emit(
             "a2a.result",
             {"delegation_id": delegation_id, "task_id": task_id},

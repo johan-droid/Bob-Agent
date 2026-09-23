@@ -32,11 +32,11 @@ def test_sanitize_telegram_message_strips_internal_ids() -> None:
 
 
 def test_format_model_footer() -> None:
-    footer = format_model_footer("groq", "llama-3.3-70b-versatile", 0.8)
-    assert footer == "↳ groq · llama-3.3-70b-versatile · 0.8s"
+    footer = format_model_footer("groq", "openai/gpt-oss-20b", 0.8)
+    assert footer == "↳ groq · gpt-oss-20b · 0.8s"
 
-    footer_no_latency = format_model_footer("opencode", "opencode/free-coding")
-    assert footer_no_latency == "↳ opencode · free-coding"
+    footer_no_latency = format_model_footer("opencode", "big-pickle")
+    assert footer_no_latency == "↳ opencode · big-pickle"
 
 
 def test_chat_history_persistence() -> None:
@@ -57,10 +57,14 @@ def test_chat_history_persistence() -> None:
 
 
 def test_hi_conversational_path() -> None:
+    # Hermetic offline runtime: the footer contract must not depend on live
+    # provider keys that may exist on a developer machine.
     settings = Settings(
         agent_identity_mode="local",
         telegram_allowed_chat_ids="100",
         telegram_bot_token="test:token",
+        default_provider="echo",
+        default_model="echo-default",
     )
     engine = make_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -101,6 +105,8 @@ def test_normal_queries_do_not_create_task() -> None:
         agent_identity_mode="local",
         telegram_allowed_chat_ids="100",
         telegram_bot_token="test:token",
+        default_provider="echo",
+        default_model="echo-default",
     )
     engine = make_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -149,6 +155,8 @@ def test_chat_mode_injects_soul() -> None:
         agent_identity_mode="local",
         telegram_allowed_chat_ids="100",
         telegram_bot_token="test:token",
+        default_provider="echo",
+        default_model="echo-default",
     )
     engine = make_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

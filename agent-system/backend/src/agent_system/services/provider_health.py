@@ -49,8 +49,40 @@ class ProviderStatus:
 
 
 def classify_provider_error(error: str) -> ProviderHealth:
-    """Classify a raw adapter error into a health state (additive helper)."""
+    """Classify a raw adapter error into a health state (additive helper).
+
+    Delegates to the structured llm_contract taxonomy when available so
+    TOOL_UNSUPPORTED / STRUCTURED_OUTPUT_UNSUPPORTED / QUOTA_EXHAUSTED map
+    to non-routable states instead of generic DEGRADED.
+    """
+    try:
+        from agent_system.services.llm_contract import ProviderErrorCode as _Code
+        from agent_system.services.llm_contract import classify_provider_error as _classify
+
+        err = _classify(error)
+        mapping = {
+            _Code.AUTHENTICATION: ProviderHealth.AUTH_FAILED,
+            _Code.INVALID_REQUEST: ProviderHealth.DISABLED,
+            _Code.INVALID_MODEL: ProviderHealth.DISABLED,
+            _Code.MODEL_UNAVAILABLE: ProviderHealth.DISABLED,
+            _Code.RATE_LIMITED: ProviderHealth.RATE_LIMITED,
+            _Code.QUOTA_EXHAUSTED: ProviderHealth.RATE_LIMITED,
+            _Code.TIMEOUT: ProviderHealth.UNAVAILABLE,
+            _Code.NETWORK: ProviderHealth.UNAVAILABLE,
+            _Code.SERVER_ERROR: ProviderHealth.UNAVAILABLE,
+            _Code.TOOL_UNSUPPORTED: ProviderHealth.DISABLED,
+            _Code.STRUCTURED_OUTPUT_UNSUPPORTED: ProviderHealth.DISABLED,
+            _Code.CONTENT_POLICY: ProviderHealth.DISABLED,
+            _Code.UNKNOWN: ProviderHealth.DEGRADED,
+        }
+        return mapping.get(err.code, ProviderHealth.DEGRADED)
+    except ImportError:
+        pass
     text = (error or "").upper()
+    if "TOOL_UNSUPPORTED" in text or "STRUCTURED_OUTPUT_UNSUPPORTED" in text:
+        return ProviderHealth.DISABLED
+    if "QUOTA" in text or "EXHAUSTED" in text or "BILLING" in text:
+        return ProviderHealth.RATE_LIMITED
     if "404" in text or "NOT FOUND" in text or "DOES NOT EXIST" in text or "UNKNOWN MODEL" in text:
         return ProviderHealth.DISABLED
     if "400" in text or "INVALID_REQUEST" in text or "BAD REQUEST" in text:
@@ -138,9 +170,14 @@ class ProviderHealthTracker:
             return existing
 
     def update_rate_limits(self, provider: str, model_id: str, headers: dict[str, Any]) -> None:
-        """Parse provider rate limit / reset headers (Groq, OpenAI, etc.)."""
+        """Parse provider rate limit / reset headers (Groq, OpenAI, etc.).
+
+        Header lookup is case-insensitive; honours ``Retry-After`` when
+        supplied and applies conservative adaptive cooldowns otherwise.
+        """
         if not headers:
             return
+        lowered = {str(k).lower(): v for k, v in headers.items()}
         with self._lock:
             key = self._key(provider, model_id)
             st = self._status.get(key)
@@ -148,24 +185,24 @@ class ProviderHealthTracker:
                 st = ProviderStatus(provider=provider, model_id=model_id)
                 self._status[key] = st
 
-            rem_req = headers.get("x-ratelimit-remaining-requests")
+            rem_req = lowered.get("x-ratelimit-remaining-requests")
             if rem_req is not None:
                 try:
-                    st.requests_remaining = int(rem_req)
+                    st.requests_remaining = int(rem_req)  # type: ignore[arg-type]
                 except (ValueError, TypeError):
                     pass
 
-            rem_tok = headers.get("x-ratelimit-remaining-tokens")
+            rem_tok = lowered.get("x-ratelimit-remaining-tokens")
             if rem_tok is not None:
                 try:
-                    st.tokens_remaining = int(rem_tok)
+                    st.tokens_remaining = int(rem_tok)  # type: ignore[arg-type]
                 except (ValueError, TypeError):
                     pass
 
-            retry_after = headers.get("retry-after")
+            retry_after = lowered.get("retry-after")
             if retry_after is not None:
                 try:
-                    secs = float(retry_after)
+                    secs = float(retry_after)  # type: ignore[arg-type]
                     st.retry_after = time.monotonic() + max(1.0, secs)
                     st.health = ProviderHealth.RATE_LIMITED
                 except (ValueError, TypeError):
@@ -209,7 +246,12 @@ class ProviderHealthTracker:
             st.health = classify_provider_error(error)
             st.consecutive_failures += 1
             st.failure_count += 1
-            st.last_error = error[:300]
+            try:
+                from agent_system.services.secrets import redact_value as _redact
+
+                st.last_error = _redact(error)[:300]
+            except Exception:
+                st.last_error = error[:300]
             st.updated_at = time.monotonic()
             if st.health == ProviderHealth.RATE_LIMITED:
                 st.retry_after = time.monotonic() + max(1.0, retry_after_seconds)
@@ -225,8 +267,27 @@ class ProviderHealthTracker:
             st.health = ProviderHealth.DISABLED
             st.updated_at = time.monotonic()
 
+    def cooldown_remaining(self, provider: str, model_id: str = "") -> float:
+        """Seconds until a rate-limited model is routable again (0 when routable)."""
+        st = self.get(provider, model_id)
+        if st.health != ProviderHealth.RATE_LIMITED:
+            return 0.0
+        return max(0.0, st.retry_after - time.monotonic())
+
+    @property
+    def cooldown_until(self) -> dict[str, float]:
+        """Snapshot of active cooldowns keyed by provider/model (observability)."""
+        with self._lock:
+            return {
+                key: st.retry_after
+                for key, st in self._status.items()
+                if st.health == ProviderHealth.RATE_LIMITED
+            }
+
     def is_routable(self, provider: str, model_id: str = "") -> bool:
         st = self.get(provider, model_id)
+        # Authentication failures never hammer the same key; invalid models
+        # never retry the same model.
         if st.health in (ProviderHealth.DISABLED, ProviderHealth.AUTH_FAILED):
             return False
         if st.health == ProviderHealth.RATE_LIMITED:

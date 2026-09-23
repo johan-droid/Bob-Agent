@@ -288,7 +288,7 @@ The `Settings` class (`config.py`) is the single source of truth. Field groups:
 |---|---|
 | core | `agent_env`, `api_port`, `api_session_secret`, `agent_bootstrap_secret`, `redis_url` |
 | storage | `database_url` (default `sqlite:///data/agent_system.db`), `vault_path`, `workspaces_dir`, `templates_dir`, `recordings_dir`, `outputs_dir`, `skills_dir`, `soul_path` |
-| providers | keys+base_urls for **12 providers** (see §8.5): `anthropic_api_key`, `openai_api_key`, `groq_api_key`, `groq_base_url`, `ollama_base_url`, `openrouter_api_key`, `openrouter_base_url`, `together_api_key`, `mistral_api_key`, `gemini_api_key`, `deepseek_api_key`, `huggingface_api_key`, `freellmapi_api_key`, `tokenrouter_api_key`, `default_provider=echo`, `default_model` |
+| providers | keys+base_urls for **14 providers** (see §8.5): `anthropic_api_key`, `openai_api_key`, `groq_api_key`, `groq_base_url`, `ollama_base_url`, `openrouter_api_key`, `openrouter_base_url`, `together_api_key`, `mistral_api_key`, `gemini_api_key`, `deepseek_api_key`, `huggingface_api_key`, `tokenrouter_api_key`, `nim_api_key`, `ollama_cloud_api_key`, `opencode_api_key`, `default_provider=echo`, `default_model` |
 | routing | `provider_extra_headers` (JSON blob) |
 | tools | `tools_shell_mode` (sandbox\|local\|off), `tools_require_approval` (bool), `tools_max_iters` (8), `tools_fs_roots` |
 | memory | `memory_auto_remember` (true), `memory_recall_top_k` (3) |
@@ -480,12 +480,11 @@ transport per provider, 12 real options:
 | `gemini` | **native** `:generateContent` (x-goog-api-key) | header | `gemini-2.0-flash` (free tier) |
 | `deepseek` | OpenAI-compatible | bearer | `deepseek-chat` |
 | `huggingface` | OpenAI-compatible | bearer | `meta-llama/Llama-3.2-3B-Instruct` (free tier) |
-| `freellmapi` | OpenAI-compatible | bearer (self-hosted) | `auto` (free tier) |
 | `tokenrouter` | OpenAI-compatible | bearer | `auto` |
 
 Adapters are pure-HTTP `httpx` clients (no heavy SDKs). `build_model_router()`
-registers adapters only for **configured** providers (keyless ones like `ollama`/`
-freellmapi` register without a key). `build_pricing()` registers **free-tier** models
+registers adapters only for **configured** providers (keyless `ollama`
+registers without a key). `build_pricing()` registers **free-tier** models
 at real `$0.00` cost; billable models are left unregistered so the router flags their
 cost as estimated. Defaults: `default_provider=echo`, which self-heals to
 `EchoProvider` (deterministic, `$0`, no network) + `UnavailableProvider` (for recovery
@@ -1342,9 +1341,20 @@ Canonical names are the lower-cased attributes of `Settings` (`config.py`); the
 **providers** (key + optional `*_base_url`) — `ANTHROPIC_API_KEY`,
 `GROQ_API_KEY`/`GROQ_BASE_URL`, `OLLAMA_BASE_URL`, `OPENAI_API_KEY`,
 `OPENROUTER_API_KEY`/`OPENROUTER_BASE_URL`, `TOGETHER_API_KEY`, `MISTRAL_API_KEY`,
-`GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `HUGGINGFACE_API_KEY`, `FREELLMAPI_API_KEY`,
-`TOKENROUTER_API_KEY`, plus `DEFAULT_PROVIDER` (`echo`), `DEFAULT_MODEL`,
-`PROVIDER_EXTRA_HEADERS` (JSON).
+`GEMINI_API_KEY` (alias `GOOGLE_API_KEY` — same Google AI Studio key),
+`DEEPSEEK_API_KEY`, `HUGGINGFACE_API_KEY`,
+`TOKENROUTER_API_KEY`, `NIM_API_KEY`/`NIM_BASE_URL`,
+`OLLAMA_CLOUD_API_KEY`/`OLLAMA_CLOUD_BASE_URL`,
+`OPENCODE_API_KEY`/`OPENCODE_BASE_URL` (OpenCode Zen), plus `DEFAULT_PROVIDER`
+(`echo`), `DEFAULT_MODEL`, `PROVIDER_EXTRA_HEADERS` (JSON).
+
+Credential resolution order per provider: explicit settings field (env or
+`.env`) → persisted encrypted vault (`services/credentials.py`). Keys are
+never logged; `GET /api/v1/features/model-routing/diagnostics` reports each
+provider as configured/missing without printing the secret, and
+`POST /api/v1/features/model-routing/diagnose` runs the staged self-test
+(credentials → endpoint → completion → streaming → tools) to identify the
+exact failing stage.
 
 **tools** `tools_shell_mode` (`sandbox`), `tools_require_approval` (`false`)
 (bool), `tools_max_iters` (8), `tools_fs_roots` (`[]`),

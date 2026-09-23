@@ -155,6 +155,7 @@ class Workspace(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     template_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     cloned_from_template: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
     last_modified_at: Mapped[datetime] = _ts()
 
@@ -167,6 +168,7 @@ class Artifact(Base):
     kind: Mapped[str] = mapped_column(String(20), nullable=False)  # pptx/pdf/docx/xlsx/file
     path: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
 
 
@@ -224,6 +226,7 @@ class ModelCall(Base):
     cost_is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts(index=True)
 
 
@@ -238,6 +241,7 @@ class ToolCall(Base):
     risk: Mapped[str] = mapped_column(String(12), default="LOW", nullable=False)
     approval_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     started_at: Mapped[datetime] = _ts()
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -268,6 +272,7 @@ class WorkspaceTemplate(Base):
     tags_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
 
 
@@ -281,6 +286,7 @@ class BehaviorRecording(Base):
     recording_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     action_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     action_log_path: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
 
 
 class CostBudget(Base):
@@ -301,6 +307,7 @@ class TaskBatch(Base):
     batch_type: Mapped[str] = mapped_column(String(40), nullable=False)
     task_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     speedup_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -320,6 +327,7 @@ class QAReport(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     coverage_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     diagnostics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
 
 
@@ -334,6 +342,7 @@ class Recipe(Base):
     tags_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     executions_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
 
 
@@ -417,6 +426,7 @@ class Insight(Base):
     generated_at: Mapped[datetime] = _ts()
     content_html: Mapped[str] = mapped_column(Text, nullable=False)
     key_findings_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -429,6 +439,7 @@ class ScheduledJob(Base):
     schedule_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = _ts()
 
 
@@ -631,3 +642,13 @@ class TelegramChatHistory(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" or "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = _ts(index=True)
+
+
+class A2AProcessedEnvelope(Base):
+    """Replay dedup for A2A callbacks: one envelope hash processed once."""
+
+    __tablename__ = "a2a_processed_envelopes"
+
+    envelope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    delegation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = _ts()

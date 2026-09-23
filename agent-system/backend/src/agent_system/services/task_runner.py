@@ -71,13 +71,15 @@ def shutdown_runner(timeout: float = 10.0) -> None:
         _active.clear()
 
 
-def _build_orchestrator(bus: EventBus) -> Any:
+def _build_orchestrator(bus: EventBus, settings: Any = None) -> Any:
     """Orchestrator with the ReAct handler installed (mirrors worker.py).
 
     Besides ``llm`` (what the planner always emits as ``agent_type``), the
     chat path creates ad-hoc ``general`` tasks — both resolve to the same
     ReAct loop, whose router self-heals an echo adapter offline, so chat
-    works with zero keys configured.
+    works with zero keys configured. ``settings`` is threaded into the
+    handler context (single-config execution); None preserves the legacy
+    ambient read inside the handler.
     """
     from agent_system.agents import react_agent
     from agent_system.services.orchestrator import Orchestrator
@@ -86,7 +88,7 @@ def _build_orchestrator(bus: EventBus) -> Any:
         react_agent.install()
     except Exception:
         pass
-    orch = Orchestrator(bus)
+    orch = Orchestrator(bus, settings=settings)
     orch.register_handler("llm", react_agent.llm_react_handler)
     # Ad-hoc chat tasks carry task_type "general" (agent_type defaults to it).
     orch.register_handler("general", react_agent.llm_react_handler)
@@ -94,20 +96,26 @@ def _build_orchestrator(bus: EventBus) -> Any:
     return orch
 
 
-def _run_task_thread(factory: Any, bus: EventBus, task_id: str, session_id: str) -> None:
+def _run_task_thread(
+    factory: Any, bus: EventBus, task_id: str, session_id: str, settings: Any = None
+) -> None:
     """Thread body: drive one task's session to quiescence (bounded rounds).
 
     Concurrency is capped by ``_semaphore``; every round honors the shutdown
     flag and a wall-clock deadline so a stuck session never spins forever.
+    ``settings`` was resolved synchronously at kick time (never read lazily
+    on the thread, where test monkeypatches no longer apply).
     """
     # Capacity is acquired before thread creation, so no waiting threads pile up.
     try:
         if _shutdown.is_set():
             return
-        orch = _build_orchestrator(bus)
-        from agent_system.config import get_settings
+        orch = _build_orchestrator(bus, settings=settings)
+        if settings is None:
+            from agent_system.config import get_settings
 
-        deadline = time.monotonic() + max(1, int(get_settings().max_execution_time_seconds))
+            settings = get_settings()
+        deadline = time.monotonic() + max(1, int(settings.max_execution_time_seconds))
         try:
             for _ in range(max(1, MAX_DRIVE_ROUNDS)):
                 if _shutdown.is_set() or time.monotonic() >= deadline:
@@ -150,14 +158,20 @@ def _run_task_thread(factory: Any, bus: EventBus, task_id: str, session_id: str)
             _active.discard(session_id)
 
 
-def kick_task(factory: Any, bus: EventBus, task_id: str) -> bool:
+def kick_task(factory: Any, bus: EventBus, task_id: str, settings: Any = None) -> bool:
     """Start executing one QUEUED task in a background thread.
 
     Returns True when a run was started (or is already active for this task).
     Only QUEUED tasks are runnable — PENDING needs an explicit queue first
     (``POST /tasks/{id}/run``), FAILED needs ``/retry`` — so stray kicks can
     never skip the lifecycle. Refuses to start after the runner was shut down.
+    ``settings`` is resolved synchronously here (single-config execution):
+    lazy reads on the worker thread would race test/request teardown.
     """
+    if settings is None:
+        from agent_system.config import get_settings
+
+        settings = get_settings()
     if _shutdown.is_set():
         return False
     with session_scope(factory) as db:
@@ -177,7 +191,7 @@ def kick_task(factory: Any, bus: EventBus, task_id: str) -> bool:
         _active.add(session_id)
         thread = threading.Thread(
             target=_run_task_thread,
-            args=(factory, bus, task_id, session_id),
+            args=(factory, bus, task_id, session_id, settings),
             name=f"task-runner-{task_id[-8:]}",
             daemon=True,
         )
@@ -192,19 +206,23 @@ def kick_task(factory: Any, bus: EventBus, task_id: str) -> bool:
     return True
 
 
-def sweep_backlog(factory: Any, bus: EventBus) -> list[str]:
+def sweep_backlog(factory: Any, bus: EventBus, settings: Any = None) -> list[str]:
     """Re-kick tasks left QUEUED by a previous process (startup recovery).
 
     Only runs at API startup (lifespan), never per-request, so it cannot race
     the contract tests' manual lifecycle walks.
     """
+    if settings is None:
+        from agent_system.config import get_settings
+
+        settings = get_settings()
     kicked: list[str] = []
     with session_scope(factory) as db:
         rows = db.query(Task).filter_by(state=TaskState.QUEUED.value).all()
         ids = [r.id for r in rows]
     for task_id in ids:
         try:
-            if kick_task(factory, bus, task_id):
+            if kick_task(factory, bus, task_id, settings=settings):
                 kicked.append(task_id)
         except Exception:
             continue

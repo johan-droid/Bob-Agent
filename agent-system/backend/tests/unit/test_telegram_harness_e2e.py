@@ -259,7 +259,7 @@ def test_g_successful_completion(factory, settings, bus):
     executor = GatewayExecutor(settings, factory, bus)
     executor.start()
 
-    def fake_drive(f, b, session_id):
+    def fake_drive(f, b, session_id, settings=None):
         # Emit completed event
         with session_scope(factory) as db:
             task = db.query(Task).filter_by(session_id=session_id).first()
@@ -395,7 +395,7 @@ async def test_l_full_e2e_trace(factory, settings, bus, gate):
         },
     }
 
-    def fake_drive(f, b, session_id):
+    def fake_drive(f, b, session_id, settings=None):
         with session_scope(factory) as db:
             task = db.query(Task).filter_by(session_id=session_id).first()
             task_id = task.id if task else "t_e2e"

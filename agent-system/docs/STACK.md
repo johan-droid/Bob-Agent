@@ -51,8 +51,8 @@ What Bob is built from, and why. Versions are lower bounds from
 
 ## External services (all optional)
 
-Redis (or Docker provides it via `docker-compose.yml`), any of the 12 LLM
-providers, Ollama/FreeLLMAPI for local/self-hosted inference, Telegram Bot
+Redis (or Docker provides it via `docker-compose.yml`), any of the 14 LLM
+providers, Ollama for local inference, Telegram Bot
 API for the gateway, **OpenConnector** (`ghcr.io/oomol-lab/open-connector`,
 spot on `:3000` — 1,000+ SaaS providers via Actions + MCP), and any MCP
 server (stdio or HTTP) declared in `MCP_SERVERS`. With none configured, Bob

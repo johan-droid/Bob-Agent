@@ -48,10 +48,26 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     )
     if not _hmac.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid webhook secret")
+    # Body-size cap: Telegram updates are small; reject multi-MB payloads.
+    clen = request.headers.get("content-length")
+    try:
+        if clen is not None and int(clen) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="update too large")
+    except ValueError:
+        pass
     try:
         update: dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body") from None
+    try:
+        import json as _json
+
+        if len(_json.dumps(update)) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="update too large")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     update_id = update.get("update_id")
     from_chat = (update.get("message") or {}).get("chat", {}).get("id")
     _logger.info("telegram.webhook.received update_id=%s chat_id=%s", update_id, from_chat)
@@ -65,8 +81,13 @@ async def telegram_status(request: Request) -> dict[str, Any]:
     svc = getattr(request.app.state, "telegram", None)
     if svc is None or not svc.is_configured():
         return {"configured": False, "transport": None}
+    # No allowlist enumeration: count only, prevents phishing recon.
+    try:
+        n = len(sorted(svc._allowed))  # noqa: SLF001
+    except Exception:
+        n = 0
     return {
         "configured": True,
         "transport": svc.transport,
-        "allowed_chat_ids": sorted(svc._allowed),  # noqa: SLF001
+        "allowed_chat_count": n,
     }

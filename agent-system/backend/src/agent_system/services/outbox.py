@@ -62,6 +62,14 @@ class Outbox:
     ) -> str | None:
         if chat_id is None:
             return None
+        # Telegram rejects empty text with 400; never enqueue it (would retry
+        # 5x per message and stall the recovery drain). Skip fail-fast.
+        if not (text or "").strip():
+            logger.warning("outbox.skip.empty kind=%s chat_id=%s", kind, chat_id)
+            return None
+        # Telegram hard limit is 4096 chars; truncate defensively.
+        if len(text) > 4000:
+            text = text[:4000]
         from agent_system.domain.ids import new_id
         from agent_system.infra.db import session_scope
 
@@ -97,7 +105,7 @@ class Outbox:
         now = utcnow()
         deadline = now + timedelta(seconds=lease)
         with session_scope(self._factory) as db:
-            rows = (
+            q = (
                 db.query(DeliveryOutbox)
                 .filter(
                     # RETRY included: a row that already failed once (state
@@ -109,8 +117,13 @@ class Outbox:
                 )
                 .order_by(DeliveryOutbox.next_attempt_at)
                 .limit(max_rows)
-                .all()
             )
+            try:
+                if getattr(db, "bind", None) is not None and db.bind.dialect.name == "postgresql":
+                    q = q.with_for_update(skip_locked=True)
+            except Exception:
+                pass
+            rows = q.all()
             claimed: list[DeliveryOutbox] = []
             for r in rows:
                 affected = (
@@ -118,12 +131,14 @@ class Outbox:
                     .filter(
                         DeliveryOutbox.id == r.id,
                         DeliveryOutbox.state.in_(("PENDING", "RETRY")),
+                        DeliveryOutbox.next_attempt_at <= now,
                     )
                     .update(
                         {
+                            "state": "SENDING",
                             "next_attempt_at": deadline,
                             "claimed_at": now,
-                            "claimed_by": "worker",
+                            "claimed_by": worker_id or "worker",
                         },
                         synchronize_session=False,
                     )
@@ -138,6 +153,11 @@ class Outbox:
         token = self._settings.telegram_bot_token
         if not token:
             return False
+        # Fail-fast for legacy empty rows (pre-fix): mark delivered-skipped so
+        # they stop consuming the 5-attempt retry budget and blocking drain.
+        if not (row.text or "").strip():
+            logger.warning("outbox.skip.empty_deliver outbox_id=%s chat_id=%s", row.id, row.chat_id)
+            return self._mark_delivered(row)
         logger.info("outbox.send.start outbox_id=%s chat_id=%s", row.id, row.chat_id)
         logger.info("telegram.outbox.sent outbox_id=%s chat_id=%s", row.id, row.chat_id)
         if client is None and (token.startswith("test:") or token == "mock"):
@@ -165,17 +185,27 @@ class Outbox:
             )
             resp.raise_for_status()
         except Exception as exc:
+            detail = _scrub_error(exc)
+            try:
+                import httpx as _httpx2
+
+                if isinstance(exc, _httpx2.HTTPStatusError) and exc.response is not None:
+                    body = exc.response.text[:300]
+                    if body:
+                        detail = f"{detail} body={body}"
+            except Exception:
+                pass
             logger.warning(
                 "outbox.send.failure outbox_id=%s chat_id=%s error=%s",
                 row.id,
                 row.chat_id,
-                _scrub_error(exc),
+                detail,
             )
             logger.warning(
                 "telegram.delivery.failed outbox_id=%s chat_id=%s error=%s",
                 row.id,
                 row.chat_id,
-                _scrub_error(exc),
+                detail,
             )
             self._advance_failure(row, exc)
         else:
@@ -193,9 +223,9 @@ class Outbox:
                 db.query(DeliveryOutbox)
                 .filter(
                     DeliveryOutbox.id == row.id,
-                    # RETRY included: a row reclaimed after a failure and
-                    # delivered on retry must still be markable as delivered.
-                    DeliveryOutbox.state.in_(("PENDING", "RETRY")),
+                    # SENDING is the claimed state; PENDING/RETRY kept for
+                    # backward-compat with rows claimed before upgrade.
+                    DeliveryOutbox.state.in_(("PENDING", "RETRY", "SENDING")),
                 )
                 .update(
                     {
@@ -260,7 +290,7 @@ class Outbox:
             updated = (
                 db.query(DeliveryOutbox)
                 .filter(
-                    DeliveryOutbox.state == "PENDING",
+                    DeliveryOutbox.state.in_(("PENDING", "SENDING", "RETRY")),
                     DeliveryOutbox.claimed_at <= cutoff,
                 )
                 .update(

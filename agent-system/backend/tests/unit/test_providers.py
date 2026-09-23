@@ -50,7 +50,7 @@ def _patch_client(monkeypatch, response_payload: dict[str, Any]) -> Any:
 
 class TestProviderSpec:
     def test_all_providers_have_spec(self) -> None:
-        assert len(PROVIDERS) >= 12
+        assert len(PROVIDERS) >= 14
         for key in (
             "groq",
             "ollama",
@@ -58,7 +58,6 @@ class TestProviderSpec:
             "gemini",
             "anthropic",
             "tokenrouter",
-            "freellmapi",
         ):
             assert key in PROVIDERS
 
@@ -82,7 +81,7 @@ class TestGroqRegression:
         s = _settings(groq_base_url="https://api.groq.com/openai/v1/chat/completions/")
         adapter = build_adapter("groq", s, api_key="test-key")
         assert adapter is not None
-        result = adapter.invoke("llama-3.3-70b-versatile", "ping")
+        result = adapter.invoke("openai/gpt-oss-20b", "ping")
 
         assert result["output"] == "pong"
         args, kwargs = post.call_args
@@ -116,8 +115,8 @@ class TestGroqRegression:
         assert classify_provider_error(err) == ProviderHealth.DISABLED
 
         tracker = ProviderHealthTracker()
-        tracker.report_failure("groq", "llama-3.3-70b-versatile", err)
-        assert tracker.is_routable("groq", "llama-3.3-70b-versatile") is False
+        tracker.report_failure("groq", "openai/gpt-oss-20b", err)
+        assert tracker.is_routable("groq", "openai/gpt-oss-20b") is False
 
 
 class TestOpenAICompat:
@@ -130,7 +129,7 @@ class TestOpenAICompat:
             },
         )
         adapter = OpenAICompatibleAdapter(PROVIDERS["groq"], api_key="test-key")
-        result = adapter.invoke("llama-3.3-70b-versatile", "ping")
+        result = adapter.invoke("openai/gpt-oss-20b", "ping")
 
         assert result["output"] == "pong"
         assert result["usage"]["input_tokens"] == 1
@@ -138,7 +137,7 @@ class TestOpenAICompat:
         headers = kwargs["headers"]
         body = kwargs["json"]
         assert headers["Authorization"] == "Bearer test-key"
-        assert body["model"] == "llama-3.3-70b-versatile"
+        assert body["model"] == "openai/gpt-oss-20b"
         assert body["messages"][0]["role"] == "user"
         assert body["messages"][0]["content"] == "ping"
 
@@ -154,7 +153,7 @@ class TestOpenAICompat:
         adapter = OpenAICompatibleAdapter(
             PROVIDERS["groq"], api_key="k", extra_headers={"X-Custom": "val"}
         )
-        adapter.invoke("llama-3.3-70b-versatile", "hi")
+        adapter.invoke("openai/gpt-oss-20b", "hi")
         _, kwargs = post.call_args
         assert kwargs["headers"].get("X-Custom") == "val"
 
@@ -169,22 +168,212 @@ class TestGemini:
             },
         )
         adapter = GeminiAdapter(PROVIDERS["gemini"], api_key="g-key")
-        result = adapter.invoke("gemini-2.0-flash", "hello")
+        result = adapter.invoke("gemini-3.6-flash", "hello")
 
         assert result["output"] == "g hello"
         args, kwargs = post.call_args
         url: str = args[0]
         headers = kwargs["headers"]
         assert headers["x-goog-api-key"] == "g-key"
-        assert "models/gemini-2.0-flash:generateContent" in url
+        assert "models/gemini-3.6-flash:generateContent" in url
 
     def test_invoke_api_key_as_query_param(self, monkeypatch) -> None:
         body = {"candidates": [{"content": {"parts": [{"text": ""}]}}]}
         post = _patch_client(monkeypatch, body)
         adapter = GeminiAdapter(PROVIDERS["gemini"], api_key=None)
-        adapter.invoke("gemini-2.0-flash", "hi")
+        adapter.invoke("gemini-3.6-flash", "hi")
         args, kwargs = post.call_args
         assert "x-goog-api-key" not in (kwargs.get("headers") or {})
+
+
+class TestStreamOptions:
+    """`stream_options.include_usage` is opt-in: Groq/OpenRouter gateways 400 on it."""
+
+    def _patch_stream(
+        self, monkeypatch, sse_lines: list[str]
+    ) -> dict[str, Any]:
+        """Patch httpx.Client.stream; capture the outgoing JSON payload."""
+        captured: dict[str, Any] = {}
+        resp = MagicMock()
+        resp.iter_lines.return_value = iter(sse_lines)
+        resp.raise_for_status.return_value = None
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.__exit__.return_value = False
+
+        def _stream(method: str, url: str, headers: Any = None, json: Any = None) -> Any:
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return resp
+
+        client.stream.side_effect = _stream
+        monkeypatch.setattr(
+            "agent_system.services.providers.httpx.Client",
+            MagicMock(return_value=client),
+        )
+        return captured
+
+    def test_groq_stream_omits_stream_options(self, monkeypatch) -> None:
+        captured = self._patch_stream(
+            monkeypatch, ['data: {"choices":[{"delta":{"content":"hi"}}]}']
+        )
+        adapter = OpenAICompatibleAdapter(PROVIDERS["groq"], api_key="k")
+        chunks, usage, tool_calls = adapter.stream("openai/gpt-oss-20b", "hi")
+
+        assert "".join(chunks) == "hi"
+        assert usage == {}
+        assert tool_calls == []
+        assert "stream_options" not in captured["json"]
+        assert captured["json"]["stream"] is True
+
+    def test_openrouter_stream_omits_stream_options(self, monkeypatch) -> None:
+        captured = self._patch_stream(
+            monkeypatch, ['data: {"choices":[{"delta":{"content":"hi"}}]}']
+        )
+        adapter = OpenAICompatibleAdapter(PROVIDERS["openrouter"], api_key="k")
+        chunks, _, _ = adapter.stream("meta-llama/llama-3.3-70b-instruct:free", "hi")
+
+        assert "".join(chunks) == "hi"
+        assert "stream_options" not in captured["json"]
+
+    def test_openai_stream_includes_stream_options(self, monkeypatch) -> None:
+        captured = self._patch_stream(
+            monkeypatch,
+            [
+                'data: {"choices":[{"delta":{"content":"hi"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}',
+            ],
+        )
+        adapter = build_adapter("openai", _settings(), api_key="k")
+        assert adapter is not None
+        assert adapter.supports_stream_usage is True
+        chunks, usage, _ = adapter.stream("gpt-4o-mini", "hi")
+
+        assert "".join(chunks) == "hi"
+        assert captured["json"]["stream_options"] == {"include_usage": True}
+        assert usage["input_tokens"] == 1
+
+    def test_direct_construction_defaults_to_no_stream_options(self, monkeypatch) -> None:
+        captured = self._patch_stream(
+            monkeypatch, ['data: {"choices":[{"delta":{"content":"hi"}}]}']
+        )
+        adapter = OpenAICompatibleAdapter(PROVIDERS["openai"], api_key="k")
+        chunks, _, _ = adapter.stream("gpt-4o-mini", "hi")
+        assert "".join(chunks) == "hi"
+        assert "stream_options" not in captured["json"]
+
+
+class TestOpenRouterHeaders:
+    def test_attribution_headers_present_without_key(self) -> None:
+        adapter = OpenAICompatibleAdapter(PROVIDERS["openrouter"], api_key=None)
+        headers = adapter._headers()
+        assert "Authorization" not in headers
+        assert headers["HTTP-Referer"] == "https://localhost"
+        assert headers["X-Title"] == "Bob Agent"
+
+    def test_attribution_headers_present_with_key(self, monkeypatch) -> None:
+        post = _patch_client(monkeypatch, {"choices": [{"message": {"content": ""}}]})
+        adapter = OpenAICompatibleAdapter(PROVIDERS["openrouter"], api_key="or-key")
+        adapter.invoke("meta-llama/llama-3.3-70b-instruct:free", "hi")
+        _, kwargs = post.call_args
+        headers = kwargs["headers"]
+        assert headers["Authorization"] == "Bearer or-key"
+        assert headers["HTTP-Referer"] == "https://localhost"
+        assert headers["X-Title"] == "Bob Agent"
+
+
+class TestGeminiStream:
+    def _patch_stream(self, monkeypatch, sse_lines: list[str]) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+        resp = MagicMock()
+        resp.iter_lines.return_value = iter(sse_lines)
+        resp.raise_for_status.return_value = None
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.__exit__.return_value = False
+
+        def _stream(method: str, url: str, headers: Any = None, json: Any = None) -> Any:
+            captured["url"] = url
+            captured["json"] = json
+            return resp
+
+        client.stream.side_effect = _stream
+        monkeypatch.setattr(
+            "agent_system.services.providers.httpx.Client",
+            MagicMock(return_value=client),
+        )
+        return captured
+
+    def test_supports_streaming_flag(self) -> None:
+        assert GeminiAdapter.supports_streaming is True
+
+    def test_stream_assembles_text_and_function_calls(self, monkeypatch) -> None:
+        import json as _json
+
+        evt1 = _json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "checking "},
+                                {
+                                    "functionCall": {
+                                        "name": "get_user",
+                                        "args": {"id": "u-42"},
+                                    }
+                                },
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 5},
+            }
+        )
+        evt2 = _json.dumps(
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}
+                ]
+            }
+        )
+        captured = self._patch_stream(monkeypatch, [f"data: {evt1}", f"data: {evt2}"])
+
+        adapter = GeminiAdapter(PROVIDERS["gemini"], api_key="g-key")
+        chunks, usage, tool_calls = adapter.stream("gemini-3.6-flash", "hi")
+        output = "".join(chunks)
+
+        assert output == "checking done"
+        assert usage == {"input_tokens": 3, "output_tokens": 5}
+        assert tool_calls == [
+            {"id": "call_native_1", "name": "get_user", "arguments": '{"id": "u-42"}'}
+        ]
+        assert ":streamGenerateContent" in captured["url"]
+
+    def test_finish_reason_normalized(self, monkeypatch) -> None:
+        post = _patch_client(
+            monkeypatch,
+            {"candidates": [{"content": {"parts": []}, "finishReason": "SAFETY"}]},
+        )
+        adapter = GeminiAdapter(PROVIDERS["gemini"], api_key="g-key")
+        result = adapter.invoke("gemini-3.6-flash", "hi")
+        assert result["finish_reason"] == "content_filter"
+        assert post.called
+
+    def test_finish_reason_max_tokens_maps_to_length(self, monkeypatch) -> None:
+        _patch_client(
+            monkeypatch,
+            {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]},
+        )
+        adapter = GeminiAdapter(PROVIDERS["gemini"], api_key="g-key")
+        result = adapter.invoke("gemini-3.6-flash", "hi")
+        assert result["finish_reason"] == "length"
 
 
 class TestAnthropic:
@@ -229,7 +418,7 @@ class TestPricing:
     def test_free_tier_models_register_zero_cost(self) -> None:
         pricing = build_pricing()
         ids = [m.model_id for m in pricing.all()]
-        assert "auto" in ids  # freellmapi / tokenrouter
+        assert "auto" in ids  # tokenrouter
         for m in pricing.all():
             if m.input_cost_per_1m < 0:
                 raise AssertionError(f"negative cost for {m.model_id}")
@@ -257,7 +446,7 @@ class TestDefaultModelId:
 
     def test_from_provider_spec(self) -> None:
         s = _settings(default_provider="groq")
-        assert default_model_id(s) == "llama-3.3-70b-versatile"
+        assert default_model_id(s) == "openai/gpt-oss-20b"
 
 
 class TestProviderApiKey:

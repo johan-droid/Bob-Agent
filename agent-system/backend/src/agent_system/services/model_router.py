@@ -409,6 +409,76 @@ class ModelRouter:
             breaker = self._breakers.get(provider)
             return breaker.state if breaker else None
 
+    def _failover_chain(
+        self, model_id: str, provider: str
+    ) -> list[tuple[str, str, Any | None]]:
+        """Ordered (model, provider, adapter) attempts: primary + failover.
+
+        Offline (echo/none) primaries never fail over. Alternates honor
+        ``llm_provider_order`` when set, else adapter registration order, and
+        skip echo, the failed primary, unroutable (disabled/auth-failed/cooled
+        down) providers, and providers with no adapter/pricing entry. Bounded
+        by ``llm_max_fallback_attempts`` (min 1).
+        """
+        primary = (model_id, provider, self._adapters.get(provider))
+        try:
+            from agent_system.services.providers import is_offline_provider  # noqa: PLC0415
+        except Exception:
+            is_offline_provider = lambda p: str(p or "").strip().lower() in {"echo", "none", ""}  # noqa: E731
+        if is_offline_provider(provider):
+            return [primary]
+        try:
+            max_attempts = int(getattr(self.settings, "llm_max_fallback_attempts", 3) or 3)
+        except Exception:
+            max_attempts = 3
+        max_attempts = max(1, max_attempts)
+        try:
+            raw_order = str(getattr(self.settings, "llm_provider_order", "") or "")
+            preferred = [p.strip() for p in raw_order.split(",") if p.strip()]
+        except Exception:
+            preferred = []
+        with self._lock:
+            registered = list(self._adapters.keys())
+        ordered = [p for p in preferred if p in registered]
+        ordered += [p for p in registered if p not in ordered]
+        try:
+            from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER  # noqa: PLC0415
+        except Exception:
+            GLOBAL_HEALTH_TRACKER = None  # type: ignore[assignment]  # noqa: N806
+        try:
+            from agent_system.services.providers import provider_spec  # noqa: PLC0415
+        except Exception:
+            provider_spec = None  # type: ignore[assignment]
+        chain = [primary]
+        for cand in ordered:
+            if len(chain) >= max_attempts:
+                break
+            if cand == provider or cand == "echo":
+                continue
+            if cand not in self._adapters:
+                continue
+            cand_model = model_id
+            if provider_spec is not None:
+                try:
+                    spec = provider_spec(cand)
+                    if spec is not None and getattr(spec, "default_model", None):
+                        cand_model = spec.default_model
+                except Exception:
+                    pass
+            try:
+                if self.pricing.get(cand_model) is None:
+                    continue
+            except Exception:
+                pass
+            if GLOBAL_HEALTH_TRACKER is not None:
+                try:
+                    if not GLOBAL_HEALTH_TRACKER.is_routable(cand, cand_model):
+                        continue
+                except Exception:
+                    pass
+            chain.append((cand_model, cand, self._adapters[cand]))
+        return chain[:max_attempts]
+
     def invoke(
         self,
         factory: Any,
@@ -419,6 +489,7 @@ class ModelRouter:
         session_id: str | None = None,
         skills: list[str] | None = None,
         agent_type: str | None = None,
+        fallback: bool = False,
         **kwargs: Any,
     ) -> InvocationResult:
         """Invoke a model, recording model.requested/completed/failed + ModelCall.
@@ -426,6 +497,12 @@ class ModelRouter:
         When a ``skill_manager`` is attached, ``skills=[...]`` injects exactly
         those skills' instructions (or, when omitted, every enabled skill
         matching ``agent_type``) into the prompt before the adapter call.
+
+        ``fallback=False`` (default) tries the single requested model — the
+        agent loop's outer ``invoke_with_fallback`` helper owns failover there
+        and calls this per candidate. ``fallback=True`` enables internal
+        cross-provider failover (primary + alternates bounded by
+        ``llm_max_fallback_attempts``) for direct callers like the chat path.
         """
         import time
 
@@ -433,34 +510,7 @@ class ModelRouter:
         info = self.pricing.get(model_id)
         provider = info.provider if info else "unknown"
         call_id = ids.new_model_call_id()
-        self._emit_requested(
-            factory,
-            call_id,
-            model_id,
-            provider,
-            skills_used,
-            soul_used,
-            session_id,
-            task_id,
-            agent_run_id,
-        )
-        adapter = self._adapter_for(model_id)
-        started = time.monotonic()
-        breaker = self._breaker_for(provider) if provider != "unknown" else None
-
-        def _call() -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
-            assert adapter is not None
-            response = adapter.invoke(model_id, prompt, **kwargs)
-            rl_info = response.get("rate_limit_info")
-            if rl_info:
-                from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
-
-                GLOBAL_HEALTH_TRACKER.update_rate_limits(provider, model_id, rl_info)
-            return (
-                str(response.get("output", "")),
-                dict(response.get("usage", {})),
-                response.get("tool_calls") or None,
-            )
+        invoke_started = time.monotonic()
 
         budget_error = self._budget_check(
             factory, task_id=task_id, session_id=session_id, provider=provider
@@ -472,34 +522,116 @@ class ModelRouter:
             usage: dict[str, Any] = {}
             tool_calls: list[dict[str, Any]] | None = None
             circuit_events: list[tuple[str, dict[str, Any]]] = []
-        elif adapter is None:
-            ok = False
-            output = None
-            error = f"no adapter registered for provider '{provider}'"
-            usage = {}
-            tool_calls = None
-            circuit_events = []
+            latency_ms = int((time.monotonic() - invoke_started) * 1000)
+            return self._record(
+                factory,
+                call_id,
+                model_id,
+                provider,
+                ok,
+                output,
+                usage,
+                tool_calls,
+                error,
+                latency_ms,
+                skills_used,
+                soul_used,
+                session_id,
+                task_id,
+                agent_run_id,
+                circuit_events,
+            )
+        # Failover chain: single primary by default (the agent loop's outer
+        # invoke_with_fallback owns failover and calls this per candidate).
+        # Direct callers opt into internal cross-provider failover.
+        # Offline (echo) primaries never fail over — echo is authoritative.
+        if fallback:
+            chain = self._failover_chain(model_id, provider)
         else:
-            ok, output, error, usage, tool_calls, circuit_events = self._run_guarded(breaker, _call)
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return self._record(
-            factory,
-            call_id,
-            model_id,
-            provider,
-            ok,
-            output,
-            usage,
-            tool_calls,
-            error,
-            latency_ms,
-            skills_used,
-            soul_used,
-            session_id,
-            task_id,
-            agent_run_id,
-            circuit_events,
-        )
+            chain = [(model_id, provider, self._adapters.get(provider))]
+        per_call_timeout = kwargs.pop("timeout", None)
+        last_record: Any = None
+        for attempt_no, (cand_model, cand_provider, cand_adapter) in enumerate(chain):
+            cand_breaker = self._breaker_for(cand_provider) if cand_provider != "unknown" else None
+            cand_call_id = call_id if attempt_no == 0 else ids.new_model_call_id()
+            self._emit_requested(
+                factory,
+                cand_call_id,
+                cand_model,
+                cand_provider,
+                skills_used,
+                soul_used,
+                session_id,
+                task_id,
+                agent_run_id,
+            )
+            cand_started = time.monotonic()
+
+            def _attempt(
+                _ad: Any = cand_adapter, _cm: str = cand_model, _to: Any = per_call_timeout
+            ) -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
+                # Per-call timeout override (float assignment is GIL-atomic;
+                # worst case a concurrent thread inherits the tighter bound).
+                old_timeout: Any = None
+                if _to is not None and hasattr(_ad, "timeout"):
+                    old_timeout = _ad.timeout
+                    _ad.timeout = float(_to)
+                try:
+                    response = _ad.invoke(_cm, prompt, **kwargs)
+                finally:
+                    if old_timeout is not None:
+                        try:
+                            _ad.timeout = old_timeout
+                        except Exception:
+                            pass
+                rl_info = response.get("rate_limit_info")
+                if rl_info:
+                    from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
+
+                    GLOBAL_HEALTH_TRACKER.update_rate_limits(cand_provider, _cm, rl_info)
+                return (
+                    str(response.get("output", "")),
+                    dict(response.get("usage", {})),
+                    response.get("tool_calls") or None,
+                )
+
+            if cand_adapter is None:
+                ok, output, error, usage, tool_calls, circuit_events = (
+                    False,
+                    None,
+                    f"no adapter registered for provider '{cand_provider}'",
+                    {},
+                    None,
+                    [],
+                )
+            else:
+                ok, output, error, usage, tool_calls, circuit_events = self._run_guarded(
+                    cand_breaker, _attempt
+                )
+            latency_ms = int((time.monotonic() - cand_started) * 1000)
+            last_record = self._record(
+                factory,
+                cand_call_id,
+                cand_model,
+                cand_provider,
+                ok,
+                output,
+                usage,
+                tool_calls,
+                error,
+                latency_ms,
+                skills_used,
+                soul_used,
+                session_id,
+                task_id,
+                agent_run_id,
+                circuit_events,
+            )
+            # Empty output counts as failure for selection (an LLM that says
+            # nothing is useless); the attempt stays recorded in the ledger.
+            if ok and (output or "").strip():
+                return last_record
+        return last_record
 
     def invoke_streaming(
         self,
@@ -726,6 +858,28 @@ class ModelRouter:
             error = None
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
+            # 429s carry a Retry-After / rate-limit header set; feed it to the
+            # health tracker so the cooldown honours the provider's own hint
+            # instead of a fixed default. (The success path parses these from
+            # the adapter result; the failure path only has the exception.)
+            response = getattr(exc, "response", None)
+            rl_headers = None
+            if response is not None and hasattr(response, "headers"):
+                try:
+                    rl_headers = {
+                        k: v
+                        for k, v in response.headers.items()
+                        if "ratelimit" in k.lower() or k.lower() == "retry-after"
+                    }
+                except Exception:
+                    rl_headers = None
+            if rl_headers:
+                try:
+                    from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
+
+                    GLOBAL_HEALTH_TRACKER.update_rate_limits(breaker.provider, "", rl_headers)
+                except Exception:
+                    pass
             output, usage, ok, error, tool_calls = None, {}, False, message, None
         transition = breaker.after_success() if ok else breaker.after_failure()
         if transition == "opened":
@@ -809,13 +963,45 @@ class ModelRouter:
         )
         # Unknown pricing -> None cost, flagged estimated; NEVER crashes.
         cost_estimated = cost is None
+        import logging as _logging
+
         from agent_system.infra.telemetry import get_metrics
         from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
 
+        _logging.getLogger(__name__).info(
+            "[LLM] request_sent provider=%s model=%s request_id=%s task_id=%s session_id=%s",
+            provider,
+            model_id,
+            call_id,
+            task_id,
+            session_id,
+        )
         if ok:
             GLOBAL_HEALTH_TRACKER.report_success(provider, model_id, latency_ms=latency_ms)
+            if tool_calls:
+                _logging.getLogger(__name__).info(
+                    "[LLM] tool_call_detected provider=%s model=%s request_id=%s count=%s",
+                    provider,
+                    model_id,
+                    call_id,
+                    len(tool_calls),
+                )
+            _logging.getLogger(__name__).info(
+                "[LLM] response_received provider=%s model=%s request_id=%s latency_ms=%s",
+                provider,
+                model_id,
+                call_id,
+                latency_ms,
+            )
         else:
             GLOBAL_HEALTH_TRACKER.report_failure(provider, model_id, error=error or "")
+            _logging.getLogger(__name__).warning(
+                "[LLM] response_received provider=%s model=%s request_id=%s ok=False error=%s",
+                provider,
+                model_id,
+                call_id,
+                str(error or "")[:200],
+            )
 
         get_metrics().record_model_latency(provider, latency_ms, ok)
         if session_id is not None and cost is not None:
@@ -899,6 +1085,16 @@ class ModelRouter:
                     db,
                 )
 
+        import logging as _logging2
+
+        _logging2.getLogger(__name__).info(
+            "[LLM] request_completed provider=%s model=%s request_id=%s ok=%s task_id=%s",
+            provider,
+            model_id,
+            call_id,
+            ok,
+            task_id,
+        )
         return InvocationResult(
             model_call_id=call_id,
             model_id=model_id,

@@ -141,12 +141,11 @@ class IdentityService:
         return IdentityMode(getattr(self._settings, "agent_identity_mode", "local"))
 
     def allowed_user_ids(self) -> set[str]:
+        # Strict separation: identity mode uses telegram user ids only.
+        # Never fall back to chat ids (different namespace) and never treat
+        # empty as allow-all — empty + telegram mode means nobody can provision.
         raw_users = str(getattr(self._settings, "telegram_allowed_user_ids", "") or "")
-        users = {p.strip() for p in raw_users.split(",") if p.strip()}
-        if not users:
-            raw_chats = str(getattr(self._settings, "telegram_allowed_chat_ids", "") or "")
-            users = {p.strip() for p in raw_chats.split(",") if p.strip()}
-        return users
+        return {p.strip() for p in raw_users.split(",") if p.strip()}
 
     def operator(self) -> Principal:
         if self.mode is IdentityMode.LOCAL:
@@ -205,7 +204,8 @@ class IdentityService:
             raise IdentityError("provisioning requires telegram identity mode")
         tid = str(telegram_user_id)
         allowed = self.allowed_user_ids()
-        if allowed and tid not in allowed:
+        # Fail-closed: empty allowlist in telegram mode => nobody can provision.
+        if not allowed or tid not in allowed:
             raise IdentityError("telegram user is not on the provisioning allowlist")
         from agent_system.infra.db import session_scope
         from agent_system.infra.models import TelegramAccount, User

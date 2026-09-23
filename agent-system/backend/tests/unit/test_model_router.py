@@ -339,3 +339,50 @@ class TestEndToEndMatrix:
         assert res is not None
         assert not res.ok
         assert res.error is not None
+
+    def test_invoke_internal_fallback_opt_in(self, env: tuple[object, object, EventBus]) -> None:
+        """router.invoke(fallback=True) fails over inside one call."""
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        router = ModelRouter(bus, pricing, registry)
+
+        router.register_adapter("echo_primary", UnavailableProvider())
+        router.register_adapter("echo_fallback", EchoProvider())
+        pricing.register(
+            ModelInfo(
+                model_id="m-primary",
+                provider="echo_primary",
+                input_cost_per_1m=0,
+                output_cost_per_1m=0,
+            )
+        )
+        pricing.register(
+            ModelInfo(
+                model_id="m-fallback",
+                provider="echo_fallback",
+                input_cost_per_1m=0,
+                output_cost_per_1m=0,
+            )
+        )
+
+        # Default: single attempt, failure surfaces (outer helper owns failover).
+        res = router.invoke(factory, "m-primary", "hi")
+        assert not res.ok
+
+        # Opt-in: internal failover returns a working provider's output.
+        res = router.invoke(factory, "m-primary", "hi", fallback=True)
+        assert res.ok
+        assert (res.output or "").strip()
+
+    def test_invoke_timeout_kwarg(self, env: tuple[object, object, EventBus]) -> None:
+        """Per-call timeout is accepted and adapter timeout restored."""
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        router = ModelRouter(bus, pricing, registry)
+        adapter = EchoProvider()
+        adapter.timeout = 120.0
+        router.register_adapter("echo", adapter)
+
+        res = router.invoke(factory, "local-small", "hi", timeout=5)
+        assert res.ok
+        assert adapter.timeout == 120.0

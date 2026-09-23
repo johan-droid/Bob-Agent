@@ -163,10 +163,10 @@ class TelegramProgressPresenter:
         self._bus.subscribe("model.started", self._on_event)
         self._bus.subscribe("model.token", self._on_event)
         self._bus.subscribe("task.failed", self._on_event)
-
-        # Enqueue initial typing & working message
-        if self._outbox is not None:
-            self._outbox.enqueue(kind="typing", chat_id=self._chat_id, text="")
+        # No initial message here: progress is reported from real
+        # model/tool events below, and empty texts are rejected by the
+        # outbox (Telegram 400s). The typing animation is sent via
+        # sendChatAction by the caller before the drive starts.
 
     def stop(self) -> None:
         self._active = False

@@ -37,6 +37,10 @@ _VALUE_PATTERNS = (
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}"),  # JWTs
     re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),  # GitHub tokens
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),  # Slack tokens
+    re.compile(r"gsk_[A-Za-z0-9]{16,}"),  # Groq
+    re.compile(r"oc_sk_[A-Za-z0-9_\-]{8,}"),  # OpenCode
+    re.compile(r"\b\d{6,12}:[A-Za-z0-9_\-]{20,}\b"),  # Telegram bot token
+    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.~\+/]+=*", re.IGNORECASE),  # Bearer tokens
 )
 
 # File basenames that must never be copied into templates/snapshots

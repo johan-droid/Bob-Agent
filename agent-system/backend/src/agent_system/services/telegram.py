@@ -68,7 +68,30 @@ from agent_system.services.permissions import (
 _logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org/bot{token}"
-_HTTP_TIMEOUT = 30.0
+# Must exceed the getUpdates long-poll `timeout` (30s) or every poll idles
+# into an httpx.ReadTimeout.
+_HTTP_TIMEOUT = 65.0
+
+
+def send_chat_action_sync(bot_token: str | None, chat_id: int, action: str = "typing") -> bool:
+    """Best-effort Telegram `sendChatAction` (the client "typing…" animation).
+
+    Synchronous fire-and-forget for threads without an event loop. Never
+    raises, never retries, 10s cap — a missing animation must never slow or
+    break message delivery. Returns True when Telegram accepted it.
+    """
+    if not bot_token or chat_id is None:
+        return False
+    try:
+        import httpx as _httpx
+
+        resp = _httpx.Client(timeout=10.0).post(
+            _API_BASE.format(token=bot_token) + "/sendChatAction",
+            json={"chat_id": int(chat_id), "action": action},
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -561,11 +584,45 @@ class TelegramService:
         from_chat = chat.get("id")
         from_user = message.get("from", {})
         text = (message.get("text") or "").strip()
+        # Inbound caps: Telegram client limit is 4096; webhook attackers are not.
+        if len(text) > 4096:
+            text = text[:4096]
+        chat_type = str(chat.get("type") or "")
         if from_chat is None:
             if update_id is not None:
                 self._mark_processed(update_id)
             return
+        # Local-mode group guard: a shared group chat id must not grant every
+        # member operator rights. In group/supergroup/channel chats require the
+        # sender's user id to also be allowlisted.
+        if self._identity is None and chat_type in ("group", "supergroup", "channel"):
+            sender = from_user.get("id") if isinstance(from_user, dict) else None
+            try:
+                if sender is None or int(sender) not in self._allowed:
+                    self._audit_denied(from_chat, from_user)
+                    if update_id is not None:
+                        self._mark_processed(update_id)
+                    return
+            except Exception:
+                self._audit_denied(from_chat, from_user)
+                if update_id is not None:
+                    self._mark_processed(update_id)
+                return
         principal = self._resolve_principal(from_chat, from_user)
+        if principal is None:
+            self._audit_denied(from_chat, from_user)
+            if update_id is not None:
+                self._mark_processed(update_id)
+            return
+        # DM-only credential setup: never accept secrets in group chats.
+        if chat_type in ("group", "supergroup", "channel") and text.startswith(("/setup", "/rotate")):
+            try:
+                await self._send(from_chat, "Credential setup is only available in direct messages.")
+            except Exception:
+                pass
+            if update_id is not None:
+                self._mark_processed(update_id)
+            return
         if principal is None:
             self._audit_denied(from_chat, from_user)
             if update_id is not None:
@@ -734,7 +791,12 @@ class TelegramService:
     async def _handle_active_setup_step(
         self, principal: Principal, chat_id: int, text: str
     ) -> bool:
+        # Key setup sessions by (chat, user): a group member must not be able
+        # to continue another user's ask_api_key/ask_key step.
+        user_id = str(principal.user_id or "local")
         session = _ACTIVE_SETUPS.get(chat_id)
+        if session is not None and getattr(session, "user_id", None) not in (None, user_id):
+            return False
         if not session:
             lower = text.lower()
             if "set up my vps" in lower or "setup vps" in lower or "set up ssh" in lower:
@@ -745,7 +807,6 @@ class TelegramService:
                 return True
             return False
 
-        user_id = str(principal.user_id or "local")
         from agent_system.services.credentials import CredentialStore
 
         vault = CredentialStore(self._factory) if self._factory else None
@@ -1168,6 +1229,9 @@ class TelegramService:
         reply_markup: dict[str, Any] | None = None,
     ) -> None:
         if not self.is_configured():
+            return
+        if not (text or "").strip():
+            _logger.warning("telegram.send.skip.empty chat_id=%s", chat_id)
             return
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)

@@ -86,10 +86,17 @@ class Metrics:
 
     def record_cost(self, session_id: str, cost_usd: float) -> None:
         if session_id:
+            # Bound cardinality: evict oldest when over cap.
+            if len(self._cost_by_session) >= 1000 and session_id not in self._cost_by_session:
+                try:
+                    self._cost_by_session.pop(next(iter(self._cost_by_session)))
+                except StopIteration:
+                    pass
             self._cost_by_session[session_id] = self._cost_by_session.get(session_id, 0.0) + float(
                 cost_usd
             )
-        self._forward("cost", float(cost_usd), {"session_id": session_id or "none"})
+        # No per-session OTel label (cardinality explosion); aggregate only.
+        self._forward("cost", float(cost_usd), {})
 
     # -- inspect -----------------------------------------------------
 

@@ -582,6 +582,9 @@ class Orchestrator:
                 handler = fallback_handler(input_snapshot)
             if handler is None:
                 raise LookupError(f"no handler registered for agent type '{agent_type_snapshot}'")
+            # Single-config execution principle: the handler runs under the
+            # Orchestrator's own settings — never a divergent ambient read.
+            # None falls back to get_settings() inside the handler.
             context = {
                 "session_id": session_id,
                 "task_id": task_id,
@@ -589,6 +592,7 @@ class Orchestrator:
                 "agent_type": agent_type_snapshot,
                 "factory": factory,
                 "bus": self._bus,
+                "settings": self._settings,
             }
             result = handler(input_snapshot, context)
             self._verify_and_finish(

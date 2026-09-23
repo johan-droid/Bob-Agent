@@ -59,6 +59,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         _logging.getLogger(__name__).warning("Telegram service startup error: %s", exc)
         app.state.telegram_startup_error = str(exc)
+    # Pure-cloud startup summary (no CLI needed): one log line, no secrets.
+    try:
+        import logging as _logging2
+
+        from agent_system.services.settings_store import cloud_doctor as _cloud_doctor
+
+        summary = _cloud_doctor(settings)
+        _logging2.getLogger(__name__).warning(
+            "cloud boot env=%s identity=%s transport=%s telegram=%s webhook_url=%s "
+            "allowlist=%s providers=%s default=%s db=%s",
+            summary.get("agent_env"),
+            summary.get("identity_mode"),
+            summary.get("transport"),
+            summary.get("telegram_configured"),
+            summary.get("webhook_url_set"),
+            summary.get("allowlist_count"),
+            summary.get("providers_configured"),
+            summary.get("default_provider"),
+            summary.get("database"),
+        )
+        for note in summary.get("notes", []):
+            _logging2.getLogger(__name__).warning("cloud boot note: %s", note)
+    except Exception:
+        pass
     # Skills (Hermes-style pluggable capabilities): always available, even
     # with zero skills on disk — discovery degrades to an empty list.
     # Shipped seeds count as "builtin" only when the default dir is in use.
@@ -143,11 +167,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             recovery_factory = _session_factory
             recovery_bus = app.state.event_bus
-            recovery_orchestrator = Orchestrator(recovery_bus)
+            recovery_orchestrator = Orchestrator(recovery_bus, settings=settings)
 
             def recover_tasks() -> None:
                 recovery_orchestrator.recover_orphans(recovery_factory)
-                sweep_backlog(recovery_factory, recovery_bus)
+                sweep_backlog(recovery_factory, recovery_bus, settings=settings)
                 # Telegram gateway pipeline recovery: replay relay-able events
                 # that never reached the outbox, redrive ledger rows that never
                 # reached processed (dyno died mid-task), then drain the
@@ -191,17 +215,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _engine.dispose()
 
 
-app = FastAPI(title="Agent System", version="0.1.0", lifespan=lifespan)
+import os as _os
+
+_prod = (_os.environ.get("AGENT_ENV", "") or "").lower() == "production"
+app = FastAPI(
+    title="Agent System",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url=None if _prod else "/docs",
+    redoc_url=None if _prod else "/redoc",
+    openapi_url=None if _prod else "/openapi.json",
+)
 
 # CORS (settings-driven; defaults to the local UI origin). Added after app
 # creation so the existing lifespan is untouched.
 _cors_settings = get_settings()
+_origins = _cors_settings.cors_origins_list or ["http://localhost:3000"]
+if "*" in _origins:
+    raise RuntimeError("API_CORS_ORIGINS='*' cannot be used with allow_credentials=True")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_settings.cors_origins_list or ["http://localhost:3000"],
+    allow_origins=_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 
@@ -238,3 +275,20 @@ app.include_router(a2a_router)
 @app.get("/api/v1/ready-dependency-check", include_in_schema=False)
 def ready_dep(dep: Annotated[Authenticator, Depends(get_authenticator)]) -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/doctor", include_in_schema=False)
+def cloud_doctor(dep: Annotated[Authenticator, Depends(get_authenticator)]) -> dict[str, Any]:
+    """Cloud equivalent of `agentctl doctor` — no CLI needed, no secrets leaked."""
+    from agent_system.services.settings_store import check_settings, cloud_doctor as _doctor
+
+    settings = get_settings()
+    body = _doctor(settings)
+    body["settings_check"] = check_settings()
+    try:
+        tg = getattr(app.state, "telegram", None)
+        body["telegram_transport"] = tg.transport if tg is not None else None
+        body["telegram_startup_error"] = getattr(app.state, "telegram_startup_error", None)
+    except Exception:
+        pass
+    return body

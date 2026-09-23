@@ -54,6 +54,7 @@ updated: 2026-09-16
 | [[28_Reliability_Operations]] | Idempotency, crash recovery, SQLite/Redis split, limits, degraded modes |
 | [[29_Testing_Strategy]] | Test pyramid, chaos testing, E2E acceptance lifecycle |
 | [[30_Implementation_Docs]] | Required `docs/implementation/` files & validation checklist |
+| [[31_System_Handbook]] | ⭐ Current system as implemented: runtime, API, security, ops (code-grounded) |
 
 ## 🎯 Core Capabilities (at a glance)
 

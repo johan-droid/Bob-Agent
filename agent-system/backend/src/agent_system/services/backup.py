@@ -131,21 +131,42 @@ class BackupService:
             raise BackupError(f"backup {stamp} failed: {exc}") from exc
 
     def _backup_db(self, dest: Path) -> int:
+        import logging as _logging
+        import os as _os
+
         src = self._db_path()
         if not src.exists():
             raise BackupError(f"database file not found: {src}")
         dest.parent.mkdir(parents=True, exist_ok=True)
+        _logging.getLogger(__name__).warning(
+            "backup contains user_credentials/MemoryNote/TelegramUpdate rows; "
+            "encrypt at rest and restrict access (chmod 0600 applied)"
+        )
         with sqlite3.connect(src) as src_conn, sqlite3.connect(dest) as dst_conn:
             src_conn.backup(dst_conn)
+        try:
+            _os.chmod(dest, 0o600)
+            _os.chmod(dest.parent, 0o700)
+        except Exception:
+            pass
         return dest.stat().st_size
 
     def _backup_archive(self, dest: Path) -> tuple[int, list[str]]:
+        import os as _os2
+
         skipped: list[str] = []
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             for top_name, root in self._data_dirs():
                 for file_path in sorted(root.rglob("*")):
                     if not file_path.is_file():
+                        continue
+                    try:
+                        if ".." in str(file_path.relative_to(root)):
+                            skipped.append(f"{top_name}/..-traversal")
+                            continue
+                    except ValueError:
+                        skipped.append(f"{top_name}/outside-root")
                         continue
                     rel = file_path.relative_to(root)
                     arcname = f"{top_name}/{rel}"
@@ -155,6 +176,10 @@ class BackupService:
                         continue
                     tar.add(file_path, arcname=arcname)
         dest.write_bytes(buf.getvalue())
+        try:
+            _os2.chmod(dest, 0o600)
+        except Exception:
+            pass
         return dest.stat().st_size, skipped
 
     # -- list / prune ----------------------------------------------------

@@ -411,10 +411,27 @@ class SkillManager:
     def _import_from_url(self, url: str, overwrite: bool) -> Skill:
         import urllib.request
 
+        # SSRF + DoS guard: https only, no private hosts, size + type caps.
+        from urllib.parse import urlparse as _up
+
+        parsed = _up(url)
+        if parsed.scheme != "https":
+            raise SkillError("skill URL import requires https")
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "metadata.google.internal", "169.254.169.254") or host.endswith(
+            ".internal"
+        ):
+            raise SkillError(f"refusing blocked skill URL host: {host}")
         tmp = Path(tempfile.mkdtemp(prefix="bob-skill-")) / "SKILL.md"
         try:
             with urllib.request.urlopen(url, timeout=30) as resp:
-                tmp.write_bytes(resp.read())
+                ctype = str(resp.headers.get("Content-Type", ""))
+                if "text" not in ctype and "markdown" not in ctype and "octet" not in ctype:
+                    raise SkillError(f"refusing skill Content-Type: {ctype[:100]}")
+                data = resp.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    raise SkillError("skill file too large (max 2MB)")
+                tmp.write_bytes(data)
             return self._import_single_file(tmp, overwrite)
         except SkillError:
             raise
@@ -472,10 +489,13 @@ class SkillManager:
         git = shutil.which("git")
         if git is None:
             raise SkillError("git is required to import skills from a URL")
+        # Option-injection guard: URLs starting with '-' would be parsed as flags.
+        if url.startswith("-"):
+            raise SkillError("refusing git URL starting with '-'")
         tmp = Path(tempfile.mkdtemp(prefix="bob-skill-"))
         try:
             proc = subprocess.run(
-                [git, "clone", "--depth", "1", url, str(tmp / "repo")],
+                [git, "clone", "--depth", "1", "--", url, str(tmp / "repo")],
                 capture_output=True,
                 text=True,
                 timeout=120,

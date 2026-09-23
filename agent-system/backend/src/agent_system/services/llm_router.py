@@ -8,49 +8,89 @@ from typing import Any
 
 
 class FailureCategory(str, Enum):  # noqa: UP042
-    AUTH_FAILURE = "AUTH_FAILURE"
-    INVALID_MODEL = "INVALID_MODEL"
+    # Structured provider taxonomy (superset of the legacy names — legacy
+    # members are kept so existing callers/tests keep working).
+    AUTHENTICATION = "AUTHENTICATION"
+    AUTH_FAILURE = "AUTH_FAILURE"  # legacy alias of AUTHENTICATION
     INVALID_REQUEST = "INVALID_REQUEST"
-    RATE_LIMIT = "RATE_LIMIT"
+    INVALID_MODEL = "INVALID_MODEL"
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    RATE_LIMIT = "RATE_LIMIT"  # legacy alias of RATE_LIMITED
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
     TIMEOUT = "TIMEOUT"
-    NETWORK_ERROR = "NETWORK_ERROR"
+    NETWORK = "NETWORK"
+    NETWORK_ERROR = "NETWORK_ERROR"  # legacy alias of NETWORK
     SERVER_ERROR = "SERVER_ERROR"
-    NOT_FOUND = "NOT_FOUND"
+    TOOL_UNSUPPORTED = "TOOL_UNSUPPORTED"
+    STRUCTURED_OUTPUT_UNSUPPORTED = "STRUCTURED_OUTPUT_UNSUPPORTED"
+    CONTENT_POLICY = "CONTENT_POLICY"
+    NOT_FOUND = "NOT_FOUND"  # legacy: invalid model / missing endpoint
     CAPABILITY_MISMATCH = "CAPABILITY_MISMATCH"
     UNKNOWN = "UNKNOWN"
+
+
+def _normalize_category(category: FailureCategory) -> FailureCategory:
+    aliases = {
+        FailureCategory.AUTH_FAILURE: FailureCategory.AUTHENTICATION,
+        FailureCategory.RATE_LIMIT: FailureCategory.RATE_LIMITED,
+        FailureCategory.NETWORK_ERROR: FailureCategory.NETWORK,
+    }
+    return aliases.get(category, category)
 
 
 def classify_error(exc_or_msg: Any, status_code: int | None = None) -> tuple[FailureCategory, bool]:
     """Classify model invocation failure into category and retryability.
 
-    Returns (FailureCategory, is_retryable).
+    Returns (FailureCategory, is_retryable). Delegates to the structured
+    :mod:`llm_contract` classifier so the router, health tracker and
+    fallback ledger share one taxonomy; legacy member names are preserved.
     """
+    try:
+        from agent_system.services.llm_contract import ProviderErrorCode
+        from agent_system.services.llm_contract import classify_provider_error as _classify
+    except ImportError:
+        _classify = None  # type: ignore[assignment]
+        ProviderErrorCode = None  # type: ignore[assignment]
+    if _classify is not None:
+        err = _classify(exc_or_msg, status_code=status_code)
+        # Legacy member names preserved for existing callers/tests:
+        # AUTH_FAILURE (== AUTHENTICATION), NOT_FOUND (invalid model),
+        # RATE_LIMIT (== RATE_LIMITED), NETWORK_ERROR (== NETWORK).
+        mapping = {
+            ProviderErrorCode.AUTHENTICATION: (FailureCategory.AUTH_FAILURE, False),
+            ProviderErrorCode.INVALID_REQUEST: (FailureCategory.INVALID_REQUEST, False),
+            ProviderErrorCode.INVALID_MODEL: (FailureCategory.NOT_FOUND, False),
+            ProviderErrorCode.MODEL_UNAVAILABLE: (FailureCategory.NOT_FOUND, False),
+            ProviderErrorCode.RATE_LIMITED: (FailureCategory.RATE_LIMIT, True),
+            ProviderErrorCode.QUOTA_EXHAUSTED: (FailureCategory.RATE_LIMIT, True),
+            ProviderErrorCode.TIMEOUT: (FailureCategory.TIMEOUT, True),
+            ProviderErrorCode.NETWORK: (FailureCategory.NETWORK_ERROR, True),
+            ProviderErrorCode.SERVER_ERROR: (FailureCategory.SERVER_ERROR, True),
+            ProviderErrorCode.TOOL_UNSUPPORTED: (FailureCategory.TOOL_UNSUPPORTED, False),
+            ProviderErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED: (
+                FailureCategory.STRUCTURED_OUTPUT_UNSUPPORTED,
+                False,
+            ),
+            ProviderErrorCode.CONTENT_POLICY: (FailureCategory.CONTENT_POLICY, False),
+            ProviderErrorCode.UNKNOWN: (FailureCategory.UNKNOWN, True),
+        }
+        return mapping.get(err.code, (FailureCategory.UNKNOWN, True))
+    # Fallback when llm_contract is unavailable (should never happen).
     msg = str(exc_or_msg or "").lower()
     code = status_code
-    if (
-        code is None
-        and hasattr(exc_or_msg, "response")
-        and hasattr(exc_or_msg.response, "status_code")
-    ):
-        code = int(exc_or_msg.response.status_code)
-
-    if (
-        code in (401, 403)
-        or "unauthorized" in msg
-        or "invalid api key" in msg
-        or "authentication" in msg
-    ):
-        return FailureCategory.AUTH_FAILURE, False
-    if code == 404 or "not found" in msg or "does not exist" in msg or "unknown model" in msg:
-        return FailureCategory.NOT_FOUND, False
-    if code == 422 or "invalid_request_error" in msg or "bad request" in msg or code == 400:
-        return FailureCategory.INVALID_REQUEST, False
-    if code == 429 or "rate_limit" in msg or "rate limit" in msg or "quota" in msg:
-        return FailureCategory.RATE_LIMIT, True
-    if "timeout" in msg or "timed out" in msg:
-        return FailureCategory.TIMEOUT, True
-    if "connection" in msg or "network" in msg or "connecterror" in msg:
-        return FailureCategory.NETWORK_ERROR, True
+    response = getattr(exc_or_msg, "response", None)
+    if code is None and response is not None:
+        try:
+            code = int(response.status_code)
+        except (TypeError, ValueError):
+            code = None
+    if code in (401, 403) or "unauthorized" in msg or "invalid api key" in msg:
+        return FailureCategory.AUTHENTICATION, False
+    if code == 404 or "unknown model" in msg or "does not exist" in msg:
+        return FailureCategory.INVALID_MODEL, False
+    if code == 429 or "rate limit" in msg:
+        return FailureCategory.RATE_LIMITED, True
     if code is not None and code >= 500:
         return FailureCategory.SERVER_ERROR, True
     return FailureCategory.UNKNOWN, True
@@ -64,6 +104,8 @@ class RoutingRequest:
     min_context: int = 0
     requires_vision: bool = False
     requires_reasoning: bool = False
+    requires_streaming: bool = False
+    requires_structured_output: bool = False
     min_coding: int = 0
     prefer_latency: str = ""
     prefer_cost: str = ""
@@ -100,16 +142,43 @@ def rank_candidates(
     health: Any | None = None,
     configured_providers: list[str] | None = None,
 ) -> list[tuple[Any, str]]:
-    """Rank (capability, reason) pairs following the 7-stage deterministic pipeline."""
-    # 1. Capability filter
-    cands = catalog.filter(
-        tool_calling=True if request.requires_tool_calling else None,
-        min_context=request.min_context,
-        vision=True if request.requires_vision else None,
-        min_coding=request.min_coding,
-    )
+    """Rank (capability, reason) pairs following the 7-stage deterministic pipeline.
+
+    Never falls back to a model that cannot satisfy required capabilities:
+    tools / vision / structured output / streaming are hard filters.
+    """
+    # 1. Capability filter (never infer from OpenAI-compat alone).
+    filter_kwargs: dict[str, Any] = {
+        "min_context": request.min_context,
+        "min_coding": request.min_coding,
+    }
+    if request.requires_tool_calling:
+        filter_kwargs["tool_calling"] = True
+        filter_kwargs["supports_tools"] = True
+    if request.requires_vision:
+        filter_kwargs["vision"] = True
+        filter_kwargs["supports_vision"] = True
+    if request.requires_structured_output:
+        filter_kwargs["supports_structured_output"] = True
+    if request.requires_streaming:
+        filter_kwargs["supports_streaming"] = True
+    try:
+        cands = catalog.filter(**filter_kwargs)
+    except TypeError:
+        # Legacy catalogs without the extended flags.
+        cands = catalog.filter(
+            tool_calling=True if request.requires_tool_calling else None,
+            min_context=request.min_context,
+            vision=True if request.requires_vision else None,
+            min_coding=request.min_coding,
+        )
     if request.requires_reasoning:
-        cands = [c for c in cands if c.reasoning]
+        cands = [
+            c
+            for c in cands
+            if getattr(c, "reasoning", False)
+            or getattr(c, "supports_reasoning", False)
+        ]
 
     # 2. Configured and excluded providers
     if configured_providers is not None:

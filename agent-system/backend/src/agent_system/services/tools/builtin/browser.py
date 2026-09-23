@@ -51,14 +51,37 @@ _TRANSACT_RE = re.compile("|".join(_TRANSACT_PATTERNS), re.IGNORECASE)
 class BrowserSessions:
     """Process-local Playwright sessions, keyed by a caller-chosen name."""
 
+    SESSION_TTL_SECONDS = 1800.0
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[str, dict[str, Any]] = {}
 
+    def _evict_expired(self) -> None:
+        import time as _time
+
+        now = _time.monotonic()
+        expired = [
+            n
+            for n, s in self._sessions.items()
+            if now - float(s.get("created_at", now)) > self.SESSION_TTL_SECONDS
+        ]
+        for n in expired:
+            sess = self._sessions.pop(n, None)
+            if sess is not None:
+                try:
+                    _safe_close(sess)
+                except Exception:
+                    pass
+
     def ensure(self, ctx: ToolContext, name: str) -> dict[str, Any]:
+        import time as _time
+
         with self._lock:
+            self._evict_expired()
             session = self._sessions.get(name)
             if session is not None:
+                session["last_used"] = _time.monotonic()
                 return session
             if len(self._sessions) >= MAX_SESSIONS:
                 raise ToolError(
@@ -69,14 +92,32 @@ class BrowserSessions:
             headless = bool(getattr(ctx.settings, "browser_headless", True))
             browser = playwright.chromium.launch(headless=headless)
             page = browser.new_page()
-            session = {"playwright": playwright, "browser": browser, "page": page}
+            now = _time.monotonic()
+            session = {
+                "playwright": playwright,
+                "browser": browser,
+                "page": page,
+                "created_at": now,
+                "last_used": now,
+            }
             self._sessions[name] = session
             return session
 
     def get(self, name: str) -> dict[str, Any]:
+        import time as _time
+
         session = self._sessions.get(name)
         if session is None:
             raise ToolError(f"no open browser session '{name}' (call browser_open first)")
+        try:
+            if _time.monotonic() - float(session.get("created_at", _time.monotonic())) > self.SESSION_TTL_SECONDS:
+                self.close(name)
+                raise ToolError(f"browser session '{name}' expired; reopen it")
+            session["last_used"] = _time.monotonic()
+        except ToolError:
+            raise
+        except Exception:
+            pass
         return session
 
     def close(self, name: str) -> bool:
