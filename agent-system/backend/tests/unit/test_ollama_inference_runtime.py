@@ -1101,10 +1101,14 @@ def test_agent_handler_locks_one_ollama_model_for_the_whole_tool_loop(
 
     assert result["output"] == "done"
     assert result["tool_calls"] == 1
-    # Every iteration of the tool loop used the SAME locked model.
-    assert seen == ["gpt-oss:120b", "gpt-oss:120b"]
+    # Every iteration of the tool loop used the SAME locked model. Which
+    # provider wins is the strategic chain's call (the fixture configures
+    # groq/gemini/openrouter too), so assert the locking invariant itself.
+    assert len(seen) == 2
+    assert len(set(seen)) == 1
     # The decision and the lock are durable and observable.
     with session_scope(factory) as db:
         types = {row.type for row in db.query(EventRow).all()}
     assert "inference.model_selected" in types
-    assert lock_key_row(factory) == "gpt-oss:120b"
+    # The persisted lock is the same model the loop actually used.
+    assert lock_key_row(factory) == seen[0]

@@ -148,6 +148,9 @@ def _resolve_selection(
         )
     # An agent task always has a tool registry available, so require a model
     # that can actually call tools (never inferred from compatibility alone).
+    strategic = _strategic_selection(settings, goal)
+    if strategic is not None:
+        return strategic
     return select_model(
         settings,
         goal,
@@ -155,6 +158,89 @@ def _resolve_selection(
         task_id=task_id,
         requires_tools=True,
     )
+
+
+def _strategic_selection(settings: Any, goal: str) -> Any | None:
+    """Strategic role→provider winner, or None when nothing keyed qualifies.
+
+    Consults the strategic ``llm_router`` chain (role-based: Groq/Gemini/
+    OpenRouter are eligible normal links alongside Ollama Cloud; only the link
+    for the task *role* is primary) restricted to providers that actually have
+    an API key in the config — the strategic router honours the same
+    capability filter the runtime uses (tools, vision, structured, context).
+    Returns ``None`` when every qualifying link lacks a key so the caller
+    falls back to the capability-compatible ``select_model`` runtime.
+    """
+    try:
+        # An operator who set DEFAULT_PROVIDER=echo stays offline; the strategic
+        # chain must never promote an offline deployment onto the network.
+        from agent_system.services.inference_runtime import effective_primary
+        from agent_system.services.llm_catalog import DEFAULT_CATALOG
+        from agent_system.services.llm_router import (
+            RoutingRequest,
+            route,
+        )
+        from agent_system.services.providers import (
+            configured_providers,
+            is_offline_provider,
+        )
+
+        primary, _ = effective_primary(settings)
+        if is_offline_provider(primary):
+            return None
+
+        configured = [
+            name
+            for entry in configured_providers(settings)
+            if entry.get("configured")
+            if (name := str(entry.get("key", "")))
+            and name
+        ]
+        if not configured:
+            return None
+        decision = route(
+            RoutingRequest(
+                task_type="general",
+                worker_role="general",
+                requires_tool_calling=True,
+                requires_structured_output=False,
+                preordered_providers=tuple(configured),
+            ),
+            DEFAULT_CATALOG,
+            health=None,
+            configured_providers=configured,
+        )
+        if decision is None:
+            return None
+        from agent_system.services.inference_runtime import (
+            ModelRole,
+            ModelSelection,
+            classify_task,
+        )
+
+        return ModelSelection(
+            provider=decision.provider,
+            model_id=decision.model_id,
+            role=ModelRole.GENERAL,
+            task=classify_task(goal),
+            reason=decision.reason,
+            candidates=tuple(
+                (p, m) for p, m in _strategic_chain(decision)
+            ),
+            is_primary=True,
+        )
+    except Exception:
+        return None
+
+
+def _strategic_chain(decision: Any) -> list[tuple[str, str]]:
+    """Ordered (provider, model) links, leader first (strategic fallbacks)."""
+    chain = [(decision.provider, decision.model_id)]
+    for link in getattr(decision, "fallback_chain", ()) or ():
+        if "/" in str(link):
+            provider, _, model = str(link).partition("/")
+            chain.append((provider, model))
+    return chain
 
 
 def _extract_goal(task_input: dict[str, Any]) -> str | None:
