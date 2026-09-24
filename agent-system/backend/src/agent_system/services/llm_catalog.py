@@ -350,23 +350,98 @@ def default_catalog() -> CapabilityCatalog:
             cost_class="free",
             max_output_tokens=8192,
         ),
+        # Ollama Cloud role models (the ids in providers.PROVIDERS["ollama_cloud"]).
+        # The free-plan set below was verified against the live API
+        # (2026-09-24): models outside the account's plan answer HTTP 402
+        # "not included in your free usage", so they are deliberately NOT
+        # registered — every declared id is usable on the free plan and
+        # verified tool-capable over /v1/chat/completions.
+        # Each flag is explicit per model — the runtime never infers tool
+        # support from OpenAI-compatibility, and a real TOOL_UNSUPPORTED
+        # response re-selects a compatible model instead of forcing the call.
         ModelCapability(
             provider="ollama_cloud",
-            model_id="llama3.3",
+            model_id="gpt-oss:20b",
             context_limit=131072,
             tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            structured_output=True,
+            supports_structured_output=True,
             coding=2,
-            latency_class="standard",
+            latency_class="fast",
             cost_class="free",
+            max_output_tokens=16384,
         ),
         ModelCapability(
             provider="ollama_cloud",
-            model_id="qwen2.5-coder",
+            model_id="gpt-oss:120b",
             context_limit=131072,
             tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            structured_output=True,
+            supports_structured_output=True,
+            reasoning=True,
+            supports_reasoning=True,
             coding=3,
             latency_class="standard",
             cost_class="free",
+            max_output_tokens=16384,
+        ),
+        ModelCapability(
+            provider="ollama_cloud",
+            model_id="gemma4:31b",
+            context_limit=262144,
+            tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            structured_output=True,
+            supports_structured_output=True,
+            coding=2,
+            latency_class="standard",
+            cost_class="free",
+            max_output_tokens=16384,
+        ),
+        ModelCapability(
+            provider="ollama_cloud",
+            model_id="nemotron-3-nano:30b",
+            context_limit=131072,
+            tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            coding=1,
+            latency_class="fast",
+            cost_class="free",
+            max_output_tokens=16384,
+        ),
+        ModelCapability(
+            provider="ollama_cloud",
+            model_id="nemotron-3-super",
+            context_limit=131072,
+            tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            coding=2,
+            latency_class="standard",
+            cost_class="free",
+            max_output_tokens=16384,
+        ),
+        ModelCapability(
+            provider="ollama_cloud",
+            model_id="nemotron-3-ultra",
+            context_limit=131072,
+            tool_calling=True,
+            supports_tools=True,
+            supports_streaming=True,
+            structured_output=True,
+            supports_structured_output=True,
+            reasoning=True,
+            supports_reasoning=True,
+            coding=3,
+            latency_class="slow",
+            cost_class="free",
+            max_output_tokens=16384,
         ),
         ModelCapability(
             provider="ollama",
@@ -428,9 +503,11 @@ def capability_for(
     if found is not None:
         return found
     # Heuristic: OpenCode Zen models served over /responses support tools.
-    surface = "responses" if provider == "opencode" and (
-        model_id.startswith(("gpt-", "grok-", "muse-spark-"))
-    ) else "chat"
+    surface = (
+        "responses"
+        if provider == "opencode" and (model_id.startswith(("gpt-", "grok-", "muse-spark-")))
+        else "chat"
+    )
     return ModelCapability(
         provider=provider,
         model_id=model_id,

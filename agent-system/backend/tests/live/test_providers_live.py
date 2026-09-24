@@ -29,9 +29,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _live_enabled(provider_env: str) -> bool:
-    return (
-        os.environ.get(provider_env, "").strip().lower() == "true"
-        and bool(Settings(_env_file=None).provider_api_key(_PROVIDER_KEY[provider_env]))
+    return os.environ.get(provider_env, "").strip().lower() == "true" and bool(
+        Settings(_env_file=None).provider_api_key(_PROVIDER_KEY[provider_env])
     )
 
 

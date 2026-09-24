@@ -24,7 +24,6 @@ recorded errors — never fatal.
 from __future__ import annotations
 
 import json as _json
-import os
 import subprocess
 import threading
 from dataclasses import dataclass, field

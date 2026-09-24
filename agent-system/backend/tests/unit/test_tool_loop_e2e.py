@@ -18,13 +18,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import pytest
-
 from agent_system.services.agent_loop import run_tool_loop
-from agent_system.services.tools.execution import execute_tool
-from agent_system.services.tools.protocol import ToolCall
-from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry, _str_param
-
+from agent_system.services.tools.registry import Tool, ToolRegistry, _str_param
 
 # ---------------------------------------------------------------------------
 # Fake tool: get_test_value()
@@ -209,7 +204,7 @@ class TestMultipleToolCalls:
         assert result.tool_calls == 2
         # Both results present in the follow-up transcript (the registry's
         # prompt block mentions <tool_result> once in prose — exclude it).
-        assert router.transcripts[1].count('<tool_result name=') == 2
+        assert router.transcripts[1].count("<tool_result name=") == 2
 
 
 # ---------------------------------------------------------------------------

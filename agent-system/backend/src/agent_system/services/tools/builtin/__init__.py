@@ -32,6 +32,7 @@ from . import (
     memory,
     research,
     shell,
+    ssh,
     system,
     tasks,
 )
@@ -42,6 +43,7 @@ GROUPS = (
     coding,
     git,
     shell,
+    ssh,
     browser,
     research,
     documents,

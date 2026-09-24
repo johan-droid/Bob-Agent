@@ -544,11 +544,7 @@ class TestSSEStreamingAssembly:
             }
         )
         evt2 = json.dumps(
-            {
-                "candidates": [
-                    {"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}
-                ]
-            }
+            {"candidates": [{"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}]}
         )
         self._mock_client_stream(monkeypatch, [f"data: {evt1}", f"data: {evt2}"])
 

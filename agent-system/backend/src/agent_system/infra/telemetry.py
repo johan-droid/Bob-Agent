@@ -44,7 +44,6 @@ class Metrics:
     counter/histogram; otherwise only the in-memory aggregates update.
     """
 
-    _task_durations: dict[str, list[float]] = field(default_factory=dict)
     _model_latencies: dict[str, list[float]] = field(default_factory=dict)
     _tool_calls: dict[str, int] = field(default_factory=dict)
     _approval_latencies: dict[str, list[float]] = field(default_factory=dict)
@@ -65,10 +64,6 @@ class Metrics:
             pass
 
     # -- record ------------------------------------------------------
-
-    def record_task_duration(self, state: str, seconds: float) -> None:
-        self._task_durations.setdefault(state, []).append(float(seconds))
-        self._forward("task_duration", float(seconds), {"state": state})
 
     def record_model_latency(self, provider: str, latency_ms: int, ok: bool) -> None:
         key = f"{provider}|{'ok' if ok else 'failed'}"
@@ -116,9 +111,6 @@ class Metrics:
             }
 
         return {
-            "task_duration_seconds": {
-                state: _stats(vals) for state, vals in self._task_durations.items()
-            },
             "model_latency_ms": {key: _stats(vals) for key, vals in self._model_latencies.items()},
             "tool_calls": dict(self._tool_calls),
             "approval_latency_seconds": {

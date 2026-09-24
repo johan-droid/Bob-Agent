@@ -131,6 +131,19 @@ SWARM_EVENTS = (
     "swarm.worker_completed",
     "swarm.verified",
 )
+INFERENCE_EVENTS = (
+    # Ollama Cloud-first inference runtime (services/inference_runtime.py).
+    # These describe the *decision layer* (which model, which retry, when the
+    # emergency layer engaged) — distinct from the model call itself, which
+    # keeps emitting model.requested/completed/failed/token.
+    "inference.model_selected",
+    "inference.model_ok",
+    "inference.model_switched",
+    "inference.retry",
+    "inference.fallback_activated",
+    "inference.fallback_notice",
+    "inference.exhausted",
+)
 
 EVENT_TYPES: tuple[str, ...] = (
     SESSION_EVENTS
@@ -149,6 +162,7 @@ EVENT_TYPES: tuple[str, ...] = (
     + CONTEXT_EVENTS
     + ROUTER_EVENTS
     + SWARM_EVENTS
+    + INFERENCE_EVENTS
 )
 
 # ---------------------------------------------------------------------------

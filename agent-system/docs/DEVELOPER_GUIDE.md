@@ -157,7 +157,7 @@ Versions are lower bounds from `backend/pyproject.toml` / `web/package.json`
 | Scheduler | APScheduler | cron/interval/date/webhook jobs |
 | DB (authoritative) | SQLite (SQLAlchemy 2 + Alembic) | zero-ops local default; migratable via `DATABASE_URL` |
 | Settings / validation | Pydantic v2 + pydantic-settings | typed `Settings` — the `settings` CLI catalog is derived from it |
-| IDs / events | python-ulid, structlog | sortable IDs, structured logs |
+| IDs / events | python-ulid | sortable IDs |
 | HTTP client | httpx | provider adapters + CLI/API transport |
 | YAML | PyYAML | `SKILL.md` frontmatter, local config overrides |
 
@@ -165,7 +165,7 @@ Versions are lower bounds from `backend/pyproject.toml` / `web/package.json`
 
 - *Orchestration:* `rq`, `redis`, `apscheduler`
 - *Agent runtime:* `httpx`, stdlib JSON-RPC/SSE parsing (no MCP SDK)
-- *Documents agent:* `python-pptx`, `python-docx` (transitive via `docxtpl`), `openpyxl`, `fpdf2`, `beautifulsoup4`
+- *Documents agent:* `python-pptx`, `python-docx`, `openpyxl`, `fpdf2`, `beautifulsoup4`
 - *Sandboxing:* `docker` SDK
 - *Quality:* `pytest`, `pytest-asyncio`, `coverage`, `ruff`, `mypy --strict`, `types-*`
 

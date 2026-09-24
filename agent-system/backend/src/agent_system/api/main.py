@@ -6,6 +6,7 @@ factory, event bus) that routers depend on. Phase 3+
 
 from __future__ import annotations
 
+import os as _os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -83,6 +84,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _logging2.getLogger(__name__).warning("cloud boot note: %s", note)
     except Exception:
         pass
+    # Ollama Cloud-first inference diagnostics (one log line, no secrets).
+    # An unavailable optional model role is reported, never fatal: Bob starts
+    # and degrades to the roles that resolved (services/inference_runtime.py).
+    try:
+        import logging as _logging3
+
+        from agent_system.services.inference_runtime import (
+            effective_primary,
+            validate_configuration,
+        )
+
+        primary, primary_reason = effective_primary(settings)
+        diagnostics = validate_configuration(settings)
+        _logging3.getLogger(__name__).info(
+            "inference boot primary=%s reason=%s ollama_cloud=%s roles=%s "
+            "disabled=%s unknown_models=%s fallback=%s providers=%s",
+            primary,
+            primary_reason,
+            diagnostics.get("ollama_cloud_configured"),
+            diagnostics.get("roles"),
+            diagnostics.get("roles_disabled"),
+            diagnostics.get("unknown_configured_models"),
+            diagnostics.get("emergency_fallback_enabled"),
+            diagnostics.get("fallback_providers"),
+        )
+        for model in diagnostics.get("unknown_configured_models", []):
+            _logging3.getLogger(__name__).warning(
+                "inference boot: configured model '%s' is unknown to the capability "
+                "catalog; its role is disabled rather than substituted",
+                model,
+            )
+    except Exception:
+        pass
     # Skills (Hermes-style pluggable capabilities): always available, even
     # with zero skills on disk — discovery degrades to an empty list.
     # Shipped seeds count as "builtin" only when the default dir is in use.
@@ -157,19 +191,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Order matters: recover_orphans requeues tasks whose lease expired, then
     # sweep_backlog kicks everything QUEUED.
     app.state.runner_scheduler = None
+    app.state.service_runner = None
     try:
         from agent_system.services.orchestrator import Orchestrator
+        from agent_system.services.runner import ServiceSpec, get_runner
         from agent_system.services.task_runner import reset_runner, sweep_backlog
 
         reset_runner()
         if settings.task_runner_recovery_enabled:
-            from apscheduler.schedulers.background import BackgroundScheduler
-
             recovery_factory = _session_factory
             recovery_bus = app.state.event_bus
             recovery_orchestrator = Orchestrator(recovery_bus, settings=settings)
 
-            def recover_tasks() -> None:
+            def recover_tasks_tick(stop: Any) -> None:
                 recovery_orchestrator.recover_orphans(recovery_factory)
                 sweep_backlog(recovery_factory, recovery_bus, settings=settings)
                 # Telegram gateway pipeline recovery: replay relay-able events
@@ -188,12 +222,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
                     _logging.getLogger(__name__).warning("Telegram recovery sweep error: %s", exc)
 
-            recover_tasks()
-            app.state.runner_scheduler = BackgroundScheduler()
-            app.state.runner_scheduler.add_job(
-                recover_tasks, "interval", seconds=10, max_instances=1, coalesce=True
-            )
-            app.state.runner_scheduler.start()
+            runner = get_runner()
+            try:
+                runner.register(
+                    ServiceSpec(
+                        name="task-recovery",
+                        tick=recover_tasks_tick,
+                        interval_seconds=10.0,
+                        max_in_flight=1,
+                    )
+                )
+            except ValueError:
+                pass  # lifespan re-entry in tests: already registered
+            runner.start_all()
+            app.state.service_runner = runner
+            app.state.runner_scheduler = runner
     except Exception:
         raise  # never serve requests with an unsafe runner lifecycle
     yield
@@ -207,15 +250,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         pass
     if app.state.runner_scheduler is not None:
-        app.state.runner_scheduler.shutdown(wait=True)
+        try:
+            app.state.runner_scheduler.stop_all(timeout=10.0)
+        except AttributeError:
+            try:
+                app.state.runner_scheduler.shutdown(wait=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
     from agent_system.services.task_runner import shutdown_runner
 
     shutdown_runner()  # do not dispose the DB beneath surviving runner threads
     if _engine is not None:
         _engine.dispose()
 
-
-import os as _os
 
 _prod = (_os.environ.get("AGENT_ENV", "") or "").lower() == "production"
 app = FastAPI(
@@ -280,7 +329,8 @@ def ready_dep(dep: Annotated[Authenticator, Depends(get_authenticator)]) -> dict
 @app.get("/api/v1/doctor", include_in_schema=False)
 def cloud_doctor(dep: Annotated[Authenticator, Depends(get_authenticator)]) -> dict[str, Any]:
     """Cloud equivalent of `agentctl doctor` — no CLI needed, no secrets leaked."""
-    from agent_system.services.settings_store import check_settings, cloud_doctor as _doctor
+    from agent_system.services.settings_store import check_settings
+    from agent_system.services.settings_store import cloud_doctor as _doctor
 
     settings = get_settings()
     body = _doctor(settings)

@@ -238,9 +238,11 @@ def test_message_creates_exactly_one_task_and_delivers_result(tmp_path: Any) -> 
         with factory() as db:
             assert db.get(TelegramUpdate, 11).processed_at is not None
 
-        # Delivery at the Telegram API.
+        # Delivery at the Telegram API. The task ack is already delivered
+        # inline (immediate acknowledgement P0#1), so drain() claims only the
+        # remaining rows — the invariant is that NOTHING is left behind.
         outbox = Outbox(factory, settings)
-        assert outbox.drain() == len(snapshot)
+        outbox.drain()
         assert all(r["state"] == "DELIVERED" for r in _outbox_snapshot(factory))
     finally:
         executor.stop()

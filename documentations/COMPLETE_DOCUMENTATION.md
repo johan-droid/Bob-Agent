@@ -642,11 +642,11 @@ config/model_selection_rules.json
   },
   "research": {
     "primary": "claude-sonnet-5",
-    "budget_tier": "freellmapi"
+    "budget_tier": "groq"
   },
   "summary": {
     "primary": "claude-haiku-4-5",
-    "budget_tier": "freellmapi"
+    "budget_tier": "groq"
   }
 }
 ```

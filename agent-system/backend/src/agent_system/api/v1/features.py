@@ -131,7 +131,7 @@ def create_batch(
         result = batcher.create_batch(factory, body.session_id, body.task_ids, body.batch_type)
     except BatchError as exc:
         status = 409 if "compatib" in str(exc).lower() else 404
-        raise HTTPException(status_code=status, detail="batch error") from exc
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
     # Stamp owner on the batch row for list/get/cancel isolation.
     try:
         from agent_system.infra.models import TaskBatch
@@ -257,10 +257,7 @@ def list_recipes(
         from agent_system.infra.models import Recipe as _R
 
         with session_scope(factory) as db:
-            allowed = {
-                r.id
-                for r in apply_owner_filter(db.query(_R), _R, principal).all()
-            }
+            allowed = {r.id for r in apply_owner_filter(db.query(_R), _R, principal).all()}
         return [r for r in rows if str(r.get("recipe_id") or r.get("id")) in allowed]
     except Exception:
         return rows

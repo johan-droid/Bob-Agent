@@ -25,7 +25,7 @@ Use when users ask to plan a project, architect a system, organize multi-step wo
 4. Format roadmap clearly with actionable next steps.
 
 ## Required Tools
-- `memory_note` / `tasks`
+- `memory_remember` / `memory_recall` / `tasks_inspect`
 
 ## Constraints
 - Keep plans realistic, concrete, and modular.

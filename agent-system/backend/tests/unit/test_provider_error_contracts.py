@@ -26,16 +26,13 @@ from agent_system.config import Settings
 from agent_system.services.llm_router import FailureCategory, classify_error
 from agent_system.services.model_router import ProviderCircuitBreaker
 from agent_system.services.provider_health import (
-    GLOBAL_HEALTH_TRACKER,
     ProviderHealth,
     ProviderHealthTracker,
 )
 from agent_system.services.providers import (
     PROVIDERS,
     OpenAICompatibleAdapter,
-    _sanitize_base_url,
     _sanitize_payload,
-    build_adapter,
     diagnose_provider,
     surface_for_model,
 )
@@ -283,7 +280,7 @@ class TestAdapterFailurePaths:
         """The failure path parses Retry-After from the exception's response."""
         exc = _status_error(429, {"error": "rate limited"})
         exc.response.headers = {"retry-after": "17"}
-        breaker = ProviderCircuitBreaker("groq")
+
         # Simulate the _run_guarded failure-path logic via a raising call.
         def _call() -> tuple[str, dict[str, Any], None]:
             raise exc
@@ -339,9 +336,7 @@ class TestAdapterFailurePaths:
         )
         adapter = OpenAICompatibleAdapter(PROVIDERS["groq"], api_key="k")
         result = adapter.invoke("openai/gpt-oss-20b", "hi")
-        assert result["tool_calls"] == [
-            {"id": "call_1", "name": "shell", "arguments": "{not json"}
-        ]
+        assert result["tool_calls"] == [{"id": "call_1", "name": "shell", "arguments": "{not json"}]
         # Protocol layer marks it malformed instead of executing arbitrary text.
         from agent_system.services.tools.protocol import parse_tool_calls
 
@@ -361,7 +356,7 @@ class TestAdapterFailurePaths:
                                 {
                                     "id": "call_a",
                                     "type": "function",
-                                    "function": {"name": "t1", "arguments": "{\"x\":1}"},
+                                    "function": {"name": "t1", "arguments": '{"x":1}'},
                                 },
                                 {
                                     "id": "call_b",
@@ -495,7 +490,7 @@ class TestGeminiMessageHandling:
             "hi",
             messages=[
                 {"role": "user", "content": "run it"},
-                {"role": "tool", "name": "get_test_value", "content": "{\"value\": 42}"},
+                {"role": "tool", "name": "get_test_value", "content": '{"value": 42}'},
             ],
         )
         parts = client.post.call_args.kwargs["json"]["contents"][1]["parts"]

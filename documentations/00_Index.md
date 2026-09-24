@@ -55,6 +55,7 @@ updated: 2026-09-16
 | [[29_Testing_Strategy]] | Test pyramid, chaos testing, E2E acceptance lifecycle |
 | [[30_Implementation_Docs]] | Required `docs/implementation/` files & validation checklist |
 | [[31_System_Handbook]] | ⭐ Current system as implemented: runtime, API, security, ops (code-grounded) |
+| [[32_Ollama_Cloud_Inference_Runtime]] | Ollama Cloud-first inference: model roles, session lock, bounded retry, emergency fallback |
 
 ## 🎯 Core Capabilities (at a glance)
 

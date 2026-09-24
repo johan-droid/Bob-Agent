@@ -1,4 +1,12 @@
-"""Capability-aware LLM router (Agentic Runtime v1, additive)."""
+"""Capability-aware LLM routing primitives (Agentic Runtime v1, additive).
+
+Scope note: this module ranks *candidate* provider/model pairs for a request
+and is used for capability introspection (the model-routing API). The
+production inference decision — which single model a session locks onto,
+when to retry it and when the emergency layer engages — is owned by
+``services/inference_runtime.py`` (Ollama Cloud-first). Do not add a second
+selection policy here.
+"""
 
 from __future__ import annotations
 
@@ -176,8 +184,7 @@ def rank_candidates(
         cands = [
             c
             for c in cands
-            if getattr(c, "reasoning", False)
-            or getattr(c, "supports_reasoning", False)
+            if getattr(c, "reasoning", False) or getattr(c, "supports_reasoning", False)
         ]
 
     # 2. Configured and excluded providers

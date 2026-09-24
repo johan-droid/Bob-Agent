@@ -121,17 +121,6 @@ def _render_result_block(name: str, result: dict[str, Any]) -> str:
     return f'\n\n<tool_result name="{name}">\n{sanitize_tool_result(raw)}\n</tool_result>'
 
 
-def _result_block_name(block: str) -> str:
-    """Extract the tool name from a rendered <tool_result> block."""
-    marker = '<tool_result name="'
-    start = block.find(marker)
-    if start < 0:
-        return "unknown"
-    start += len(marker)
-    end = block.find('"', start)
-    return block[start:end] if end > start else "unknown"
-
-
 def _resolve_budget(
     ctx: Any,
     max_context_tokens: int | None,

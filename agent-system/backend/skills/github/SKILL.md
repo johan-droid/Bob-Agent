@@ -24,7 +24,7 @@ Use when users ask to check GitHub issues, create PRs, review code changes, or i
 4. Verify action completed via API output.
 
 ## Required Tools
-- `openconnector_execute` / `git`
+- `openconnector_list` / `openconnector_execute` / `git_status` / `git_diff` / `git_log` / `git_show`
 
 ## Constraints
 - Verify GitHub integration is connected before attempting actions.

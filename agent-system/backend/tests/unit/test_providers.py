@@ -189,9 +189,7 @@ class TestGemini:
 class TestStreamOptions:
     """`stream_options.include_usage` is opt-in: Groq/OpenRouter gateways 400 on it."""
 
-    def _patch_stream(
-        self, monkeypatch, sse_lines: list[str]
-    ) -> dict[str, Any]:
+    def _patch_stream(self, monkeypatch, sse_lines: list[str]) -> dict[str, Any]:
         """Patch httpx.Client.stream; capture the outgoing JSON payload."""
         captured: dict[str, Any] = {}
         resp = MagicMock()
@@ -337,11 +335,7 @@ class TestGeminiStream:
             }
         )
         evt2 = _json.dumps(
-            {
-                "candidates": [
-                    {"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}
-                ]
-            }
+            {"candidates": [{"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}]}
         )
         captured = self._patch_stream(monkeypatch, [f"data: {evt1}", f"data: {evt2}"])
 
@@ -418,7 +412,8 @@ class TestPricing:
     def test_free_tier_models_register_zero_cost(self) -> None:
         pricing = build_pricing()
         ids = [m.model_id for m in pricing.all()]
-        assert "auto" in ids  # tokenrouter
+        assert "openai/gpt-oss-20b" in ids  # groq free tier
+        assert "auto" not in ids  # tokenrouter "auto" is billable, not free
         for m in pricing.all():
             if m.input_cost_per_1m < 0:
                 raise AssertionError(f"negative cost for {m.model_id}")

@@ -31,6 +31,7 @@ MAX_REPLAY = 200
 _WS_ATTEMPTS: dict[str, list[float]] = {}
 _WS_LOCK: Any = None
 
+
 def _ws_lock() -> Any:
     global _WS_LOCK
     if _WS_LOCK is None:
@@ -65,7 +66,7 @@ def _owned_session_ids(factory: Any, principal: Any) -> set[str] | None:
     if getattr(principal, "mode", None) is None:
         return None
     try:
-        if getattr(principal, "mode") is IdentityMode.LOCAL:
+        if principal.mode is IdentityMode.LOCAL:
             return None
     except Exception:
         return None
@@ -99,6 +100,7 @@ def _event_visible(event: Any, owned: set[str] | None, factory: Any = None) -> b
             return False
     return False
 
+
 realtime_router = APIRouter(prefix="/api/v1")
 
 
@@ -119,7 +121,10 @@ def _event_dict(event: Any) -> dict[str, Any]:
 
 
 async def _drain(
-    factory: Any, bus: EventBus, after_sequence: int, queue: asyncio.Queue[Any],
+    factory: Any,
+    bus: EventBus,
+    after_sequence: int,
+    queue: asyncio.Queue[Any],
     owned: set[str] | None = None,
 ) -> int:
     """Replay persisted events after `after_sequence`; returns last seq sent."""
@@ -172,7 +177,7 @@ async def ws_events(
     """
     client_ip = ""
     try:
-        client_ip = str((websocket.client.host if websocket.client else "ws"))
+        client_ip = str(websocket.client.host if websocket.client else "ws")
     except Exception:
         client_ip = "ws"
     if not _check_ws_rate_limit(f"ws:{client_ip}"):
@@ -291,7 +296,8 @@ async def sse_events(
                 from agent_system.services.identity import IdentityMode
 
                 settings = getattr(request.app.state, "settings", None) or get_settings()
-                if str(getattr(settings, "agent_identity_mode", "local")) == IdentityMode.TELEGRAM.value:
+                mode = getattr(settings, "agent_identity_mode", "local")
+                if str(mode) == IdentityMode.TELEGRAM.value:
                     owned = set()
             except Exception:
                 owned = None

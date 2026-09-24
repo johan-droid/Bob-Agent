@@ -218,4 +218,5 @@ def test_chat_history_in_task_context() -> None:
 
     task_prompt = _with_memory(Settings(), "Fix the README", factory=factory, session_id=session_id)
     assert "Project Alpha" in task_prompt
-    assert "Recent Conversation History:" in task_prompt
+    # History is injected inside a clearly-labeled untrusted-data block.
+    assert "Untrusted conversation history" in task_prompt

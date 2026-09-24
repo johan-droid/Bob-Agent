@@ -29,11 +29,14 @@ from agent_system.infra.models import DeliveryOutbox
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_EDIT_API = "https://api.telegram.org/bot{token}/editMessageText"
+TELEGRAM_ACTION_API = "https://api.telegram.org/bot{token}/sendChatAction"
 
 KIND_COMMAND_RESPONSE = "command_response"
-KIND_ACTIVITY = "activity"
 KIND_APPROVAL = "approval"
 KIND_NOTIFICATION = "notification"
+KIND_PROGRESS_EDIT = "progress_edit"
+KIND_TYPING = "typing"
 
 _UTC = UTC
 
@@ -59,6 +62,7 @@ class Outbox:
         event_id: str | None = None,
         task_id: str | None = None,
         reply_to_message_id: int | None = None,
+        edit_message_id: int | None = None,
     ) -> str | None:
         if chat_id is None:
             return None
@@ -74,6 +78,25 @@ class Outbox:
         from agent_system.infra.db import session_scope
 
         with session_scope(self._factory) as db:
+            # Durable idempotency for event-driven enqueues: the relay
+            # ``flush()`` path and the recovery ``replay()`` path can both see
+            # the same event (a long drive flushes after the 10s sweep already
+            # replayed it), which used to enqueue the SAME user-visible message
+            # twice. ``replay()`` deduped by ``event_id`` but ``flush()`` did
+            # not, so the guard belongs here — on the one write seam — making
+            # every enqueue idempotent per ``event_id``.
+            if event_id:
+                existing = (
+                    db.query(DeliveryOutbox.id).filter(DeliveryOutbox.event_id == event_id).first()
+                )
+                if existing is not None:
+                    logger.info(
+                        "outbox.duplicate.skipped event_id=%s chat_id=%s kind=%s",
+                        event_id,
+                        chat_id,
+                        kind,
+                    )
+                    return str(existing[0])
             row = DeliveryOutbox(
                 id=new_id("out"),
                 channel="telegram",
@@ -84,6 +107,7 @@ class Outbox:
                 event_id=event_id,
                 task_id=task_id,
                 reply_to_message_id=reply_to_message_id,
+                edit_message_id=edit_message_id,
                 state="PENDING",
                 attempts=0,
                 next_attempt_at=utcnow(),
@@ -165,26 +189,66 @@ class Outbox:
         own_client = client is None
         if own_client:
             client = httpx.Client(timeout=30.0)
+        # Progress edits and typing actions are best-effort: a missed stage
+        # update or a missed animation must NEVER block the pipeline or burn
+        # retries meant for real answers. Failed rows are marked delivered
+        # (skipped) immediately.
+        is_edit = row.kind == KIND_PROGRESS_EDIT and row.edit_message_id is not None
+        is_typing = row.kind == KIND_TYPING
         try:
-            payload: dict[str, Any] = {
-                "chat_id": int(row.chat_id),
-                "text": row.text,
-            }
-            if row.reply_markup_json:
-                payload["reply_markup"] = row.reply_markup_json
-            reply_to = row.reply_to_message_id
-            if reply_to is not None:
-                payload["reply_parameters"] = {
-                    "message_id": int(reply_to),
-                    "allow_sending_without_reply": True,
+            payload: dict[str, Any]
+            if is_typing:
+                payload = {
+                    "chat_id": int(row.chat_id),
+                    "action": (row.text or "typing").strip() or "typing",
                 }
+                endpoint = TELEGRAM_ACTION_API.format(token=token)
+            elif is_edit:
+                payload = {
+                    "chat_id": int(row.chat_id),
+                    "message_id": int(row.edit_message_id or 0),
+                    "text": row.text,
+                }
+                endpoint = TELEGRAM_EDIT_API.format(token=token)
+            else:
+                payload = {
+                    "chat_id": int(row.chat_id),
+                    "text": row.text,
+                }
+                if row.reply_markup_json:
+                    payload["reply_markup"] = row.reply_markup_json
+                reply_to = row.reply_to_message_id
+                if reply_to is not None:
+                    payload["reply_parameters"] = {
+                        "message_id": int(reply_to),
+                        "allow_sending_without_reply": True,
+                    }
+                endpoint = TELEGRAM_API.format(token=token)
             resp = client.post(  # type: ignore[union-attr]
-                TELEGRAM_API.format(token=token),
+                endpoint,
                 json=payload,
                 headers={"Content-Type": "application/json"},
             )
             resp.raise_for_status()
+            # Capture the Telegram message id created by a sendMessage so the
+            # stage that owns it can hand the editable id to later stages.
+            if not is_edit and not is_typing:
+                try:
+                    tg_id = (resp.json() or {}).get("result", {}).get("message_id")
+                    if tg_id is not None:
+                        self._capture_telegram_message_id(row, int(tg_id))
+                except Exception:  # pragma: no cover - capture is best-effort
+                    pass
         except Exception as exc:
+            if is_edit or is_typing:
+                logger.warning(
+                    "outbox.ephemeral.skipped outbox_id=%s chat_id=%s kind=%s error=%s",
+                    row.id,
+                    row.chat_id,
+                    row.kind,
+                    _scrub_error(exc),
+                )
+                return self._mark_delivered(row)
             detail = _scrub_error(exc)
             try:
                 import httpx as _httpx2
@@ -214,6 +278,33 @@ class Outbox:
             if own_client and client is not None:
                 client.close()
         return False
+
+    def _capture_telegram_message_id(self, row: DeliveryOutbox, tg_message_id: int) -> None:
+        """Persist the Telegram message id created by a delivered sendMessage."""
+        try:
+            from agent_system.infra.db import session_scope
+
+            with session_scope(self._factory) as db:
+                db.query(DeliveryOutbox).filter(DeliveryOutbox.id == row.id).update(
+                    {"telegram_message_id": tg_message_id},
+                    synchronize_session=False,
+                )
+                db.commit()
+        except Exception:  # pragma: no cover - capture is best-effort
+            logger.warning("outbox.capture.message_id.failed outbox_id=%s", row.id)
+
+    def telegram_message_id_for(self, outbox_id: str) -> int | None:
+        """Read back the captured Telegram message id for an outbox row."""
+        try:
+            from agent_system.infra.db import session_scope
+
+            with session_scope(self._factory) as db:
+                row = db.get(DeliveryOutbox, outbox_id)
+                if row is not None:
+                    return row.telegram_message_id
+        except Exception:
+            pass
+        return None
 
     def _mark_delivered(self, row: DeliveryOutbox) -> bool:
         from agent_system.infra.db import session_scope

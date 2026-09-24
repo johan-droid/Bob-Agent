@@ -32,8 +32,9 @@ USER_AGENT = "BobAgent/0.1 (+local research capability)"
 
 
 def _http_get(url: str, timeout: float = 20.0) -> str:
-    import httpx
     import ipaddress
+
+    import httpx
 
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -268,6 +269,32 @@ def register(registry: ToolRegistry, settings: Any = None) -> None:  # noqa: ARG
         Tool(
             name="research_search",
             description="Search the web and return titled results with their source hosts.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": _str_param("Search query"),
+                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            risk="read",
+            handler=_research_search,
+            group=GROUP,
+        )
+    )
+    # ``web_search`` is the stable logical name used by the skill packs and the
+    # research prompt block (skills name tools, not their internal group). It is
+    # research_search by another name — same handler, same risk, same read tier
+    # — so a model that emits ``web_search`` is never told the capability is
+    # missing. ``web_fetch`` below is the matching alias for ``research_fetch``.
+    registry.register(
+        Tool(
+            name="web_search",
+            description=(
+                "Search the web and return titled results with their source hosts "
+                "(alias of research_search)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

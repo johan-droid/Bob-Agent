@@ -558,7 +558,7 @@ class PermissionGate:
         decide_atomic = getattr(self._store, "decide_atomic", None)
         if callable(decide_atomic):
             decided_at = utcnow()
-            won = decide_atomic(
+            decide_atomic(
                 approval_id,
                 decision=new_decision.value,
                 policy=policy.value,

@@ -25,7 +25,7 @@ Use when investigating bug reports, failing tests, unexpected exceptions, or per
 5. Re-run tests to verify fix resolves the issue without regression.
 
 ## Required Tools
-- `file_read` / `file_write` / `run_tests` / `shell_execute`
+- `read_source` / `repo_search` / `edit_source` / `run_tests` / `git_diff` / `shell`
 
 ## Constraints
 - Do not make random environment or code changes without diagnostic evidence.

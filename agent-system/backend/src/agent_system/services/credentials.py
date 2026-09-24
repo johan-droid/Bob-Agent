@@ -33,7 +33,6 @@ from agent_system.config import get_settings
 from agent_system.domain.ids import new_id
 from agent_system.infra.db import session_scope
 from agent_system.infra.models import UserCredential
-from agent_system.services.secrets import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +141,24 @@ class CredentialStore:
 
         now_ts = _now()
         with session_scope(self._factory) as db:
+            # Owner-row guarantee: user_credentials.user_id is a FK to users.id.
+            # In local mode the principal has no DB row (OPERATOR carries
+            # user_id=None -> callers fall back to "local"), so ensure the
+            # owner row exists before the credential insert or SQLite raises
+            # FOREIGN KEY constraint failed and the poll loop logs a traceback.
+            from agent_system.infra.models import User
+
+            if db.get(User, user_id) is None:
+                db.add(
+                    User(
+                        id=user_id,
+                        display_name=user_id,
+                        auth_provider="local",
+                        role="owner",
+                        is_active=True,
+                    )
+                )
+                db.flush()
             row = (
                 db.query(UserCredential)
                 .filter(
@@ -352,26 +369,3 @@ class CredentialStore:
             extra={"user_id": user_id, "provider": provider, "name": name},
         )
         return meta
-
-    def update_status(
-        self, user_id: str, provider: str, name: str, status: str, error: str | None = None
-    ) -> bool:
-        """Update health status and error for a credential."""
-        with session_scope(self._factory) as db:
-            row = (
-                db.query(UserCredential)
-                .filter(
-                    UserCredential.user_id == user_id,
-                    UserCredential.provider == provider,
-                    UserCredential.name == name,
-                )
-                .one_or_none()
-            )
-            if row is None:
-                return False
-            row.status = status
-            row.last_error = redact_value(error) if error else None
-            row.updated_at = _now()
-            if status == "healthy":
-                row.last_validated_at = _now()
-        return True

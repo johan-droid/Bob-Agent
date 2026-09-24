@@ -25,7 +25,7 @@ Use when packaging apps, deploying code updates, checking server status, or mana
 5. Confirm operational status before reporting completion.
 
 ## Required Tools
-- `shell_execute` / `ssh_execute` / `openconnector_execute`
+- `shell` / `ssh_execute` / `openconnector_execute`
 
 ## Constraints
 - Never report deployment success without verifying live health endpoint or return status.

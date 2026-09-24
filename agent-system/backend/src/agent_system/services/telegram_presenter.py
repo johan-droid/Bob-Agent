@@ -34,19 +34,23 @@ _INTERNAL_ID_PATTERNS = [
 
 
 def build_task_ack(goal: str, req_type: str = "TOOL_TASK") -> str:
-    """Generate a context-aware initial task acknowledgement based on classification and goal."""
+    """Generate a context-aware initial task acknowledgement based on classification and goal.
+
+    NOTE: Bob sends Telegram messages with NO parse_mode (formatting-injection
+    safe), so keep these plain text + emoji only — never Markdown/HTML markup.
+    """
     lower = (goal or "").lower()
     if "deploy" in lower:
-        return "Checking deployment details and preparing the task..."
+        return "🚀 On it! Checking deployment details and preparing the task..."
     if "debug" in lower or "fix" in lower or "bug" in lower:
-        return "Investigating the issue and debugging..."
+        return "🐛 Got it! Investigating the issue and debugging..."
     if req_type == "RESEARCH_TASK" or "search" in lower or "research" in lower or "find" in lower:
-        return "Gathering information and researching..."
+        return "🔎 On it! Gathering information and researching..."
     if req_type == "CODING_TASK" or "code" in lower or "script" in lower or "refactor" in lower:
-        return "Working on the code implementation..."
+        return "💻 Got it! Working on the code..."
     if req_type == "LONG_RUNNING_TASK" or "batch" in lower or "crawl" in lower:
-        return "Initiating the process..."
-    return "Starting work on your request..."
+        return "⏳ On it! Kicking off the long job — I'll keep you posted..."
+    return "⚡️ Got it! Starting work on your request..."
 
 
 def format_model_footer(
@@ -122,19 +126,35 @@ def save_chat_message(factory: Any, chat_id: int | str, role: str, content: str)
 
 
 def map_tool_to_progress(tool_name: str) -> str:
-    """Map a tool name to a friendly concise progress status."""
+    """Map a tool name to a friendly concise progress status (emoji + plain text)."""
     name = (tool_name or "").lower()
     if any(s in name for w in ("search", "google", "web", "find", "browse") for s in (w,)):
-        return "🔎 Searching..."
+        return "🔎 Searching the web..."
+    if any(s in name for w in ("memory", "recall", "vault", "note") for s in (w,)):
+        return "🧠 Checking memory..."
     if any(s in name for w in ("git", "inspect", "read", "file", "code", "python") for s in (w,)):
-        return "💻 Inspecting..."
+        return "💻 Looking at the code..."
     if any(s in name for w in ("bash", "shell", "exec", "terminal", "run") for s in (w,)):
-        return "🛠️ Running a tool..."
-    return "🛠️ Working..."
+        return "⚙️ Running it now..."
+    if any(s in name for w in ("mail", "gmail", "email", "send") for s in (w,)):
+        return "📧 Handling email..."
+    return "🛠️ Working on it..."
 
 
 class TelegramProgressPresenter:
-    """Subscribes to EventBus for a session and manages single-message progress UX."""
+    """Subscribes to EventBus for a session and manages single-message progress UX.
+
+    Lifecycle contract (Telegram realtime UX):
+
+    1. ``start()`` fires a ``typing`` chat action IMMEDIATELY so the user sees
+       life within milliseconds.
+    2. The first real progress event creates ONE stable Telegram message and
+       records its outbox id; all later stages EDIT that same message
+       (``kind="progress_edit"`` + ``edit_message_id``) — no message spam.
+    3. After the first delivery is drained, the caller feeds the captured
+       Telegram ``message_id`` back via :meth:`bind_telegram_message_id` so
+       subsequent edits target the actual user-visible message.
+    """
 
     def __init__(
         self,
@@ -143,54 +163,91 @@ class TelegramProgressPresenter:
         chat_id: int,
         session_id: str,
         bus: EventBus,
+        bot_token: str | None = None,
     ) -> None:
         self._factory = factory
         self._outbox = outbox
         self._chat_id = chat_id
         self._session_id = session_id
         self._bus = bus
+        self._bot_token = bot_token
         self._active = False
+        self._progress_outbox_id: str | None = None
         self._edit_message_id: int | None = None
         self._last_update_ts: float = 0.0
         self._last_text: str = ""
+        #: Last emergency-fallback notice delivered (dedup; never repeated).
+        self._last_fallback_notice: str = ""
 
     def start(self) -> None:
         if self._active:
             return
         self._active = True
+        # P0: the typing animation must fire the moment work starts. When the
+        # bot token is available, send it directly (synchronous, ~50ms); when
+        # it is not, fall back to enqueuing a typing row so the outbox drain
+        # still produces the animation.
+        if self._bot_token:
+            from agent_system.services.telegram import send_chat_action_sync
+
+            send_chat_action_sync(self._bot_token, self._chat_id)
+        elif self._outbox is not None:
+            self._outbox.enqueue(kind="typing", chat_id=self._chat_id, text="typing")
         self._bus.subscribe("tool.started", self._on_event)
         self._bus.subscribe("tool.completed", self._on_event)
         self._bus.subscribe("model.started", self._on_event)
         self._bus.subscribe("model.token", self._on_event)
         self._bus.subscribe("task.failed", self._on_event)
-        # No initial message here: progress is reported from real
-        # model/tool events below, and empty texts are rejected by the
-        # outbox (Telegram 400s). The typing animation is sent via
-        # sendChatAction by the caller before the drive starts.
+        # Ollama Cloud-first runtime: the one model decision for this task,
+        # and a one-off notice when the emergency layer engages.
+        self._bus.subscribe("inference.model_selected", self._on_event)
+        self._bus.subscribe("inference.fallback_activated", self._on_event)
+        self._bus.subscribe("inference.fallback_notice", self._on_event)
 
     def stop(self) -> None:
         self._active = False
+
+    def bind_telegram_message_id(self, telegram_message_id: int | None) -> None:
+        """Bind the user-visible Telegram message id that edits must target.
+
+        Called by the executor after the first progress row is drained: the
+        outbox captured the ``message_id`` from the sendMessage response, and
+        this presenter needs it to route later stages as in-place edits.
+        """
+        if telegram_message_id is not None:
+            self._edit_message_id = int(telegram_message_id)
+
+    @property
+    def progress_outbox_id(self) -> str | None:
+        """Outbox row id of the stable progress message (None until created)."""
+        return self._progress_outbox_id
 
     def _on_event(self, event: Event) -> None:
         if not self._active:
             return
         if event.session_id and event.session_id != self._session_id:
             return
+        if event.type in ("inference.fallback_activated", "inference.fallback_notice"):
+            self._on_fallback(event)
+            return
 
         now = time.monotonic()
         text = ""
 
-        if event.type == "tool.started":
+        if event.type == "inference.model_selected":
+            label = str(event.payload.get("label") or "").strip()
+            text = f"{label} — getting started..." if label else "🧠 Thinking..."
+        elif event.type == "tool.started":
             tool_name = str(event.payload.get("tool") or "")
             text = map_tool_to_progress(tool_name)
         elif event.type == "model.started":
-            text = "🧠 Working..."
+            text = "🧠 Thinking..."
         elif event.type == "model.token":
-            text = "✍️ Preparing response..."
+            text = "✍️ Writing the reply..."
         elif event.type == "tool.completed":
-            text = "🧠 Processing results..."
+            text = "✅ Tool done — crunching the results..."
         elif event.type == "task.failed":
-            text = "Sorry, I ran into an issue while fulfilling your request. Please try again."
+            text = "😅 Sorry, I hit a snag — please try again."
 
         if not text or text == self._last_text:
             return
@@ -205,6 +262,8 @@ class TelegramProgressPresenter:
 
         if self._outbox is not None:
             if self._edit_message_id is not None:
+                # In-place edit of the stable progress message (best-effort:
+                # the outbox marks failed edits delivered instead of retrying).
                 self._outbox.enqueue(
                     kind="progress_edit",
                     chat_id=self._chat_id,
@@ -212,13 +271,33 @@ class TelegramProgressPresenter:
                     edit_message_id=self._edit_message_id,
                 )
             else:
-                outbox_id = self._outbox.enqueue(
+                # First stage: create the ONE stable progress message. Its
+                # captured Telegram message id is bound later via
+                # bind_telegram_message_id() after the first drain.
+                self._progress_outbox_id = self._outbox.enqueue(
                     kind="command_response",
                     chat_id=self._chat_id,
                     text=text,
                 )
-                if outbox_id:
-                    self._edit_message_id = None  # Updated when message delivered
+
+    def _on_fallback(self, event: Event) -> None:
+        """One-off, truthful notice that the emergency layer engaged.
+
+        Never repeated, never an internal id and never a raw provider error:
+        the text is the runtime's user-safe notice (``FALLBACK_NOTICE``).
+        """
+        from agent_system.services.inference_runtime import FALLBACK_NOTICE
+
+        notice = str(event.payload.get("notice") or FALLBACK_NOTICE).strip()
+        if not notice or notice == self._last_fallback_notice:
+            return
+        self._last_fallback_notice = notice
+        if self._outbox is not None:
+            self._outbox.enqueue(
+                kind="notification",
+                chat_id=self._chat_id,
+                text=notice,
+            )
 
 
 __all__ = [

@@ -25,7 +25,7 @@ Use when composing documentation, technical writeups, summaries, or structured t
 4. Proofread for clarity, tone, and technical correctness.
 
 ## Required Tools
-- `file_write` / `documents_write`
+- `file_write` / `document_create` / `document_persist`
 
 ## Constraints
 - Avoid fluff, hype, and robotic pleasantries.

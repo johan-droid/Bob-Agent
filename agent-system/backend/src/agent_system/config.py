@@ -235,6 +235,39 @@ class Settings(BaseSettings):
     llm_provider_order: str = ""
     swarm_enabled: bool = True
     swarm_max_workers: int = 4
+
+    # ------------------------------------------------------------------
+    # Ollama Cloud-first inference runtime (services/inference_runtime.py)
+    # ------------------------------------------------------------------
+    # Ollama Cloud is the PRIMARY inference platform. Groq / Gemini /
+    # OpenRouter stay available but are emergency fallbacks only: they are
+    # reached after the session's Ollama model has failed bounded retries,
+    # never as part of normal routing. Set primary_provider to an
+    # offline/echo provider to keep the deterministic path authoritative.
+    primary_provider: str = "ollama_cloud"
+    # Model roles -> Ollama Cloud model ids. Empty means "discover from the
+    # capability catalog" (services/llm_catalog.py) — model names are never
+    # invented here, and an unavailable role degrades instead of crashing.
+    ollama_general_model: str = ""
+    ollama_fast_model: str = ""
+    ollama_coding_model: str = ""
+    ollama_reasoning_model: str = ""
+    ollama_long_context_model: str = ""
+    ollama_tool_model: str = ""
+    # Stream Ollama Cloud responses by default where supported.
+    ollama_streaming: bool = True
+    # Bounded retry of the SAME model before any emergency fallback. Never
+    # busy-loops: each attempt waits an exponentially growing, capped delay
+    # and honours a provider-supplied Retry-After when present.
+    ollama_retry_attempts: int = 3
+    ollama_retry_base_delay: float = 1.0
+    ollama_retry_max_delay: float = 20.0
+    # Emergency fallback layer (task-scoped, never sticky).
+    emergency_fallback_enabled: bool = True
+    fallback_providers: str = "groq,gemini,openrouter"
+    # Persist a task checkpoint before an emergency fallback so the task can
+    # resume with its context intact (services/checkpoints.py).
+    task_checkpointing: bool = True
     # Extra headers sent with every provider call, as JSON:
     #   PROVIDER_EXTRA_HEADERS='{"X-API-Key":"...","User-Agent":"bob-agent/0.1"}'
     provider_extra_headers: str = "{}"
@@ -339,6 +372,29 @@ class Settings(BaseSettings):
             if part.isdigit():
                 ids.add(int(part))
         return ids
+
+    @property
+    def fallback_provider_list(self) -> list[str]:
+        """Emergency fallback providers, in configured order (deduped)."""
+        out: list[str] = []
+        for part in (self.fallback_providers or "").split(","):
+            key = part.strip().lower()
+            if key and key not in out:
+                out.append(key)
+        return out
+
+    @property
+    def ollama_model_roles(self) -> dict[str, str]:
+        """Configured Ollama Cloud role -> model id (empty roles omitted)."""
+        configured = {
+            "general": self.ollama_general_model,
+            "fast": self.ollama_fast_model,
+            "coding": self.ollama_coding_model,
+            "reasoning": self.ollama_reasoning_model,
+            "long_context": self.ollama_long_context_model,
+            "tool_use": self.ollama_tool_model,
+        }
+        return {role: model.strip() for role, model in configured.items() if model.strip()}
 
     @property
     def extra_headers(self) -> dict[str, str]:

@@ -110,7 +110,8 @@ class BrowserSessions:
         if session is None:
             raise ToolError(f"no open browser session '{name}' (call browser_open first)")
         try:
-            if _time.monotonic() - float(session.get("created_at", _time.monotonic())) > self.SESSION_TTL_SECONDS:
+            age = _time.monotonic() - float(session.get("created_at", _time.monotonic()))
+            if age > self.SESSION_TTL_SECONDS:
                 self.close(name)
                 raise ToolError(f"browser session '{name}' expired; reopen it")
             session["last_used"] = _time.monotonic()

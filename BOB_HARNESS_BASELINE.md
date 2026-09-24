@@ -205,9 +205,9 @@ Risk distribution: **read 32 · write 13 · execute 13 · destructive 3.**
 | system | 2 | capabilities_list, system_status (read) |
 | *(optional, not registered offline)* | — | openconnector_execute, openconnector_list (group `openconnector`); mcp_call, mcp_list (group `mcp`) |
 
-Model providers (`services/providers.py`): **12** — openai, anthropic, groq, ollama
-(keyless), openrouter, together, mistral, gemini, deepseek, huggingface, freellmapi,
-tokenrouter — plus offline **echo** mode.
+Model providers (`services/providers.py`): **14** — openai, anthropic, groq, ollama
+(keyless), openrouter, together, mistral, gemini, deepseek, huggingface, tokenrouter,
+nim, ollama_cloud, opencode — plus offline **echo** mode.
 
 ## 4. API inventory — 82 documented operations (+1 hidden)
 

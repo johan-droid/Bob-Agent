@@ -17,14 +17,14 @@ What Bob is built from, and why. Versions are lower bounds from
 | Validation/settings | Pydantic v2 + pydantic-settings | Typed `Settings` model — the `settings` CLI catalog is derived from it |
 | HTTP client | httpx | Provider adapters + CLI transport |
 | YAML | PyYAML | `SKILL.md` frontmatter, local config overrides |
-| IDs/events | python-ulid, structlog | Sortable IDs, structured logs |
+| IDs/events | python-ulid | Sortable IDs |
 
 ## Backend dependencies (by role)
 
 - **Orchestration:** `rq`, `redis`, `apscheduler` (scheduled jobs)
 - **Agent runtime:** `httpx` (OpenConnector + MCP streamable-HTTP transport),
   stdlib JSON-RPC/SSE parsing (no MCP SDK)
-- **Documents agents:** `docxtpl`, `python-pptx`, `openpyxl`, `fpdf2`, `beautifulsoup4` (research parsing)
+- **Documents agents:** `python-docx`, `python-pptx`, `openpyxl`, `fpdf2`, `beautifulsoup4` (research parsing)
 - **Sandboxing:** `docker` SDK (container exec/sandbox)
 - **Testing/quality:** `pytest`, `pytest-asyncio`, `coverage`, `ruff`, `mypy --strict`, `types-*`
 

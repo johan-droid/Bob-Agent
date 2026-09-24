@@ -25,7 +25,7 @@ Use when implementing features, refactoring existing code, writing scripts, or c
 5. Confirm all checks pass before concluding.
 
 ## Required Tools
-- `file_read` / `file_write` / `run_tests` / `run_linter` / `run_typecheck` / `shell_execute`
+- `project_detect` / `repo_search` / `read_source` / `edit_source` / `apply_patch` / `run_tests` / `run_linter` / `run_typecheck`
 
 ## Constraints
 - Never edit build artifacts directly; edit source files.

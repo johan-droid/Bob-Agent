@@ -69,9 +69,8 @@ def get_principal(request: Request) -> Any:
     telegram_user_id = str(raw or "").strip()
     if bound_owner is not None and bound_owner is not False:
         # User-bound token: load principal by Bob user_id directly.
-        from agent_system.infra.models import User
-
         from agent_system.infra.db import session_scope
+        from agent_system.infra.models import User
 
         with session_scope(factory) as db:
             user = db.get(User, str(bound_owner))
@@ -86,9 +85,7 @@ def get_principal(request: Request) -> Any:
             # telegram account when available, else minimal principal).
             from agent_system.infra.models import TelegramAccount
 
-            acct = (
-                db.query(TelegramAccount).filter_by(user_id=user.id).first()
-            )
+            acct = db.query(TelegramAccount).filter_by(user_id=user.id).first()
             if acct is not None:
                 principal = identity.resolve(str(acct.telegram_user_id))
                 if principal is not None:

@@ -120,13 +120,12 @@ class TestInMemoryMetrics:
 
     def test_record_methods_never_raise(self) -> None:
         metrics = Metrics(_otel={"bogus": None})
-        metrics.record_task_duration("SUCCEEDED", 1.0)
         metrics.record_model_latency("p", 5, True)
         metrics.record_tool_call("t", "read")
         metrics.record_approval_latency("scope", 2.0)
         metrics.record_cost("s", 0.5)
         snap = metrics.snapshot()
-        assert snap["task_duration_seconds"]["SUCCEEDED"]["count"] == 1
+        assert snap["model_latency_ms"]["p|ok"]["count"] == 1
 
 
 class TestElapsedSeconds:

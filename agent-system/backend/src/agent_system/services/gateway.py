@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from typing import Any
 
@@ -54,7 +55,6 @@ from agent_system.services.identity import Role
 
 _logger = logging.getLogger(__name__)
 
-KIND_TASK_ACK = "command_response"
 KIND_RESULT = "notification"
 
 RELAYED_EVENT_TYPES = ("task.completed", "task.failed", "approval.requested")
@@ -571,15 +571,33 @@ class GatewayExecutor:
         from agent_system.services.telegram_presenter import TelegramProgressPresenter
 
         presenter = TelegramProgressPresenter(
-            self._factory, self._outbox, chat_id, session_id, self._bus
+            self._factory,
+            self._outbox,
+            chat_id,
+            session_id,
+            self._bus,
+            bot_token=getattr(self._settings, "telegram_bot_token", None),
         )
+        # start() fires the typing animation immediately; progress stages are
+        # reported from real model/tool events below. A helper thread watches
+        # for the first progress message to be delivered and binds its
+        # Telegram message id so later stages EDIT that same message.
         presenter.start()
-        from agent_system.services.telegram import send_chat_action_sync as _typing
-
-        _typing(getattr(self._settings, "telegram_bot_token", None), chat_id)
+        bind_thread = threading.Thread(
+            target=self._bind_progress_message_id,
+            args=(presenter,),
+            name=f"gateway-progress-bind-{update_id}",
+            daemon=True,
+        )
+        bind_thread.start()
 
         try:
             _logger.info("telegram.agent.started session_id=%s", session_id)
+            # Keep the typing animation alive while the first progress message
+            # is being created: sendChatAction lasts ~5s client-side.
+            from agent_system.services.telegram import send_chat_action_sync as _typing
+
+            _typing(getattr(self._settings, "telegram_bot_token", None), chat_id)
             # The executor's own settings govern the whole drive
             # (single-config execution — never a divergent ambient read).
             drive_session(self._factory, self._bus, session_id, settings=self._settings)
@@ -599,6 +617,8 @@ class GatewayExecutor:
             )
         finally:
             try:
+                if bind_thread is not None:
+                    bind_thread.join(timeout=10.0)
                 presenter.stop()
                 self._relay.flush()
                 self._gateway_done(update_id)
@@ -606,6 +626,29 @@ class GatewayExecutor:
             finally:
                 with self._in_flight_lock:
                     self._in_flight.discard(update_id)
+
+    def _bind_progress_message_id(self, presenter: Any, poll_seconds: float = 1.0) -> None:
+        """Wait for the first progress row to be drained, then bind its id.
+
+        Runs on a small helper thread so the agent drive is never blocked by
+        presentation work. Once the stable progress message exists (the outbox
+        captured its Telegram ``message_id`` from the sendMessage response),
+        every later stage edits that same user-visible message.
+        """
+        try:
+            deadline = 15.0
+            waited = 0.0
+            while waited < deadline:
+                outbox_id = presenter.progress_outbox_id
+                if outbox_id is not None:
+                    tg_id = self._outbox.telegram_message_id_for(outbox_id)
+                    if tg_id is not None:
+                        presenter.bind_telegram_message_id(tg_id)
+                        return
+                time.sleep(poll_seconds)
+                waited += poll_seconds
+        except Exception:  # pragma: no cover - binding is best-effort
+            _logger.exception("telegram.progress.bind_failed session_id=%s", presenter._session_id)
 
     def _process_one(self, update_id: int, background: bool = False) -> bool:
         with self._in_flight_lock:
@@ -698,11 +741,12 @@ class GatewayExecutor:
                 save_chat_message,
             )
 
-            from agent_system.services.telegram import send_chat_action_sync
-
-            send_chat_action_sync(
-                getattr(self._settings, "telegram_bot_token", None), chat_id
-            )
+            # Immediate "typing" animation on the CHAT fast path: enqueued
+            # as a durable row and drained inline so the user sees life
+            # within milliseconds (survives restarts, retry-safe: sendChatAction
+            # is idempotent and best-effort).
+            self._outbox.enqueue(kind="typing", chat_id=chat_id, text="typing")
+            self._outbox.drain()
             save_chat_message(self._factory, chat_id, "user", text)
             history = load_chat_history(self._factory, chat_id, limit=10)
 
@@ -749,19 +793,30 @@ class GatewayExecutor:
             prompt = "\n".join(prompt_lines)
 
             try:
+                from agent_system.services.inference_runtime import invoke as runtime_invoke
+
                 _, soul_text = load_soul(getattr(self._settings, "soul_path", "") or None)
                 router = build_model_router(self._bus, self._settings, soul_text=soul_text or None)
-                # 60s per attempt; the router fails over across providers
-                # (llm_max_fallback_attempts) instead of hanging on one.
-                inv = router.invoke(
+                # ONE model decision per Telegram conversation (the chat-scoped
+                # analogue of a task session), then bounded retry on that same
+                # model; emergency providers are only reached on persistent
+                # failure. 60s bounds a single call, not the whole retry budget.
+                invocation = runtime_invoke(
+                    router,
                     self._factory,
-                    router.default_model,
+                    self._settings,
                     prompt,
+                    text=text,
+                    session_id=f"chat:{chat_id}",
                     agent_type="chat",
+                    stream=False,
                     timeout=60,
-                    fallback=True,
+                    emit=lambda event_type, payload: _logger.info(
+                        "telegram.inference event=%s payload=%s", event_type, payload
+                    ),
                 )
-                if inv.ok and inv.output:
+                inv = invocation.result
+                if inv is not None and inv.ok and inv.output:
                     answer = inv.output
                     provider = getattr(inv, "provider", None) or "groq"
                     model_id = getattr(inv, "model_id", None) or router.default_model
@@ -774,8 +829,14 @@ class GatewayExecutor:
                         if footer not in clean_answer
                         else clean_answer
                     )
+                    if invocation.notice:
+                        # Concise, user-safe status before the answer (never a
+                        # raw provider error).
+                        final_text = f"{invocation.notice}\n\n{final_text}"
                 else:
-                    err_detail = getattr(inv, "error", None) or "Model returned empty response."
+                    err_detail = (
+                        getattr(inv, "error", None) if inv is not None else None
+                    ) or "Model returned empty response."
                     _logger.warning("gateway.chat.failed error=%s", err_detail)
                     clean_answer = (
                         "I'm sorry, I encountered an issue reaching the model service "
@@ -811,6 +872,10 @@ class GatewayExecutor:
             chat_id=chat_id,
             text=build_task_ack(text, req_type),
         )
+        # Immediate acknowledgement: drain synchronously so the user sees the
+        # contextual ack + typing animation within milliseconds, not whenever
+        # the next recovery sweep runs.
+        self._outbox.drain()
         session_id = None
         with session_scope(self._factory) as db:
             row = (

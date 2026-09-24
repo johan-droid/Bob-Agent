@@ -312,7 +312,8 @@ def write_env_file(values: dict[str, str], path: pathlib.Path | None = None) -> 
     existing.update(values)
 
     def _quote(value: str) -> str:
-        if value.startswith(("#", " ")) or value.endswith(" ") or value.startswith("{") or value.endswith("}"):
+        starts = {"#", " ", "{"}
+        if value.startswith(tuple(starts)) or value.endswith((" ", "}")):
             return f'"{value}"'
         return value
 
@@ -389,7 +390,9 @@ def cloud_doctor(settings: Any = None) -> dict[str, Any]:
         webhook_url = s.effective_telegram_webhook_url
     except Exception:
         webhook_url = ""
-    allowlist = [p for p in str(getattr(s, "telegram_allowed_user_ids", "") or "").split(",") if p.strip()]
+    allowlist = [
+        p for p in str(getattr(s, "telegram_allowed_user_ids", "") or "").split(",") if p.strip()
+    ]
     return {
         "agent_env": getattr(s, "agent_env", "?"),
         "identity_mode": getattr(s, "agent_identity_mode", "?"),
@@ -400,7 +403,9 @@ def cloud_doctor(settings: Any = None) -> dict[str, Any]:
         "allowlist_empty_blocks_all": len(allowlist) == 0,
         "providers_configured": providers,
         "default_provider": getattr(s, "default_provider", "?"),
-        "database": "postgres" if str(getattr(s, "database_url", "")).startswith("postgres") else "sqlite",
+        "database": (
+            "postgres" if str(getattr(s, "database_url", "")).startswith("postgres") else "sqlite"
+        ),
         "inline_run": bool(getattr(s, "cloud_inline_run", True)),
         "vault_db": bool(getattr(s, "cloud_vault_db", False)),
         "notes": (

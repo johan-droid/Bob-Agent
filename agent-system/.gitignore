@@ -103,6 +103,27 @@ backups/*
 !backups/.gitkeep
 !backups/README.md
 
+# Backend-local runtime dirs (relative to agent-system/backend)
+backend/recordings/*
+!backend/recordings/.gitkeep
+!backend/recordings/README.md
+
+backend/outputs/*
+!backend/outputs/.gitkeep
+!backend/outputs/README.md
+
+backend/backups/*
+!backend/backups/.gitkeep
+!backend/backups/README.md
+
+backend/vault/*
+!backend/vault/.gitkeep
+!backend/vault/README.md
+
+# Local object store (cloud drive emulation root, DEFAULT_TOOLS storage)
+backend/data/storage/*
+!backend/data/storage/.gitkeep
+
 # =============================================
 # Secrets & Environment Configurations
 # =============================================

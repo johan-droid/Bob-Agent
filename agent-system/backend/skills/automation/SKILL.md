@@ -24,7 +24,7 @@ Use when users ask to schedule reminders ("Remind me tomorrow"), set up daily su
 3. Confirm schedule configuration and payload.
 
 ## Required Tools
-- `tasks` / `scheduler`
+- `tasks_inspect` / `task_status` / `shell`
 
 ## Constraints
 - Ensure job schedules survive process restarts.

@@ -76,6 +76,10 @@ agent-system/recordings/*
 !agent-system/recordings/.gitkeep
 !agent-system/recordings/README.md
 
+agent-system/backend/recordings/*
+!agent-system/backend/recordings/.gitkeep
+!agent-system/backend/recordings/README.md
+
 agent-system/outputs/*
 !agent-system/outputs/.gitkeep
 !agent-system/outputs/README.md
@@ -87,6 +91,22 @@ agent-system/vault/*
 agent-system/backups/*
 !agent-system/backups/.gitkeep
 !agent-system/backups/README.md
+
+agent-system/backend/backups/*
+!agent-system/backend/backups/.gitkeep
+!agent-system/backend/backups/README.md
+
+agent-system/backend/outputs/*
+!agent-system/backend/outputs/.gitkeep
+!agent-system/backend/outputs/README.md
+
+agent-system/backend/vault/*
+!agent-system/backend/vault/.gitkeep
+!agent-system/backend/vault/README.md
+
+# Local object store (cloud drive emulation root)
+agent-system/backend/data/storage/*
+!agent-system/backend/data/storage/.gitkeep
 
 workspaces/*
 !workspaces/.gitkeep
@@ -182,8 +202,10 @@ tsconfig.tsbuildinfo
 # or the project .profilic config (backend/.profilic).
 data/profilis/
 backend/data/profilis/
+agent-system/backend/data/profilis/
 logs/
 backend/logs/
+agent-system/backend/logs/
 
 # Profilis runtime cache and dashboard state
 .profilis-cache/

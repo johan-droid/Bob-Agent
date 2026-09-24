@@ -173,11 +173,21 @@ PROVIDERS: dict[str, ProviderSpec] = {
         default_model="gpt-oss:20b",
         auth="bearer",
         description="Hosted open models via Ollama Cloud (OpenAI-compatible).",
+        # Free tier: Ollama Cloud is Bob's PRIMARY inference platform, so it
+        # must survive the zero-cost filter (BOB_ZERO_COST_MODE) that gates
+        # every other routing decision.
+        free_tier=True,
+        # Free-plan verified set (2026-09-24): every id answers 200 on the
+        # free tier. Models outside the plan (e.g. qwen3.5:397b,
+        # deepseek-v4.1-flash) answer HTTP 402 "not included in your free
+        # usage" and are deliberately not offered.
         models=(
             "gpt-oss:20b",
             "gpt-oss:120b",
-            "qwen3.5:397b",
-            "deepseek-v4.1-flash",
+            "gemma4:31b",
+            "nemotron-3-nano:30b",
+            "nemotron-3-super",
+            "nemotron-3-ultra",
         ),
     ),
     "opencode": ProviderSpec(
@@ -1560,25 +1570,6 @@ def credential_summary(settings: Settings) -> dict[str, str]:
     return out
 
 
-def _diag_stage(name: str, fn: Any, stop_on_fail: bool = True) -> tuple[str, dict[str, Any], bool]:
-    """Run one diagnostic stage; returns (name, result, passed).
-
-    Stages after a failed ``stop_on_fail`` stage are reported ``skipped`` —
-    a wrong key should not also fire live HTTP calls.
-    """
-    try:
-        detail = fn()
-        if isinstance(detail, dict) and detail.get("ok") is False:
-            return name, {"status": "FAIL", **detail}, False
-        return name, {"status": "PASS", **(detail or {})}, True
-    except Exception as exc:  # noqa: BLE001 — diagnostic path must never raise
-        message = str(exc)
-        for secret in getattr(fn, "_secrets", ()) or ():
-            if secret and secret in message:
-                message = message.replace(secret, "***")
-        return name, {"status": "FAIL", "error": f"{type(exc).__name__}: {message[:200]}"}, False
-
-
 def diagnose_provider(
     settings: Settings,
     provider: str,
@@ -1809,6 +1800,28 @@ def default_model_id(settings: Settings) -> str:
     return static.default_model if static else "echo-default"
 
 
+def routing_index(settings: Settings | None = None) -> dict[str, str]:
+    """model_id -> owning provider for every model Bob can address.
+
+    Covers each provider spec's catalogued models plus the configured
+    Ollama Cloud role models, so routing never depends on a model being
+    priced (pricing stays a cost fact, routing is an ownership fact).
+    """
+    index: dict[str, str] = {}
+    for key, spec in PROVIDERS.items():
+        for model in spec.models:
+            index.setdefault(model, key)
+        if spec.default_model:
+            index.setdefault(spec.default_model, key)
+    if settings is not None:
+        try:
+            for model in settings.ollama_model_roles.values():
+                index[model] = "ollama_cloud"
+        except Exception:
+            pass
+    return index
+
+
 def build_model_router(
     event_bus: Any,
     settings: Settings,
@@ -1867,6 +1880,12 @@ def build_model_router(
         adapter = build_adapter(name, settings, key)
         if adapter is not None:
             router.register_adapter(name, adapter)
+    # Routing ownership index: the pricing registry deliberately leaves
+    # billable models unregistered, so every model id Bob may address must
+    # also be indexed against its owning provider — otherwise a configured
+    # Ollama Cloud role model (or any non-"free" model) resolves to
+    # provider="unknown" and fails with "no adapter registered".
+    router.register_provider_index(routing_index(settings))
 
     # Explicit offline tier wins: an
     # operator-selected echo/none/empty provider is authoritative. Serve the
@@ -1943,10 +1962,14 @@ def build_model_router(
             from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
 
             default_spec = provider_spec(router.default_provider)
-            default_model_id = default_spec.default_model if default_spec else ""
-            if (
-                GLOBAL_HEALTH_TRACKER is not None
-                and not GLOBAL_HEALTH_TRACKER.is_routable(router.default_provider, default_model_id)
+            default_provider_model = default_spec.default_model if default_spec else ""
+            # NOTE: do not name this `default_model_id` — that is the
+            # module-level function used above; a local of the same name
+            # shadowed it and raised UnboundLocalError on EVERY router build
+            # (i.e. every chat message and agent task failed with
+            # "cannot access local variable 'default_model_id'").
+            if GLOBAL_HEALTH_TRACKER is not None and not GLOBAL_HEALTH_TRACKER.is_routable(
+                router.default_provider, default_provider_model
             ):
                 # Find first routable non-ollama provider
                 routable = []
@@ -1960,6 +1983,7 @@ def build_model_router(
                 if routable:
                     first_avail = routable[0]
                     import logging as _logging
+
                     _logging.getLogger(__name__).warning(
                         "[LLM] provider_selected default=%s blocked; auto-selected=%s",
                         router.default_provider,

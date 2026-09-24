@@ -615,9 +615,13 @@ class TelegramService:
                 self._mark_processed(update_id)
             return
         # DM-only credential setup: never accept secrets in group chats.
-        if chat_type in ("group", "supergroup", "channel") and text.startswith(("/setup", "/rotate")):
+        is_group = chat_type in ("group", "supergroup", "channel")
+        if is_group and text.startswith(("/setup", "/rotate")):
             try:
-                await self._send(from_chat, "Credential setup is only available in direct messages.")
+                await self._send(
+                    from_chat,
+                    "Credential setup is only available in direct messages.",
+                )
             except Exception:
                 pass
             if update_id is not None:

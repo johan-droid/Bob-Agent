@@ -98,81 +98,63 @@ def install() -> None:
 
 
 def _provider_for_model(settings: Any, model_id: str) -> str:
-    """Provider that owns ``model_id`` (router adapter key or default)."""
+    """Provider that owns ``model_id`` (one shared routing index)."""
     try:
-        from agent_system.services.providers import provider_spec
+        from agent_system.services.providers import routing_index
 
-        for key in (
-            "groq",
-            "gemini",
-            "nim",
-            "ollama_cloud",
-            "ollama",
-            "openrouter",
-            "openai",
-            "anthropic",
-            "deepseek",
-            "together",
-            "mistral",
-            "huggingface",
-            "tokenrouter",
-            "opencode",
-        ):
-            spec = provider_spec(key)
-            if spec is not None and model_id in spec.models:
-                return key
+        found = routing_index(settings).get(model_id)
+        if found:
+            return found
     except Exception:
         pass
-    return str(getattr(settings, "default_provider", "echo") or "echo")
+    return str(getattr(settings, "primary_provider", "") or "") or str(
+        getattr(settings, "default_provider", "echo") or "echo"
+    )
 
 
-def _fallback_candidates(
-    settings: Any, task_input: dict[str, Any], model_id: str
-) -> list[tuple[str, str]]:
-    """Ordered (provider, model) candidates for one worker execution.
+def _resolve_selection(
+    settings: Any,
+    task_input: dict[str, Any],
+    goal: str,
+    *,
+    session_id: str | None,
+    task_id: str | None,
+) -> Any:
+    """The ONE model decision for this task (Ollama Cloud-first runtime).
 
-    Single-provider setups return one candidate (zero behavior change).
-    Multi-provider setups rank by capability requirements of the worker
-    role (tool calling never falls back to a non-tool model).
+    Replaces the old provider-roulette candidate list: the runtime classifies
+    the task, picks a capability-compatible Ollama Cloud model, locks it to
+    the session and returns the ordered chain (compatible Ollama alternates,
+    then emergency providers) purely as failure fallbacks. An explicitly
+    requested ``model`` in the task input is honoured verbatim.
     """
-    primary_provider = _provider_for_model(settings, model_id)
-    primary: tuple[str, str] = (primary_provider, model_id)
-    try:
-        from agent_system.services.llm_catalog import DEFAULT_CATALOG
-        from agent_system.services.llm_router import (
-            rank_candidates,
-            request_for_role,
-        )
-        from agent_system.services.provider_health import ProviderHealthTracker
-        from agent_system.services.providers import configured_providers
+    from agent_system.services.inference_runtime import (
+        ModelRole,
+        ModelSelection,
+        classify_task,
+        select_model,
+    )
 
-        role = str(task_input.get("worker_role") or task_input.get("role") or "")
-        request = request_for_role(role, str(task_input.get("task_type") or ""))
-        if role == "" and "goal" in task_input:
-            request.requires_tool_calling = True
-        configured = [p["key"] for p in configured_providers(settings) if p["configured"]]
-        if primary_provider not in configured:
-            configured = [primary_provider, *configured]
-        order_raw = str(getattr(settings, "llm_provider_order", "") or "")
-        order = tuple(p.strip() for p in order_raw.split(",") if p.strip())
-        if order:
-            request.preordered_providers = order
-        else:
-            role_order = tuple(request.preordered_providers or ())
-            merged = (primary_provider, *[p for p in role_order if p != primary_provider])
-            request.preordered_providers = merged
-        ranked = rank_candidates(request, DEFAULT_CATALOG, None, configured)
-        candidates = [(c.provider, c.model_id) for c, _ in ranked]
-        if primary not in candidates:
-            candidates.insert(0, primary)
-        else:
-            candidates.remove(primary)
-            candidates.insert(0, primary)
-        max_attempts = int(getattr(settings, "llm_max_fallback_attempts", 3) or 3)
-        _ = ProviderHealthTracker
-        return candidates[: max(1, max_attempts)]
-    except Exception:
-        return [primary]
+    explicit = str(task_input.get("model") or "").strip()
+    if explicit:
+        return ModelSelection(
+            provider=_provider_for_model(settings, explicit),
+            model_id=explicit,
+            role=ModelRole.GENERAL,
+            task=classify_task(goal),
+            reason="explicit_model",
+            candidates=((_provider_for_model(settings, explicit), explicit),),
+            is_primary=_provider_for_model(settings, explicit) == "ollama_cloud",
+        )
+    # An agent task always has a tool registry available, so require a model
+    # that can actually call tools (never inferred from compatibility alone).
+    return select_model(
+        settings,
+        goal,
+        session_id=session_id,
+        task_id=task_id,
+        requires_tools=True,
+    )
 
 
 def _extract_goal(task_input: dict[str, Any]) -> str | None:
@@ -297,6 +279,35 @@ def _build_router(settings: Any, bus: Any) -> Any:
     return router
 
 
+def _task_checkpoint_payload(
+    selection: Any,
+    *,
+    session_id: str | None,
+    task_id: str | None,
+    goal: str,
+) -> dict[str, Any]:
+    """Secret-free resume payload stored before any emergency fallback.
+
+    Carries only what is needed to resume the task: the context reference,
+    the pending step, the active provider/model and execution metadata. The
+    ``services/checkpoints.py`` layer redacts it again before persisting.
+    """
+    from agent_system.services.checkpoints import build_checkpoint_payload
+
+    return build_checkpoint_payload(
+        task_state="running",
+        context_ref={"session_id": session_id, "task_id": task_id},
+        pending_step=str(goal or "")[:500],
+        active_provider=str(getattr(selection, "provider", "") or ""),
+        active_model=str(getattr(selection, "model_id", "") or ""),
+        execution={
+            "role": getattr(getattr(selection, "role", None), "value", ""),
+            "task": getattr(getattr(selection, "task", None), "value", ""),
+            "reason": str(getattr(selection, "reason", "") or "")[:300],
+        },
+    )
+
+
 def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """Execute one task goal: reason + act with the tool registry until done.
 
@@ -307,6 +318,7 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
     from agent_system.domain.events import Event
     from agent_system.infra.db import session_scope
     from agent_system.infra.event_bus import EventBus
+    from agent_system.services import inference_runtime
     from agent_system.services.providers import default_model_id
 
     settings = context.get("settings") or get_settings()
@@ -344,17 +356,35 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             pass  # event emission must never break execution
 
     router = _build_router(settings, bus)
-    model_id = str(task_input.get("model") or default_model_id(settings))
-    candidates = _fallback_candidates(settings, task_input, model_id)
+    # ONE model decision for the whole task, locked to the session. Every
+    # iteration of the tool loop below reuses it verbatim.
+    selection = _resolve_selection(
+        settings, task_input, goal, session_id=session_id, task_id=task_id
+    )
+    model_id = selection.model_id
+    default_model = default_model_id(settings)
+    # Compact, credential-free status the Telegram presenter renders on its
+    # single progress message ("⚙️ Ollama Cloud · <model>").
+    emit(
+        "inference.model_selected",
+        {
+            "label": inference_runtime.describe_selection(selection),
+            "provider": selection.provider,
+            "model_id": selection.model_id,
+            "role": selection.role.value,
+            "task": selection.task.value,
+        },
+    )
 
     def invoke(prompt: str) -> dict[str, Any]:
+        nonlocal model_id
+
         def _on_token(delta: str) -> None:
             # Incremental tokens ride the same emit channel as every other
             # event (visibility=user by default) — the WS/SSE fanout and the
             # chat REPL render them live; model.completed still closes the call.
             emit("model.token", {"model_id": model_id, "delta": delta})
 
-        active_model = model_id
         import logging as _logging
 
         _log = _logging.getLogger(__name__)
@@ -365,63 +395,51 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             task_id,
         )
         try:
-            if len(candidates) > 1:
-                from agent_system.services.fallback import invoke_with_fallback
-                from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
-
-                result = invoke_with_fallback(
-                    router,
-                    factory,
-                    candidates,
-                    prompt,
-                    task_id=task_id,
-                    worker_id=run_id or task_id,
-                    session_id=session_id,
-                    agent_run_id=run_id,
-                    agent_type=agent_type,
-                    max_attempts=int(getattr(settings, "llm_max_fallback_attempts", 3) or 3),
-                    health=GLOBAL_HEALTH_TRACKER,
-                    bus=bus,
-                )
-                if result is None:
-                    raise RuntimeError("model invocation failed: no candidates")
-                active_model = str(getattr(result, "model_id", model_id))
-            elif hasattr(router, "invoke_streaming"):
-                result = router.invoke_streaming(
-                    factory,
-                    model_id,
-                    prompt,
-                    session_id=session_id,
-                    task_id=task_id,
-                    agent_run_id=run_id,
-                    agent_type=agent_type,
-                    on_token=_on_token,
-                )
-            else:  # pragma: no cover — all shipped routers stream
-                result = router.invoke(
-                    factory,
-                    model_id,
-                    prompt,
-                    session_id=session_id,
-                    task_id=task_id,
-                    agent_run_id=run_id,
-                    agent_type=agent_type,
-                )
-            if not result.ok:
+            invocation = inference_runtime.invoke(
+                router,
+                factory,
+                settings,
+                prompt,
+                text=goal,
+                session_id=session_id,
+                task_id=task_id,
+                agent_run_id=run_id,
+                agent_type=agent_type,
+                on_token=_on_token,
+                emit=emit,
+                selection=selection,
+                checkpoint_payload=_task_checkpoint_payload(
+                    selection, session_id=session_id, task_id=task_id, goal=goal
+                ),
+            )
+            result = invocation.result
+            if result is None or not result.ok:
+                error = getattr(result, "error", None) or "model invocation failed"
                 _log.warning(
                     "telegram.model.failed model_id=%s session_id=%s error=%s",
-                    active_model,
+                    model_id,
                     session_id,
-                    result.error,
+                    error,
                 )
-                raise RuntimeError(result.error or "model invocation failed")
-            _log.info(
-                "telegram.model.completed model_id=%s session_id=%s", active_model, session_id
-            )
+                raise RuntimeError(error)
+            model_id = str(getattr(result, "model_id", model_id) or model_id)
+            if invocation.notice:
+                # Concise, user-safe status — never a raw provider error.
+                emit(
+                    "inference.fallback_notice",
+                    {
+                        "notice": invocation.notice,
+                        "provider": model_id,
+                        "error_kind": (
+                            invocation.error_kind.value if invocation.error_kind else ""
+                        ),
+                    },
+                )
+            _log.info("telegram.model.completed model_id=%s session_id=%s", model_id, session_id)
         except Exception as exc:
             _log.warning(
                 "telegram.model.failed model_id=%s session_id=%s error=%s",
-                active_model,
+                model_id,
                 session_id,
                 exc,
             )
@@ -436,8 +454,8 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             "usage": usage,
             "tool_calls": result.tool_calls or [],
         }
-        if active_model != model_id:
-            out["model"] = active_model
+        if model_id != default_model:
+            out["model"] = model_id
         return out
 
     tool_registry = build_registry(settings)

@@ -571,6 +571,12 @@ class DeliveryOutbox(Base):
     # message and which inbound message it replies to.
     task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Telegram realtime progress UX: the user-visible Telegram message id to
+    # EDIT in place (editMessageText) instead of sending a new message, and
+    # the Telegram message id captured from a successful sendMessage response
+    # (so later stages can edit the very message this row created).
+    edit_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class TelegramGatewayMessage(Base):
@@ -651,4 +657,58 @@ class A2AProcessedEnvelope(Base):
 
     envelope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     delegation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Ollama Cloud-first inference runtime (additive)
+# ---------------------------------------------------------------------------
+
+
+class InferenceModelLock(Base):
+    """Durable session/task model lock (one selected model per task).
+
+    The in-process lock is authoritative while a run is live; this row is
+    the durable record so a restarted process resumes the SAME model instead
+    of re-rolling one, and so the lock is observable without exposing
+    credentials. Idempotent: one row per session (upsert, never append).
+    """
+
+    __tablename__ = "inference_model_locks"
+
+    id: Mapped[str] = _pk()
+    session_id: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(24), default="GENERAL", nullable=False)
+    task_family: Mapped[str] = mapped_column(String(24), default="CHAT", nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = _ts(index=True)
+
+
+class InferenceCheckpoint(Base):
+    """Resumable task checkpoint written before an emergency fallback.
+
+    Holds only what is needed to resume (task state, context reference,
+    completed steps, pending step, tool results, active provider/model and
+    execution metadata). Secrets are redacted before the payload is stored —
+    never API keys, authorization headers or credentials. Idempotent: one row
+    per task, upserted on every save.
+    """
+
+    __tablename__ = "inference_checkpoints"
+
+    id: Mapped[str] = _pk()
+    task_id: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    step_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="open", nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    error_kind: Mapped[str] = mapped_column(String(32), default="UNKNOWN", nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = _ts(index=True)
+    resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = _ts()

@@ -8,6 +8,7 @@ crashes execution; it is marked explicitly.
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -164,6 +165,30 @@ class UnavailableProvider(ProviderAdapter):
         raise ConnectionError("provider unreachable")
 
 
+def provider_error_body(exc: Any, limit: int = 300) -> str:
+    """Sanitized provider response-body excerpt for a failed HTTP call.
+
+    ``HTTPStatusError: Client error '400 Bad Request'`` says nothing about
+    *why* a provider refused the request; the JSON body does (unknown model,
+    bad parameter, …). The excerpt is redacted before it reaches a log line
+    or a ModelCall row, and is never an authorization header.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    text = getattr(response, "text", None)
+    if not text:
+        return ""
+    try:
+        from agent_system.services.secrets import redact_value
+
+        clean = redact_value(str(text))
+    except Exception:
+        clean = str(text)
+    clean = " ".join(clean.split())
+    return clean[:limit]
+
+
 class ProviderUnavailableError(RuntimeError):
     """Fail-fast error raised while a provider's circuit is OPEN."""
 
@@ -261,8 +286,6 @@ class ProviderCircuitBreaker:
                 return "opened"
             return None
 
-            return None
-
 
 class ModelRouter:
     """Routes model calls with cost accounting and an optional daily budget.
@@ -304,6 +327,8 @@ class ModelRouter:
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.circuit_breaker_cooldown_seconds = circuit_breaker_cooldown_seconds
         self._breakers: dict[str, ProviderCircuitBreaker] = {}
+        #: model_id -> provider for routing ownership (pricing stays cost-only).
+        self._provider_index: dict[str, str] = {}
         # Daily budget wiring (minimal but real): shared monitor tracks
         # cumulative spend against daily_budget_usd across all invocations.
         self.daily_budget_usd = daily_budget_usd
@@ -384,11 +409,32 @@ class ModelRouter:
         with self._lock:
             self._adapters[provider] = adapter
 
-    def _adapter_for(self, model_id: str) -> ProviderAdapter | None:
+    def register_provider_index(self, index: Mapping[str, str]) -> None:
+        """Register model_id -> provider for *routing* (cost stays separate).
+
+        ``build_pricing`` deliberately leaves billable models unregistered so a
+        cost is never fabricated — but ``invoke`` used to resolve the provider
+        *through pricing*, so every billable model (Ollama Cloud, Anthropic,
+        OpenAI…) resolved to ``provider="unknown"`` and failed with "no adapter
+        registered". Routing ownership is a different fact from pricing and is
+        indexed here, priced models still resolve through pricing first.
+        """
+        with self._lock:
+            self._provider_index.update({str(k): str(v) for k, v in index.items()})
+
+    def _resolve_provider(self, model_id: str) -> str:
+        """Provider that owns ``model_id``: pricing first, then the routing index."""
         info = self.pricing.get(model_id)
-        if info is None:
+        if info is not None:
+            return info.provider
+        with self._lock:
+            return self._provider_index.get(model_id, "unknown")
+
+    def _adapter_for(self, model_id: str) -> ProviderAdapter | None:
+        provider = self._resolve_provider(model_id)
+        if provider == "unknown":
             return None
-        return self._adapters.get(info.provider)
+        return self._adapters.get(provider)
 
     def _breaker_for(self, provider: str) -> ProviderCircuitBreaker:
         """Per-provider breaker (unknown providers are never breakered)."""
@@ -409,9 +455,7 @@ class ModelRouter:
             breaker = self._breakers.get(provider)
             return breaker.state if breaker else None
 
-    def _failover_chain(
-        self, model_id: str, provider: str
-    ) -> list[tuple[str, str, Any | None]]:
+    def _failover_chain(self, model_id: str, provider: str) -> list[tuple[str, str, Any | None]]:
         """Ordered (model, provider, adapter) attempts: primary + failover.
 
         Offline (echo/none) primaries never fail over. Alternates honor
@@ -466,7 +510,7 @@ class ModelRouter:
                 except Exception:
                     pass
             try:
-                if self.pricing.get(cand_model) is None:
+                if self.pricing.get(cand_model) is None and cand_model not in self._provider_index:
                     continue
             except Exception:
                 pass
@@ -476,6 +520,14 @@ class ModelRouter:
                         continue
                 except Exception:
                     pass
+            # Skip candidates that have no registered adapter: a pricing-only
+            # entry would otherwise produce a wasted "no adapter registered"
+            # attempt and burn one of the bounded fallback slots.
+            try:
+                if self._adapters.get(cand) is None:
+                    continue
+            except Exception:
+                pass
             chain.append((cand_model, cand, self._adapters[cand]))
         return chain[:max_attempts]
 
@@ -507,8 +559,11 @@ class ModelRouter:
         import time
 
         prompt, skills_used, soul_used = self._compose_prompt(prompt, skills, agent_type)
-        info = self.pricing.get(model_id)
-        provider = info.provider if info else "unknown"
+        # Provider ownership comes from the routing index, not pricing alone:
+        # a billable/unpriced model (or a configured Ollama Cloud role model)
+        # must never resolve to provider="unknown" and fail with "no adapter
+        # registered". Pricing stays a cost fact, routing an ownership fact.
+        provider = self._resolve_provider(model_id)
         call_id = ids.new_model_call_id()
         invoke_started = time.monotonic()
 
@@ -568,7 +623,10 @@ class ModelRouter:
             cand_started = time.monotonic()
 
             def _attempt(
-                _ad: Any = cand_adapter, _cm: str = cand_model, _to: Any = per_call_timeout
+                _ad: Any = cand_adapter,
+                _cm: str = cand_model,
+                _to: Any = per_call_timeout,
+                _cp: str = cand_provider,
             ) -> tuple[str, dict[str, Any], list[dict[str, Any]] | None]:
                 # Per-call timeout override (float assignment is GIL-atomic;
                 # worst case a concurrent thread inherits the tighter bound).
@@ -588,7 +646,7 @@ class ModelRouter:
                 if rl_info:
                     from agent_system.services.provider_health import GLOBAL_HEALTH_TRACKER
 
-                    GLOBAL_HEALTH_TRACKER.update_rate_limits(cand_provider, _cm, rl_info)
+                    GLOBAL_HEALTH_TRACKER.update_rate_limits(_cp, _cm, rl_info)
                 return (
                     str(response.get("output", "")),
                     dict(response.get("usage", {})),
@@ -659,8 +717,7 @@ class ModelRouter:
         import time
 
         prompt, skills_used, soul_used = self._compose_prompt(prompt, skills, agent_type)
-        info = self.pricing.get(model_id)
-        provider = info.provider if info else "unknown"
+        provider = self._resolve_provider(model_id)
         call_id = ids.new_model_call_id()
         self._emit_requested(
             factory,
@@ -858,6 +915,13 @@ class ModelRouter:
             error = None
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
+            body = provider_error_body(exc)
+            if body:
+                # Keep the reason the provider gave (e.g. "model not found",
+                # "insufficient_quota") so a 400/402 is diagnosable instead of
+                # a bare status code. Also feeds the error taxonomy, which
+                # matches on these wordings.
+                message = f"{message} | provider_body: {body}"
             # 429s carry a Retry-After / rate-limit header set; feed it to the
             # health tracker so the cooldown honours the provider's own hint
             # instead of a fixed default. (The success path parses these from

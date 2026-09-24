@@ -204,6 +204,8 @@ class TestA2ARoundTrip:
             agent.stop()
 
     def test_tampered_callback_rejected(self, env: Any) -> None:
+        from agent_system.domain.events import utcnow
+
         factory, bus = env
         gate = PermissionGate()
         agent = FakeExternalAgent("test-secret-please-ignore")
@@ -231,6 +233,7 @@ class TestA2ARoundTrip:
                             "delegation_id": "a2a_nope",
                             "task_id": "task_a2a",
                             "result": {},
+                            "issued_at": str(utcnow().isoformat()),
                         },
                         "test-secret-please-ignore",
                     )

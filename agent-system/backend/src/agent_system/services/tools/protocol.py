@@ -29,11 +29,32 @@ _TOOL_FENCE_OPEN_RE = re.compile(r"```tool:")
 _ZERO_WIDTH_SPACE = "\u200b"
 
 
+# Third wire format: the ``<invoke name="x">…</invoke>`` XML shape that some
+# models emit when they were trained on plugin/function syntax rather than
+# JSON tool_calls or Bob's fence. Without this parser those calls are silently
+# dropped, the loop ends on iteration 1, and no tool ever runs.
+_INVOKE_BLOCK_RE = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?invoke\s+name=[\"']([^\"']+)[\"'][^>]*>"
+    r"(.*?)"
+    r"</(?:[A-Za-z0-9_]+:)?invoke>",
+    re.DOTALL | re.IGNORECASE,
+)
+_INVOKE_PARAM_RE = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?parameter\s+name=[\"']([^\"']+)[\"'][^>]*>"
+    r"(.*?)"
+    r"</(?:[A-Za-z0-9_]+:)?parameter>",
+    re.DOTALL | re.IGNORECASE,
+)
+#: Opening tag shape, used to neutralise injected invoke blocks in tool output.
+_INVOKE_OPEN_RE = re.compile(r"<((?:[A-Za-z0-9_]+:)?invoke\s+name=)", re.IGNORECASE)
+
+
 class ProtocolKind(StrEnum):
     """Which protocol produced a call."""
 
     FENCED = "bob_fenced"
     NATIVE = "provider_native"
+    XML_INVOKE = "xml_invoke"
 
 
 @dataclass(frozen=True)
@@ -162,11 +183,66 @@ class NativeToolCallProtocol(ToolCallProtocol):
         return []
 
 
-#: Ordered protocols: provider-native first (more reliable when present), with
-#: Bob's fenced protocol as the universal fallback.
+class XmlInvokeProtocol(ToolCallProtocol):
+    """``<invoke name="x">...</invoke>`` XML tool calls (plugin syntax).
+
+    Two body shapes are accepted:
+
+    - a raw JSON object (the shape observed in the wild), coerced by the shared
+      ``_coerce_arguments`` so malformed JSON is *flagged*, never dropped;
+    - name/value ``parameter`` elements assembled into an object (a value that
+      parses as JSON keeps its type, otherwise it stays a string).
+
+    Registered last so native structured calls and Bob's fence keep winning
+    when a provider honours either of them.
+    """
+
+    kind = ProtocolKind.XML_INVOKE
+
+    def supports(self, message: Mapping[str, Any]) -> bool:
+        return bool(_INVOKE_BLOCK_RE.search(str(message.get("output") or "")))
+
+    def parse(self, message: Mapping[str, Any]) -> list[ToolCall]:
+        text = str(message.get("output") or "")
+        calls: list[ToolCall] = []
+        for index, match in enumerate(_INVOKE_BLOCK_RE.finditer(text)):
+            name = match.group(1).strip()
+            body = (match.group(2) or "").strip()
+            if not name:
+                continue
+            params = _INVOKE_PARAM_RE.findall(body)
+            if params:
+                arguments: dict[str, Any] = {}
+                error: str | None = None
+                for key, raw_value in params:
+                    value = raw_value.strip()
+                    try:
+                        arguments[key] = json.loads(value)
+                    except ValueError:
+                        arguments[key] = value
+            else:
+                arguments, error = _coerce_arguments(body or None)
+            calls.append(
+                ToolCall(
+                    id=f"call_invoke_{index + 1}",
+                    name=name,
+                    arguments=arguments,
+                    source="assistant_text",
+                    protocol=self.kind,
+                    raw_arguments=body or None,
+                    parse_error=error,
+                )
+            )
+        return calls
+
+
+#: Ordered protocols: provider-native first (more reliable when present), then
+#: Bob's fenced protocol, then the XML invoke shape as the last textual
+#: fallback for models that ignore both earlier instructions.
 DEFAULT_PROTOCOLS: tuple[ToolCallProtocol, ...] = (
     NativeToolCallProtocol(),
     BobFencedProtocol(),
+    XmlInvokeProtocol(),
 )
 
 
@@ -207,15 +283,20 @@ def sanitize_tool_result(text: str) -> str:
 
     We insert an invisible zero-width space after any opening ```tool: so the
     fence regex no longer matches it, while the rendered text is visually
-    identical. Only tool *results* are sanitised; the model's own outgoing
-    fence parsing is untouched (legitimate calls must still work).
+    identical. The same break is applied to an opening ``<invoke name=`` tag,
+    because that third wire format is now a live protocol too — leaving it
+    neutralisable would reopen the identical injection vector through the new
+    parser. Only tool *results* are sanitised; the model's own outgoing calls
+    are untouched (legitimate calls must still work).
     """
-    return _TOOL_FENCE_OPEN_RE.sub(f"```{_ZERO_WIDTH_SPACE}tool:", text)
+    broken_fence = _TOOL_FENCE_OPEN_RE.sub(f"```{_ZERO_WIDTH_SPACE}tool:", text)
+    return _INVOKE_OPEN_RE.sub(f"<{_ZERO_WIDTH_SPACE}\\1", broken_fence)
 
 
 def strip_tool_calls(text: str) -> str:
-    """Remove tool fences so the user sees the final answer, not the protocol."""
-    return TOOL_FENCE_RE.sub("", text).strip()
+    """Remove tool-call protocol so the user sees the final answer, not the protocol."""
+    without_invoke = _INVOKE_BLOCK_RE.sub("", text)
+    return TOOL_FENCE_RE.sub("", without_invoke).strip()
 
 
 @dataclass
@@ -239,6 +320,7 @@ __all__ = [
     "TOOL_FENCE_RE",
     "ToolCall",
     "ToolCallProtocol",
+    "XmlInvokeProtocol",
     "parse_tool_calls",
     "sanitize_tool_result",
     "strip_tool_calls",

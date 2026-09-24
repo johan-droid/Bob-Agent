@@ -74,7 +74,11 @@ def ready(response: Response) -> dict[str, Any]:
     checks = data.get("checks")
     if not isinstance(checks, dict):
         checks = {}
-    return {"status": data.get("status", "ok"), "ready": bool(data.get("ready", ok)), "checks": checks}
+    return {
+        "status": data.get("status", "ok"),
+        "ready": bool(data.get("ready", ok)),
+        "checks": checks,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1151,7 +1155,7 @@ def sandbox_exec(
     request: Request,
     principal: Annotated[Any | None, Depends(get_principal)],
 ) -> dict[str, Any]:
-    from agent_system.services.permissions import ApprovalRequest, Policy, Risk
+    from agent_system.services.permissions import ApprovalRequest, Risk
     from agent_system.services.sandbox import DockerSandbox, SandboxUnavailableError
     from agent_system.services.workspaces import WorkspaceManager
 
@@ -1299,8 +1303,7 @@ def list_events(
 
             uid = owner_id(principal)
             owned_sessions = {
-                r[0]
-                for r in db.query(Session.id).filter(Session.owner_user_id == uid).all()
+                r[0] for r in db.query(Session.id).filter(Session.owner_user_id == uid).all()
             }
             filtered = []
             for e in events:
@@ -1374,7 +1377,8 @@ def list_vault_notes(
     layer: str | None = None,
     search: str | None = None,
 ) -> list[VaultNoteOut]:
-    from agent_system.api.deps import _is_telegram, owner_id as _oid4
+    from agent_system.api.deps import _is_telegram
+    from agent_system.api.deps import owner_id as _oid4
     from agent_system.services.memory import MemoryLayer, ObsidianVaultWriter
 
     settings = request.app.state.settings
@@ -1437,7 +1441,8 @@ def get_vault_note(
     path: str,
     principal: Annotated[Any | None, Depends(get_principal)],
 ) -> VaultNoteDetail:
-    from agent_system.api.deps import _is_telegram, owner_id as _oid5
+    from agent_system.api.deps import _is_telegram
+    from agent_system.api.deps import owner_id as _oid5
     from agent_system.services.memory import ObsidianVaultWriter
 
     settings = request.app.state.settings
@@ -1528,7 +1533,8 @@ def delete_vault_note(
     path: str,
     principal: Annotated[Any | None, Depends(get_principal)],
 ) -> None:
-    from agent_system.api.deps import _is_telegram, owner_id as _oid3
+    from agent_system.api.deps import _is_telegram
+    from agent_system.api.deps import owner_id as _oid3
     from agent_system.services.memory import ObsidianVaultWriter
 
     settings = request.app.state.settings
@@ -1735,14 +1741,17 @@ def delete_template(
 ) -> None:
     import json as _json2
 
-    from agent_system.api.deps import _is_telegram, owner_id as _oid2
+    from agent_system.api.deps import _is_telegram
+    from agent_system.api.deps import owner_id as _oid2
 
     settings = request.app.state.settings
     if _is_telegram(principal):
         meta = Path(settings.templates_dir) / f"{template_id}.json"
         try:
             data = _json2.loads(meta.read_text(encoding="utf-8"))
-            if data.get("owner_user_id") not in (None, _oid2(principal)) and _oid2(principal) is not None:
+            owner = data.get("owner_user_id")
+            me = _oid2(principal)
+            if owner is not None and me is not None and owner != me:
                 raise HTTPException(status_code=404, detail="template not found")
             if data.get("owner_user_id") is None and _oid2(principal) is not None:
                 raise HTTPException(status_code=404, detail="template not found")

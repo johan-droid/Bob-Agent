@@ -26,7 +26,7 @@ Use when answering factual inquiries, technical investigations, market research,
 5. Verify citations and check for contradictions or gaps.
 
 ## Required Tools
-- `web_search` / `browser` / `documents_read` / `filesystem`
+- `web_search` / `web_fetch` / `research_extract` / `research_citations` / `file_read` / `file_search`
 
 ## Constraints
 - Never hallucinate citations, quotes, URLs, or statistics.
