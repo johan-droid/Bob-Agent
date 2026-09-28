@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -608,6 +609,8 @@ class Orchestrator:
                 # account and every tool-originated approval was ownerless.
                 "owner_user_id": task.owner_user_id,
             }
+            # Capture rollback checkpoint before execution
+            self._capture_rollback(task_id, input_snapshot)
             result = handler(input_snapshot, context)
             self._verify_and_finish(
                 factory,
@@ -633,6 +636,25 @@ class Orchestrator:
         finally:
             stop.set()
             hb.join(timeout=2)
+
+    def _capture_rollback(self, task_id: str, task_input: dict[str, Any]) -> None:
+        """Capture a rollback checkpoint before task execution.
+
+        Best-effort: never raises, never blocks execution.
+        """
+        try:
+            from agent_system.services.rollback import get_rollback_manager
+
+            workspace = task_input.get("workspace_path", ".")
+            rb = get_rollback_manager()
+            rb.capture_composite(
+                task_id=task_id,
+                operation="task_execution",
+                repo_path=workspace if Path(workspace).exists() else None,
+                file_paths=task_input.get("file_paths", []),
+            )
+        except Exception:
+            pass
 
     def _verify_and_finish(
         self,

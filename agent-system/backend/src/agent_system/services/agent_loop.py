@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_system.services.hooks import HookEvent, get_hook_manager
 from agent_system.services.tool_errors import (
     NeedsApprovalError,
     ToolError,
@@ -170,6 +171,7 @@ def _run_one_call(
         "tool.started",
         {"tool": tool.name, "capability_risk": tool.tier.value, "protocol": call.protocol.value},
     )
+    _fire_hook(HookEvent.BEFORE_TOOL, {"tool": tool.name, "arguments": call.arguments})
     try:
         result = execute_tool(tool, call.arguments, ctx)
     except ToolValidationError as exc:
@@ -221,6 +223,7 @@ def _run_one_call(
         "tool.completed" if ok else "tool.failed",
         {"tool": tool.name, "ok": ok, "capability_risk": tool.tier.value},
     )
+    _fire_hook(HookEvent.AFTER_TOOL, {"tool": tool.name, "ok": ok, "result": result})
     _record_tool_metric(tool.name, tool.tier.value)
     return result
 
@@ -230,6 +233,14 @@ def _record_tool_metric(name: str, risk: str) -> None:
         from agent_system.infra.telemetry import get_metrics
 
         get_metrics().record_tool_call(name, risk)
+    except Exception:
+        pass
+
+
+def _fire_hook(event: HookEvent, data: dict[str, Any]) -> None:
+    """Fire a hook without ever breaking the loop."""
+    try:
+        get_hook_manager().fire_sync(event, data)
     except Exception:
         pass
 

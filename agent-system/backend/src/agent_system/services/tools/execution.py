@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_system.services.permissions import (
     AUTO_APPROVED_RISK,
@@ -72,6 +72,9 @@ from agent_system.services.tools.contract import (
 from agent_system.services.tools.protocol import ToolCall
 from agent_system.services.tools.registry import Tool, ToolContext, ToolKind, ToolRegistry
 from agent_system.services.tools.schemas import validate_arguments
+
+if TYPE_CHECKING:
+    from agent_system.services.jev import ToolCategory
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,55 @@ def authorize_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> Approv
     )
 
 
+def _jev_pre_check(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> None:
+    """Jev deterministic pre-check before the permission gate.
+
+    Jev DENY raises immediately. Jev ASK falls through to the normal
+    approval flow (which will prompt the user). Jev ALLOW continues.
+    """
+    from agent_system.services.jev import JevDecision, get_jev
+
+    category = _categorize_tool(tool.name)
+    jev = get_jev()
+    verdict = jev.evaluate_tool_call(
+        tool_name=tool.name,
+        tool_category=category,
+        arguments=args,
+        scope=tool.scope_for(args),
+        is_destructive=tool.tier is CapabilityRisk.DESTRUCTIVE,
+    )
+    if verdict.decision is JevDecision.DENY:
+        from agent_system.services.tool_errors import ToolError
+
+        raise ToolError(f"Jev denied: {verdict.reason}")
+
+
+def _categorize_tool(tool_name: str) -> ToolCategory:
+    """Map a tool name to a coarse category for Jev."""
+    from agent_system.services.jev import ToolCategory
+
+    name = tool_name.lower()
+    if any(p in name for p in ("read", "list", "search", "grep", "find", "cat", "ls")):
+        return ToolCategory.FILESYSTEM
+    if any(p in name for p in ("write", "edit", "create", "delete", "rm", "mkdir")):
+        return ToolCategory.FILESYSTEM
+    if any(p in name for p in ("shell", "bash", "exec", "run", "command")):
+        return ToolCategory.SHELL
+    if any(p in name for p in ("git", "commit", "push", "pull", "merge", "branch")):
+        return ToolCategory.GIT
+    if any(p in name for p in ("fetch", "http", "request", "download", "upload")):
+        return ToolCategory.NETWORK
+    if any(p in name for p in ("browser", "click", "screenshot", "scrape")):
+        return ToolCategory.BROWSER
+    if any(p in name for p in ("mcp", "server")):
+        return ToolCategory.MCP
+    if any(p in name for p in ("deploy", "publish", "release")):
+        return ToolCategory.DEPLOYMENT
+    if any(p in name for p in ("memory", "remember", "recall")):
+        return ToolCategory.MEMORY
+    return ToolCategory.OTHER
+
+
 def result_succeeded(result: Any) -> bool:
     """Did this capability actually succeed?
 
@@ -230,10 +282,15 @@ def execute_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> dict[str
     propagates :class:`NeedsApprovalError` when a live approval is required.
     Execution is delegated to :func:`_invoke_handler` — the one place a tool
     handler can be entered in this codebase.
+
+    Jev pre-check: a fast deterministic filter runs before the permission
+    gate. Jev DENY short-circuits immediately; Jev ASK falls through to
+    the normal approval flow.
     """
     errors = validate_arguments(tool.name, tool.parameters, args)
     if errors:
         raise ToolValidationError(tool.name, errors)
+    _jev_pre_check(tool, args, ctx)
     authorize_tool(tool, args, ctx)
     return _invoke_handler(tool, args, ctx)
 
