@@ -4,6 +4,17 @@ from __future__ import annotations
 
 import re
 
+_LIVE_DATA_PATTERNS = [
+    r"\bnews\b",
+    r"\bheadlines?\b",
+    r"\blatest\b",
+    r"\bbreaking\b",
+    r"\btrending\b",
+    r"\blive\s+(score|price|data|update|news)",
+    r"\btoday'?s\s+(news|headlines|price)",
+    r"\bcurrent\s+(events|price|news)",
+]
+
 _CHAT_GREETINGS = {
     "hi",
     "hii",
@@ -129,6 +140,12 @@ def classify_request_type(text: str) -> str:
     # 1. Exact or simple greeting/conversational match
     if cleaned in _CHAT_GREETINGS or cleaned_no_punct in _CHAT_GREETINGS:
         return "CHAT"
+
+    # 1b. Live-data requests need tools even when phrased conversationally
+    # ("what is the latest news" would otherwise match ^what\s+(is|are) below).
+    for pattern in _LIVE_DATA_PATTERNS:
+        if re.search(pattern, cleaned):
+            return "RESEARCH_TASK"
 
     # 2. Known conversational patterns
     for pattern in _CHAT_PATTERNS:

@@ -7,12 +7,12 @@ Mirrors the agentctl settings CLI: list/get/set grouped settings backed by
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from agent_system.api.deps import get_authenticator
+from agent_system.api.deps import get_authenticator, get_principal, require_role
 
 settings_router = APIRouter(prefix="/api/v1", dependencies=[Depends(get_authenticator)])
 
@@ -86,8 +86,30 @@ def get_one_setting(request: Request, key: str) -> SettingOut:
 
 
 @settings_router.post("/settings/{key}")
-def update_setting(key: str, body: SettingUpdate, request: Request) -> SettingUpdateOut:
-    """Validate and persist a setting to .env.local."""
+def update_setting(
+    key: str,
+    body: SettingUpdate,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> SettingUpdateOut:
+    """Validate and persist a setting to .env.local.
+
+    Requires ``settings.manage`` (OWNER only). Authentication alone is NOT
+    enough: ``set_setting`` writes any Settings field verbatim, and several of
+    those fields are privilege escalators rather than configuration —
+    ``MCP_SERVERS`` is an argv-spawn primitive, ``AGENT_BOOTSTRAP_SECRET``
+    mints tokens, ``TELEGRAM_ALLOWED_USER_IDS`` self-provisions access, and
+    ``TOOLS_REQUIRE_APPROVAL``/``AUTONOMY_MODE``/``TOOLS_SHELL_MODE`` weaken the
+    approval and sandbox controls. A MEMBER could otherwise reach RCE entirely
+    outside the tool approval gate, the Docker sandbox, and the shell scope.
+    """
+    if not (
+        principal is not None
+        and getattr(principal, "can", None)
+        and principal.can("settings.manage")
+    ):
+        raise HTTPException(status_code=403, detail="settings.manage requires OWNER")
+    require_role(principal, "owner")
     _, _, _, _, set_setting = _settings_service()
     try:
         row = set_setting(key, body.value)

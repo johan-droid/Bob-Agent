@@ -36,21 +36,23 @@ _INTERNAL_ID_PATTERNS = [
 def build_task_ack(goal: str, req_type: str = "TOOL_TASK") -> str:
     """Generate a context-aware initial task acknowledgement based on classification and goal.
 
+    This only ACKNOWLEDGES receipt. It must not claim work has started,
+    findings exist, or a phase is underway — the previous copy asserted
+    "Investigating the issue and debugging" purely from a keyword match, before
+    any planner, model, or tool had run. Real progress is reported from real
+    event-bus signals (see the tool.started / tool.completed handlers).
+
     NOTE: Bob sends Telegram messages with NO parse_mode (formatting-injection
     safe), so keep these plain text + emoji only — never Markdown/HTML markup.
     """
     lower = (goal or "").lower()
-    if "deploy" in lower:
-        return "🚀 On it! Checking deployment details and preparing the task..."
-    if "debug" in lower or "fix" in lower or "bug" in lower:
-        return "🐛 Got it! Investigating the issue and debugging..."
     if req_type == "RESEARCH_TASK" or "search" in lower or "research" in lower or "find" in lower:
-        return "🔎 On it! Gathering information and researching..."
+        return "🔎 Got your request — starting research."
     if req_type == "CODING_TASK" or "code" in lower or "script" in lower or "refactor" in lower:
-        return "💻 Got it! Working on the code..."
+        return "💻 Got your request — starting on the code."
     if req_type == "LONG_RUNNING_TASK" or "batch" in lower or "crawl" in lower:
-        return "⏳ On it! Kicking off the long job — I'll keep you posted..."
-    return "⚡️ Got it! Starting work on your request..."
+        return "⏳ Got your request — this is a longer job; I'll report as it progresses."
+    return "⚡️ Got your request — working on it."
 
 
 def format_model_footer(

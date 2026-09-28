@@ -193,8 +193,7 @@ def _strategic_selection(settings: Any, goal: str) -> Any | None:
             name
             for entry in configured_providers(settings)
             if entry.get("configured")
-            if (name := str(entry.get("key", "")))
-            and name
+            if (name := str(entry.get("key", ""))) and name
         ]
         if not configured:
             return None
@@ -224,9 +223,7 @@ def _strategic_selection(settings: Any, goal: str) -> Any | None:
             role=ModelRole.GENERAL,
             task=classify_task(goal),
             reason=decision.reason,
-            candidates=tuple(
-                (p, m) for p, m in _strategic_chain(decision)
-            ),
+            candidates=tuple((p, m) for p, m in _strategic_chain(decision)),
             is_primary=True,
         )
     except Exception:
@@ -273,7 +270,11 @@ def _chat_id_for_session(factory: Any, session_id: str | None) -> str | None:
 
 
 def _with_memory(
-    settings: Any, goal: str, factory: Any = None, session_id: str | None = None
+    settings: Any,
+    goal: str,
+    factory: Any = None,
+    session_id: str | None = None,
+    owner_user_id: str | None = None,
 ) -> str:
     """Inject recent conversation history and top-k vault notes into the task text."""
     from agent_system.services.tools.paths import scrub as _scrub
@@ -304,7 +305,9 @@ def _with_memory(
     top_k = int(getattr(settings, "memory_recall_top_k", 0) or 0)
     if top_k > 0:
         try:
-            notes = recall_recent(settings, goal, top_k, factory=factory)
+            notes = recall_recent(
+                settings, goal, top_k, factory=factory, owner_user_id=owner_user_id
+            )
             if notes:
                 rendered = "\n".join(
                     f"- {_scrub(str(n['title']))}: {_scrub(str(n['snippet'])[:200])}" for n in notes
@@ -449,6 +452,21 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
     )
     model_id = selection.model_id
     default_model = default_model_id(settings)
+    # Native tool payloads when the selected model is actually tool-capable
+    # (verified per-model in llm_catalog, never inferred from compatibility).
+    # A capable model returns structured calls the loop executes
+    # deterministically; otherwise the loop falls back to fenced-text parsing.
+    tool_registry = build_registry(settings)
+    try:
+        from agent_system.services.llm_catalog import capability_for
+
+        _native_tools: list[dict[str, Any]] | None = (
+            tool_registry.openai_tools()
+            if capability_for(selection.provider, selection.model_id).effective_supports_tools
+            else None
+        )
+    except Exception:
+        _native_tools = None
     # Compact, credential-free status the Telegram presenter renders on its
     # single progress message ("⚙️ Ollama Cloud · <model>").
     emit(
@@ -497,6 +515,7 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
                 checkpoint_payload=_task_checkpoint_payload(
                     selection, session_id=session_id, task_id=task_id, goal=goal
                 ),
+                tools=_native_tools,
             )
             result = invocation.result
             if result is None or not result.ok:
@@ -544,7 +563,6 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
             out["model"] = model_id
         return out
 
-    tool_registry = build_registry(settings)
     # Capabilities resolve permissions through the shared gate: same durable
     # store the API serves, so a user approval unblocks the waiting call.
     from agent_system.services.permissions import PermissionGate
@@ -558,13 +576,20 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
         agent_run_id=run_id,
         agent_type=agent_type,
         workspace_id=context.get("workspace_id"),
+        owner_user_id=context.get("owner_user_id"),
         gate=gate,
         emit=emit,
     )
     loop = run_tool_loop(
         invoke=invoke,
         system=_SYSTEM_PROMPT,
-        task=_with_memory(settings, goal, factory=factory, session_id=session_id),
+        task=_with_memory(
+            settings,
+            goal,
+            factory=factory,
+            session_id=session_id,
+            owner_user_id=context.get("owner_user_id"),
+        ),
         registry=tool_registry,
         ctx=tool_ctx,
         emit=emit,
@@ -578,7 +603,13 @@ def llm_react_handler(task_input: dict[str, Any], context: dict[str, Any]) -> di
     note_id = None
     if session_id and task_id and loop.stopped == "done":
         note_id = remember_outcome(
-            settings, session_id, task_id, title=goal[:80], output=loop.output, factory=factory
+            settings,
+            session_id,
+            task_id,
+            title=goal[:80],
+            output=loop.output,
+            factory=factory,
+            owner_user_id=context.get("owner_user_id"),
         )
     return {
         "agent": run_id or "unknown",

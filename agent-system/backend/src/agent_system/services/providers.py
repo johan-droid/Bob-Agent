@@ -161,10 +161,22 @@ PROVIDERS: dict[str, ProviderSpec] = {
         key="nim",
         label="NVIDIA NIM",
         base_url="https://integrate.api.nvidia.com/v1",
-        default_model="meta/llama-3.3-70b-instruct",
+        default_model="openai/gpt-oss-20b",
         auth="bearer",
         description="Coding/reasoning models via NVIDIA NIM (OpenAI-compatible).",
-        models=("meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1"),
+        # Verified live 2026-09-28 against /v1/models + a real tool_call probe
+        # on this account's key: every id below answers 200 AND returns a
+        # structured tool call. Stale ids (llama-3.3-70b, deepseek-r1) were
+        # dropped — they no longer exist on the endpoint.
+        # Free tier: 40 req/min per model on an nvapi- personal key.
+        free_tier=True,
+        models=(
+            "openai/gpt-oss-20b",
+            "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "meta/muse-glimmer-30b",
+        ),
     ),
     "ollama_cloud": ProviderSpec(
         key="ollama_cloud",
@@ -389,7 +401,7 @@ def _usage(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "input_tokens": int(usage.get("prompt_tokens") or 0),
         "output_tokens": int(usage.get("completion_tokens") or 0),
-        "cached_tokens": int(usage.get("prompt_tokens_details", {}).get("cached_tokens") or 0),
+        "cached_tokens": int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
     }
 
 

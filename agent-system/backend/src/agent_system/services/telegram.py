@@ -67,6 +67,37 @@ from agent_system.services.permissions import (
 
 _logger = logging.getLogger(__name__)
 
+
+def _redact_update(update: dict[str, Any]) -> dict[str, Any]:
+    """Copy of an inbound update with secret-shaped strings redacted.
+
+    The update ledger (`telegram_updates.payload_json`) is the raw Telegram
+    update, and the `/setup` flow collects SSH private keys and provider API
+    keys *in the message text*. Persisting that verbatim wrote every
+    credential ever pasted to the bot into SQLite and every backup, unredacted
+    and forever — defeating the encrypted vault entirely. Redact on the way in
+    so the durable copy never holds the secret; the in-memory copy used to
+    process the message is untouched.
+    """
+    from agent_system.services.memory import scrub_text
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, str):
+            return scrub_text(node)
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        return node
+
+    try:
+        redacted = _walk(update)
+    except Exception:
+        # Redaction must never drop an update; fall back to metadata only.
+        return {"redaction": "failed", "update_id": update.get("update_id")}
+    return redacted if isinstance(redacted, dict) else {"redaction": "failed"}
+
+
 _API_BASE = "https://api.telegram.org/bot{token}"
 # Must exceed the getUpdates long-poll `timeout` (30s) or every poll idles
 # into an httpx.ReadTimeout.
@@ -543,7 +574,7 @@ class TelegramService:
                 update_id=key,
                 account_id=account_id,
                 chat_id=str(from_chat) if from_chat else None,
-                payload_json=update,
+                payload_json=_redact_update(update),
             )
             db.add(row)
             try:
@@ -843,7 +874,7 @@ class TelegramService:
                     "Credential received and securely stored.",
                     f"Name: {session.name}",
                     "Type: SSH",
-                    "Validation: successful",
+                    "Note: stored, not yet verified against the host.",
                 ]
                 await self._send(chat_id, "\n".join(lines))
                 return True
@@ -860,7 +891,7 @@ class TelegramService:
                 "Credential received and securely stored.",
                 f"Name: {session.name}",
                 f"Type: {session.provider.upper()}",
-                "Validation: successful",
+                "Note: stored, not yet verified against the provider.",
             ]
             await self._send(chat_id, "\n".join(lines))
             return True
@@ -908,7 +939,14 @@ class TelegramService:
         if not cred:
             await self._send(chat_id, f"Connection '{ref}' not found or invalid.")
             return
-        await self._send(chat_id, f"Connection '{ref}' is healthy and validated.")
+        # Decryption succeeded, which proves the blob is intact under the
+        # current vault key. It does NOT prove the remote endpoint accepts
+        # these credentials, so say only what was actually checked.
+        await self._send(
+            chat_id,
+            f"Connection '{ref}' is stored and decrypts correctly. "
+            "Live reachability was not tested.",
+        )
 
     async def _cmd_rotate(self, principal: Principal, chat_id: int, *args: str) -> None:
         if len(args) < 1:

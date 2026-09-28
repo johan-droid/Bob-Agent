@@ -54,18 +54,33 @@ def _derive_master_key_bytes(raw_secret: str) -> bytes:
 
 
 def get_master_key_bytes() -> bytes:
-    """Resolve 256-bit master encryption key from Settings."""
+    """Resolve 256-bit master encryption key from Settings.
+
+    Refuses to derive the vault key from a *publicly known* secret. The
+    key-reuse fallback (auth secret doubles as vault KEK) is acceptable only
+    when that secret is genuinely private: `api_session_secret` ships with the
+    value ``dev-only-secret-change-me``, so a deployment that never set
+    ``BOB_MASTER_ENCRYPTION_KEY`` encrypted every stored SSH key and provider
+    token under a key in the public source, and a database dump was
+    decryptable by anyone.
+    """
+    from agent_system.config import DEFAULT_SECRET
+
     settings = get_settings()
     dedicated = (getattr(settings, "bob_master_encryption_key", "") or "").strip()
     if dedicated:
         return _derive_master_key_bytes(dedicated)
-    # Key-reuse fallback (auth secret doubles as vault KEK). Warn loudly;
-    # operators should set BOB_MASTER_ENCRYPTION_KEY to separate them.
+    master_secret = (settings.api_session_secret or settings.agent_bootstrap_secret or "").strip()
+    if master_secret in {"", DEFAULT_SECRET, "change-me-to-a-long-random-string"}:
+        raise RuntimeError(
+            "Refusing to derive the credential-vault key from a default/empty secret: "
+            "every stored credential would be decryptable with a public key. "
+            "Set BOB_MASTER_ENCRYPTION_KEY to a long random value."
+        )
     logger.warning(
         "vault_key_reuse",
         extra={"reason": "BOB_MASTER_ENCRYPTION_KEY unset; deriving vault key from API secret"},
     )
-    master_secret = settings.api_session_secret or settings.agent_bootstrap_secret
     return _derive_master_key_bytes(master_secret)
 
 

@@ -11,6 +11,9 @@ Verifies:
 8. E2E flow: setup -> CredentialStore -> SSH/tool execution -> zero secret leak.
 """
 
+from typing import Any
+from unittest.mock import patch
+
 import pytest
 
 from agent_system.config import Settings
@@ -140,7 +143,10 @@ async def test_full_chat_to_tool_e2e_zero_leakage_flow(db_factory):
 
     # 1. Setup SSH connection via Telegram chat flow
     await tg_svc._dispatch_command(principal, chat_id, "/setup ssh vps")
-    await tg_svc._handle_active_setup_step(principal, chat_id, "vps.mycompany.org")
+    # RFC 6761 reserves .invalid: it can never resolve, so this test performs no
+    # real DNS/TCP to a third party. It previously dialled mycompany.org, a
+    # domain a stranger owns, from the credential-leakage test.
+    await tg_svc._handle_active_setup_step(principal, chat_id, "vps.example.invalid")
     await tg_svc._handle_active_setup_step(principal, chat_id, "ubuntu")
     secret_pem = (
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
@@ -149,11 +155,63 @@ async def test_full_chat_to_tool_e2e_zero_leakage_flow(db_factory):
     )
     await tg_svc._handle_active_setup_step(principal, chat_id, secret_pem)
 
-    # 2. Tool resolves credential reference without exposing secret
-    vault = CredentialStore(db_factory)
-    tool_res = execute_ssh_command("ssh:vps", "df -h", user_id="usr_alice", credential_store=vault)
-    assert tool_res["ok"] is True
-    assert "df -h" in tool_res["stdout"]
+    # 2. Tool resolves credential reference without exposing secret.
+    # Transport is mocked: the assertion under test is "the vault resolves
+    # ssh:vps and the PEM never escapes", which needs a working client, not a
+    # live SSH server. This previously dialled a real third-party host to get
+    # ok=True, and failed whenever that host was unreachable.
+    class _FakeStream:
+        """Enough of a paramiko ChannelFile for ssh_service's reads."""
+
+        def __init__(self, data: bytes, exit_code: int = 0) -> None:
+            self._data = data
+            self.channel = self
+
+        def read(self) -> bytes:
+            return self._data
+
+        def recv_exit_status(self) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    class _FakeTransport:
+        @staticmethod
+        def is_active() -> bool:
+            return True
+
+        @staticmethod
+        def get_remote_server_key() -> str:
+            return "FAKE-HOST-KEY"
+
+    class _FakeClient:
+        def set_missing_host_key_policy(self, policy: Any) -> None:
+            return None
+
+        def get_transport(self) -> Any:
+            return _FakeTransport()
+
+        def connect(self, *a: Any, **kw: Any) -> None:
+            return None
+
+        def exec_command(self, cmd: str, *a: Any, **kw: Any) -> Any:
+            self._cmd = cmd
+            return (_FakeStream(b""), _FakeStream(b"df -h output\n"), _FakeStream(b""))
+
+        def close(self) -> None:
+            return None
+
+    from tests.unit.test_ssh_service import fake_transport_patch
+
+    sock, transport = fake_transport_patch()
+    with sock, transport, patch("paramiko.SSHClient", return_value=_FakeClient()):
+        vault = CredentialStore(db_factory)
+        tool_res = execute_ssh_command(
+            "ssh:vps", "df -h", user_id="usr_alice", credential_store=vault
+        )
+    assert tool_res["ok"] is True, tool_res
+    assert "df -h" in tool_res["stdout"] or "Filesystem" in tool_res["stdout"]
 
     # 3. Verify zero leakage in sanitized context
     cleaned_res = sanitize_context(tool_res)

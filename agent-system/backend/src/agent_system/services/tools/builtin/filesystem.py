@@ -25,6 +25,7 @@ from agent_system.services.tools.paths import (
     jailed,
     max_file_bytes,
     relative_label,
+    scrub,
 )
 from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry, _str_param
 
@@ -115,16 +116,37 @@ def _file_list(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
 
 def _iter_files(root: Path, *, pattern: str, limit: int) -> list[Path]:
+    """Enumerate matching files under ``root``, re-checking every hit.
+
+    ``jailed()`` validates only the *search root*, so the walk itself has to
+    re-assert containment: ``Path.rglob`` descends into symlinked directories
+    and ``is_file()`` follows file symlinks, which let a planted link read
+    outside the allowed roots. The denylist is re-checked per file for the
+    same reason ``jailed()`` is applied there — otherwise a search sweeps up
+    ``.env`` / ``id_rsa`` that a direct read correctly refuses.
+    """
+    from agent_system.services.secrets import is_secret_path
+    from agent_system.services.tools.paths import is_within
+
     matcher = re.compile(pattern)
     found: list[Path] = []
     for path in root.rglob("*"):
         if any(part in _IGNORED_DIRS for part in path.parts):
             continue
-        if not path.is_file():
+        try:
+            # resolve() collapses every symlink on the way to the real file.
+            resolved = path.resolve()
+        except OSError:
             continue
-        if not matcher.search(path.name):
+        if not is_within(resolved, root):
+            continue  # symlink escaped the jail
+        if is_secret_path(resolved.name) or is_secret_path(str(resolved)):
+            continue  # same denylist jailed() enforces on a direct read
+        if not resolved.is_file():
             continue
-        found.append(path)
+        if not matcher.search(resolved.name):
+            continue
+        found.append(resolved)
         if len(found) >= limit:
             break
     return found
@@ -155,7 +177,9 @@ def _file_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                     {
                         "path": relative_label(path),
                         "line": number,
-                        "text": line.strip()[:300],
+                        # Same scrubber read_text/grep apply: a grep hit on
+                        # "API_KEY=" must not launder the value to the model.
+                        "text": scrub(line.strip())[:300],
                     }
                 )
                 if len(matches) >= max_results:

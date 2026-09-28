@@ -386,3 +386,50 @@ class TestEndToEndMatrix:
         res = router.invoke(factory, "local-small", "hi", timeout=5)
         assert res.ok
         assert adapter.timeout == 120.0
+
+
+class TestUncataloguedDefaultModelResolvesToDefaultProvider:
+    """An operator-configured DEFAULT_MODEL absent from the catalog must still
+    route: the catalog is a UI listing, not a routing gate. Regression guard for
+    ``no adapter registered for provider 'unknown'`` on a real OpenRouter id."""
+
+    def test_configured_uncatalogued_default_model_routes(
+        self, env: tuple[object, object, EventBus]
+    ) -> None:
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        model = "nvidia/nemotron-3-super-120b-a12b:free"
+        router = ModelRouter(
+            bus,
+            pricing,
+            registry,
+            default_provider="openrouter",
+            default_model=model,
+        )
+        adapter = EchoProvider()
+        router.register_adapter("openrouter", adapter)
+
+        assert router.pricing.get(model) is None  # genuinely uncatalogued
+        assert router._resolve_provider(model) == "openrouter"
+        assert router._adapter_for(model) is adapter
+
+        res = router.invoke(factory, model, "hi")
+        assert res.ok, res.error
+
+    def test_invented_model_id_still_fails_loudly(
+        self, env: tuple[object, object, EventBus]
+    ) -> None:
+        """Not the configured default -> must not silently bill the default provider."""
+        factory, bus, _ = env
+        pricing, registry = _router_with_local_provider()
+        router = ModelRouter(
+            bus,
+            pricing,
+            registry,
+            default_provider="openrouter",
+            default_model="catalogued/model",
+        )
+        router.register_adapter("openrouter", EchoProvider())
+
+        assert router._resolve_provider("made-up/nonsense") == "unknown"
+        assert not router.invoke(factory, "made-up/nonsense", "hi").ok

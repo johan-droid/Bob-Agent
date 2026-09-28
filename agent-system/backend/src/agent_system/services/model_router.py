@@ -428,7 +428,17 @@ class ModelRouter:
         if info is not None:
             return info.provider
         with self._lock:
-            return self._provider_index.get(model_id, "unknown")
+            routed = self._provider_index.get(model_id)
+        if routed is not None:
+            return routed
+        # ponytail: an operator-configured DEFAULT_MODEL that OpenRouter has not
+        # catalogued yet still routes to DEFAULT_PROVIDER — the catalog is a UI
+        # listing, not a routing gate, and free models appear continuously. Scoped
+        # to the configured default so an *invented* model id still fails loudly
+        # rather than silently charging the default provider.
+        if model_id == self.default_model and self.default_provider:
+            return self.default_provider
+        return "unknown"
 
     def _adapter_for(self, model_id: str) -> ProviderAdapter | None:
         provider = self._resolve_provider(model_id)

@@ -75,6 +75,29 @@ class Outcome(StrEnum):
     WAIT = "wait"
 
 
+class AutonomyMode(StrEnum):
+    """How much the agent may do without asking a human.
+
+    The mode is a *gate on risk*, not a separate authorization path: it only
+    decides which decisions :func:`plan_permission` auto-approves. Default-deny
+    scopes and destructive capabilities are refused in every mode except
+    ``UNRESTRICTED`` (which still cannot widen ``DANGEROUS_SCOPES``).
+    """
+
+    #: Ask per the capability's own tier and ``tools_require_approval``.
+    BUILD = "build"
+    #: Read-only: any write/execute capability is refused, not deferred.
+    PLAN = "plan"
+    #: Low risk runs unattended; medium risk runs but is announced; high risk asks.
+    AUTO = "auto"
+    #: Ask nothing but keep every default-deny refusal (admin automation).
+    UNRESTRICTED = "unrestricted"
+
+
+#: Risk levels ``AUTO`` may approve without a human. HIGH/CRITICAL always ask.
+AUTO_APPROVED_RISK = frozenset({Risk.LOW, Risk.MEDIUM})
+
+
 class CapabilityRisk(StrEnum):
     """Risk tier a capability declares about itself (canonical mapping below)."""
 
@@ -124,6 +147,22 @@ RISK_TTL_MINUTES = {
     Risk.HIGH: 15,
     Risk.CRITICAL: 5,
 }
+
+
+def resolve_autonomy_mode(
+    settings: Any = None, override: str | AutonomyMode | None = None
+) -> AutonomyMode:
+    """The active autonomy mode.
+
+    An explicit ``override`` (a Telegram ``/mode`` command, a task input) wins
+    over the configured default; an unknown value falls back to ``BUILD`` so a
+    typo never silently widens autonomy.
+    """
+    raw = override if override is not None else getattr(settings, "autonomy_mode", None)
+    try:
+        return AutonomyMode(str(raw or "").strip().lower())
+    except ValueError:
+        return AutonomyMode.BUILD
 
 
 def classify_risk(capability_risk: CapabilityRisk | str, scope: str) -> Risk:
@@ -940,12 +979,14 @@ def _emit_decision(ctx: Any, decision: PermissionDecision) -> None:
 
 
 __all__ = [
+    "AUTO_APPROVED_RISK",
     "CAPABILITY_RISK_TO_RISK",
     "DANGEROUS_SCOPES",
     "RISK_TTL_MINUTES",
     "ApprovalRecord",
     "ApprovalRequest",
     "ApprovalStore",
+    "AutonomyMode",
     "CapabilityRisk",
     "DbApprovalStore",
     "Decision",
@@ -959,4 +1000,5 @@ __all__ = [
     "gate_for",
     "is_dangerous_scope",
     "require_capability",
+    "resolve_autonomy_mode",
 ]

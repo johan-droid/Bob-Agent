@@ -141,6 +141,24 @@ class SSHService:
 
         fp = self.get_host_fingerprint(hostname, port, timeout_sec=float(min(timeout_seconds, 0.5)))
         host_verified = True
+        if verify_host and fp is None:
+            # Fail closed. get_host_fingerprint documents that a None result
+            # means "unverifiable" and that callers must abort, but this guard
+            # used to read `if verify_host and fp:` — so a failed probe
+            # (transient network, or a MITM that swallows it) skipped
+            # verification entirely and ran the command with host_verified=True.
+            return SSHExecutionResult(
+                connection_name=connection_name,
+                exit_code=1,
+                stdout="",
+                stderr="",
+                host_verified=False,
+                error=(
+                    f"Host key could not be verified for {hostname}:{port}: the "
+                    "fingerprint probe failed, so the host is unverifiable. "
+                    "Refusing to run the command."
+                ),
+            )
         if verify_host and fp:
             if not self.is_host_trusted(hostname, port, fp.fingerprint_sha256):
                 host_verified = False

@@ -42,6 +42,18 @@ worker.py (RQ) or services/cloud.drive_session (in-process)
 model message
   services/tools/protocol.py   provider-native tool_calls  OR  ```tool:name fence
                                both produce services.tools.protocol.ToolCall
+
+Tool schemas are *sent* natively when the model is tool-capable, and *parsed* from either
+native `tool_calls` or the fenced protocol. `ToolRegistry.openai_tools()` renders the 63
+first-party capabilities as OpenAI `{"type":"function",…}` payloads; `agents/react_agent.py`
+passes them as `tools=` only when
+`llm_catalog.capability_for(provider, model).effective_supports_tools` is true, and
+`inference_runtime._call_once` forwards them on BOTH the streaming and non-streaming paths.
+Capabilities are never inferred from OpenAI-compatibility — a model absent from
+`DEFAULT_CATALOG` resolves to the conservative no-tools default, so an operator who
+configures an uncatalogued model silently loses native tool calling until it is registered
+in `llm_catalog`. Every tool then passes the same `plan_permission` gate, sandbox and scope
+rules as a text-parsed call.
   services/tools/execution.py  validate arguments (schemas.py)
                                authorize (permissions.require_capability)
                                run the handler

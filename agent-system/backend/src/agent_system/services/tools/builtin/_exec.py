@@ -136,7 +136,12 @@ def _run_local(workdir: str, command: str, timeout: int) -> dict[str, Any]:
 
 
 def read_text(path: Path, ctx: Any, *, limit: int | None = None) -> str:
-    """Read a jailed text file with the size cap applied."""
+    """Read a jailed text file with the size cap applied.
+
+    Content is scrubbed here — this is the single chokepoint for file_read /
+    read_source / file_diff, and raw bytes were reaching the model prompt
+    unredacted (shell and git already scrubbed their output).
+    """
     cap = max_file_bytes(ctx.settings)
     try:
         data = path.read_bytes()
@@ -146,7 +151,7 @@ def read_text(path: Path, ctx: Any, *, limit: int | None = None) -> str:
         raise ToolError(f"cannot read {path.name}: {exc}") from exc
     if len(data) > cap:
         raise ToolError(f"file exceeds max_file_size_mb ({len(data)} bytes)")
-    text = data.decode("utf-8", errors="replace")
+    text = scrub(data.decode("utf-8", errors="replace"))
     if limit is not None:
         return "\n".join(text.splitlines()[:limit])
     return text

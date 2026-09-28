@@ -30,7 +30,13 @@ def _memory_recall(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     except Exception as exc:
         raise ToolError(f"memory unavailable: {exc}") from exc
     top_k = int(args.get("top_k") or 3)
-    notes = recall_recent(ctx.settings, query=query, limit=top_k, factory=ctx.factory)
+    notes = recall_recent(
+        ctx.settings,
+        query=query,
+        limit=top_k,
+        factory=ctx.factory,
+        owner_user_id=ctx.owner_user_id,
+    )
     return {"query": query, "count": len(notes), "memories": notes}
 
 
@@ -49,6 +55,7 @@ def _memory_remember(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         task_id=ctx.task_id,
         tags=["agent-tool"],
         factory=ctx.factory,
+        owner_user_id=ctx.owner_user_id,
     )
     return {"memory_id": record_id, "stored": True}
 

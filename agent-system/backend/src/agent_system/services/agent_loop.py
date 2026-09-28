@@ -28,7 +28,7 @@ from agent_system.services.tool_errors import (
     ToolError,
     ToolValidationError,
 )
-from agent_system.services.tools.execution import execute_tool
+from agent_system.services.tools.execution import execute_tool, result_succeeded
 from agent_system.services.tools.protocol import (
     TOOL_FENCE_RE,
     ToolCall,
@@ -215,7 +215,7 @@ def _run_one_call(
             "tool": tool.name,
             "detail": f"{type(exc).__name__}: {exc}",
         }
-    ok = "error" not in result
+    ok = result_succeeded(result)
     _safe_emit(
         emit,
         "tool.completed" if ok else "tool.failed",
@@ -333,8 +333,22 @@ def run_tool_loop(
                 },
             )
         transcript += "\n\nContinue reasoning with the results above. Answer when done."
+    # Out of iterations on a turn that was pure tool calls: last_text is empty
+    # and the caller would render a blank reply. Spend one more call demanding
+    # the final prose answer (no further tools) so the user gets something.
+    if not last_text.strip():
+        try:
+            final = invoke(
+                transcript + "\n\nYou have no more tool calls available. "
+                "Using only the results above, give the user your final answer now. "
+                "Do not request or attempt any more tools."
+            )
+            last_text = str(final.get("output") or "")
+        except Exception:
+            pass
     return LoopResult(
-        output=strip_tool_calls(last_text),
+        output=strip_tool_calls(last_text)
+        or f"Stopped after {max_iters} tool iterations without a final answer.",
         tool_calls=tool_calls,
         iterations=max_iters,
         usage=usage,

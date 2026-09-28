@@ -33,6 +33,77 @@ def _migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Pat
     clear_settings_cache()
 
 
+#: Provider/Telegram credentials the suite must never inherit from
+#: ``backend/.env.local``. Settings reads that file by default, so without this
+#: every TestClient lifespan long-polls the developer's real bot and every
+#: contract test can make a billable LLM call. Emptying them keeps the code
+#: paths (key-missing branches) intact while guaranteeing no real call.
+_REAL_CREDENTIAL_VARS = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_WEBHOOK_SECRET",
+    "TELEGRAM_WEBHOOK_URL",
+    "OPENROUTER_API_KEY",
+    "NIM_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "TOGETHER_API_KEY",
+    "MISTRAL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "HUGGINGFACE_API_KEY",
+    "TOKENROUTER_API_KEY",
+    "OPENCODE_API_KEY",
+    "OLLAMA_CLOUD_API_KEY",
+    "OPENCONNECTOR_API_KEY",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_credentials() -> Iterator[None]:
+    """Strip real credentials from the environment for the whole session.
+
+    ``Settings`` loads ``.env``/``.env.local`` (config.py:24) and
+    ``TestClient(app)`` runs the app lifespan, which starts the Telegram
+    poller. That produced 288 real outbound connections per suite run —
+    api.telegram.org, api.openrouter.ai, api.github.com — using the
+    developer's live keys, racing a locally running bot (HTTP 409) and
+    consuming its pending updates.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        for name in _REAL_CREDENTIAL_VARS:
+            patch.setenv(name, "")
+        # Planner/verifier LLM paths would otherwise call a real model.
+        patch.setenv("PLANNER_USE_LLM", "false")
+        patch.setenv("VERIFIER_USE_LLM_JUDGE", "false")
+        patch.setenv("DEFAULT_PROVIDER", "echo")
+        yield
+    clear_settings_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_singletons() -> Iterator[None]:
+    """Reset process-wide singletons around every test.
+
+    ``_policy_engine``, ``INFERENCE_LOCKS``, ``INFERENCE_HEALTH`` and
+    ``GLOBAL_HEALTH_TRACKER`` are module-level and outlive a test. A rate
+    limit recorded by one test silently removed a provider from the candidate
+    chain (``model_router._is_routable``) for every later test in the run.
+    """
+    from agent_system.services.inference_runtime import INFERENCE_HEALTH, INFERENCE_LOCKS
+    from agent_system.services.policy import reset_policy_engine
+
+    def _reset() -> None:
+        INFERENCE_LOCKS.clear_all()
+        INFERENCE_HEALTH.reset()
+        reset_policy_engine()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture(autouse=True)
 def _fresh_settings(
     _migrated_database: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -14,6 +14,29 @@ from pathlib import Path
 from typing import Any
 
 
+def _note_owner(note: Path) -> str:
+    """Read ``owner_user_id`` from a vault note's YAML frontmatter.
+
+    Returns "" when absent or unparseable, so callers fail closed.
+    """
+    try:
+        head = note.read_text(encoding="utf-8", errors="replace")[:2048]
+    except OSError:
+        return ""
+    if not head.startswith("---"):
+        return ""
+    try:
+        import yaml
+
+        raw = head.split("---", 2)[1]
+        data = yaml.safe_load(raw)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("owner_user_id") or "")
+
+
 def _store(settings: Any) -> Any:
     from agent_system.services.memory import ObsidianVaultWriter, build_memory_store
 
@@ -47,6 +70,7 @@ def remember_fact(
     task_id: str | None = None,
     tags: list[str] | None = None,
     factory: Any = None,
+    owner_user_id: str | None = None,
 ) -> str:
     """Store one fact; returns the memory id (raises on failure)."""
     from agent_system.services.memory import DbNoteStore, MemoryLayer, NoteMeta
@@ -59,6 +83,7 @@ def remember_fact(
                 source="agent",
                 session_id=session_id,
                 task_id=task_id,
+                owner_user_id=owner_user_id,
                 tags=tags or ["agent"],
             ),
             body=fact,
@@ -70,6 +95,7 @@ def remember_fact(
         source="agent",
         session_id=session_id,
         task_id=task_id,
+        owner_user_id=owner_user_id,
         tags=tags or ["agent"],
     )
     return str(record.memory_id)
@@ -82,6 +108,7 @@ def remember_outcome(
     title: str,
     output: str,
     factory: Any = None,
+    owner_user_id: str | None = None,
 ) -> str | None:
     """Persist a task outcome note. Never raises; None when disabled/failed."""
     try:
@@ -98,6 +125,7 @@ def remember_outcome(
             task_id=task_id,
             tags=["task-outcome"],
             factory=factory,
+            owner_user_id=owner_user_id,
         )
     except Exception:
         return None
@@ -125,8 +153,7 @@ def recall_recent(
 
     vault = Path(str(getattr(settings, "vault_path", "vault"))).expanduser()
     if not vault.is_dir():
-        return []
-    # Scope to the memory layers when present — the vault root also holds
+        return []  # Scope to the memory layers when present — the vault root also holds
     # spec mirrors (Agent_System/), SOUL notes, and dated journals that
     # must not be injected as "memories". Fall back to the root only when
     # no memory/ dir exists yet (fresh vault).
@@ -137,6 +164,12 @@ def recall_recent(
     for note in scan_root.rglob("*.md"):
         try:
             if not note.is_file():
+                continue
+            # Per-user isolation. This path previously walked the whole vault
+            # with no owner filter, so every user's notes were injected into
+            # every user's prompt. When an owner is requested we fail closed:
+            # a note with no recorded owner is not that user's memory.
+            if owner_user_id and _note_owner(note) != owner_user_id:
                 continue
             text = note.read_text(encoding="utf-8", errors="replace")
         except OSError:

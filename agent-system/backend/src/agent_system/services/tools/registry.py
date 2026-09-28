@@ -62,6 +62,10 @@ class ToolContext:
     agent_run_id: str | None = None
     agent_type: str | None = None
     workspace_id: str | None = None
+    # Owning user for per-user isolation (credentials, memory, approvals).
+    # Must be set by the caller; capabilities that touch user-owned data fail
+    # closed when it is None rather than falling back to a shared account.
+    owner_user_id: str | None = None
     gate: Any = None
     emit: Callable[[str, dict[str, Any]], None] | None = None
 
@@ -199,6 +203,25 @@ class ToolRegistry:
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self.tools()]
+
+    def openai_tools(self) -> list[dict[str, Any]]:
+        """Registry as native function-calling payloads (OpenAI chat format).
+
+        Passed as ``tools=`` so a capable model returns structured calls the
+        loop executes deterministically — no prompt-format compliance needed.
+        Same permission gates apply downstream as for text-parsed calls.
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in self.tools()
+        ]
 
     def prompt_block(self) -> str:
         """Compact capability catalog rendered into the ReAct system prompt."""

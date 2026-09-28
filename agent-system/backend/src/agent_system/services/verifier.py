@@ -113,6 +113,17 @@ class Verifier:
                 f"agent loop ended in error: {output}",
                 mode="deterministic",
             )
+        # Exhausting the iteration budget means the loop was cut off mid
+        # reasoning. There is no deterministic artifact, so this previously
+        # fell through to the lenient default and the truncated text was
+        # delivered to the user as a finished answer.
+        if result.get("stopped") == "max_iters":
+            return VerificationResult(
+                False,
+                "agent loop hit the iteration limit before producing a final answer "
+                f"({result.get('iterations')} iterations); output is incomplete",
+                mode="deterministic",
+            )
         if result.get("verified") is False:
             return VerificationResult(
                 False,

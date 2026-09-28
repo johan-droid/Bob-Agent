@@ -198,6 +198,24 @@ def enforce_owner_row(row: Any, principal: Any, kind: str = "object") -> Any:
     return row
 
 
+def require_role(principal: Any, *allowed: str) -> None:
+    """403 unless the principal's role is in ``allowed``.
+
+    Roles are compared on ``role.value`` so both a ``Role`` member and a raw
+    string work. A principal without a role is rejected: a missing role must
+    not read as elevated. Local mode (single operator) has no role and callers
+    should not use this helper there.
+    """
+    from fastapi import HTTPException
+
+    role = getattr(principal, "role", None)
+    name = str(getattr(role, "value", role) or "").strip().lower()
+    if not name or name not in {r.strip().lower() for r in allowed}:
+        raise HTTPException(
+            status_code=403, detail=f"this action requires one of: {', '.join(allowed)}"
+        )
+
+
 def enforce_transitive_task(db: Any, task_id: str | None, principal: Any) -> None:
     """404 unless the principal owns the task (and its session)."""
     if task_id is None or not _is_telegram(principal):

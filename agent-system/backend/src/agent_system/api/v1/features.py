@@ -20,6 +20,7 @@ from agent_system.api.deps import (
     get_authenticator,
     get_principal,
     owner_id,
+    require_role,
 )
 from agent_system.config import get_settings
 from agent_system.domain import ids
@@ -621,8 +622,17 @@ def autopilot_kill(request: Request) -> dict[str, Any]:
 
 
 @authenticated_features.post("/autopilot/reset")
-def autopilot_reset(request: Request) -> dict[str, Any]:
-    """Re-arm after a kill; the service stays disabled until enabled()."""
+def autopilot_reset(
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
+    """Re-arm after a kill; the service stays disabled until enabled().
+
+    `kill` is deliberately left open to any authenticated caller — it is a
+    fail-safe brake. `reset` re-arms autonomous action against shared
+    instance state, so it is OWNER/ADMIN only.
+    """
+    require_role(principal, "owner", "admin")
     svc: Any = getattr(request.app.state, "autopilot", None)
     if svc is not None:
         svc.reset()
@@ -692,14 +702,19 @@ def list_qa_reports(
 
 
 @authenticated_features.get("/artifacts/{artifact_id}")
-def get_artifact(artifact_id: str, request: Request) -> dict[str, Any]:
+def get_artifact(
+    artifact_id: str,
+    request: Request,
+    principal: Annotated[Any, Depends(get_principal)],
+) -> dict[str, Any]:
     from agent_system.infra.models import Artifact
 
     factory = request.app.state.session_factory
     with session_scope(factory) as db:
-        row = db.get(Artifact, artifact_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="artifact not found")
+        # Ownership enforced like every other row endpoint: this returns a
+        # filesystem path, so a missing check let any authenticated user read
+        # another user's artifact metadata across sessions.
+        row = enforce_owner_row(db.get(Artifact, artifact_id), principal, "artifact")
         return {
             "id": row.id,
             "task_id": row.task_id,

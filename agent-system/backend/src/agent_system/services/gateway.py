@@ -35,6 +35,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 from agent_system.config import Settings
@@ -104,10 +105,17 @@ class GatewayRelay:
     message.
     """
 
-    def __init__(self, factory: Any, outbox: Any, bus: EventBus) -> None:
+    def __init__(
+        self,
+        factory: Any,
+        outbox: Any,
+        bus: EventBus,
+        on_task_failed: Callable[[Event], None] | None = None,
+    ) -> None:
         self._factory = factory
         self._outbox = outbox
         self._bus = bus
+        self._on_task_failed = on_task_failed
         self._active = False
         self._pending: deque[Event] = deque()
 
@@ -265,6 +273,8 @@ class GatewayRelay:
             task_id=task_id,
             event_id=event.event_id,
         )
+        if event.type == "task.failed" and self._on_task_failed is not None:
+            self._on_task_failed(event)
         return True
 
     def _relay_approval(self, event: Event) -> bool:
@@ -366,10 +376,20 @@ class GatewayExecutor:
         self._bus = bus
         self._in_flight: set[int] = set()
         self._in_flight_lock = threading.Lock()
+        # True once a task.failed has been relayed for the drive in progress.
+        # The drive's own except-branch and the relay used to send the same
+        # generic apology independently, producing duplicate Telegram replies.
+        # The relay is the single sender; the except branch stays silent.
+        self._drive_reported_failure: bool = False
         from agent_system.services.outbox import Outbox
 
         self._outbox = Outbox(factory, settings)
-        self._relay = GatewayRelay(factory, self._outbox, bus)
+        self._relay = GatewayRelay(
+            factory, self._outbox, bus, on_task_failed=self._mark_drive_failure_reported
+        )
+
+    def _mark_drive_failure_reported(self, event: Event) -> None:
+        self._drive_reported_failure = True
 
     @property
     def relay(self) -> GatewayRelay:
@@ -570,6 +590,9 @@ class GatewayExecutor:
         from agent_system.services.cloud import drive_session
         from agent_system.services.telegram_presenter import TelegramProgressPresenter
 
+        # Reset per drive: the relay sets this when it delivers a task.failed
+        # for this run, and the except branch below then stays silent.
+        self._drive_reported_failure = False
         presenter = TelegramProgressPresenter(
             self._factory,
             self._outbox,
@@ -603,6 +626,13 @@ class GatewayExecutor:
             drive_session(self._factory, self._bus, session_id, settings=self._settings)
             _logger.info("telegram.task.completed session_id=%s", session_id)
         except Exception as exc:
+            # Relay persistence happens on flush. Flush before deciding on the
+            # drive fallback: checking the flag in ``except`` is too early, and
+            # the fallback would duplicate a queued relay row.
+            try:
+                self._relay.flush()
+            except Exception:
+                _logger.exception("telegram.relay.flush_failed session_id=%s", session_id)
             _logger.exception(
                 "telegram.agent.failed update_id=%s chat_id=%s session_id=%s error=%s",
                 update_id,
@@ -610,11 +640,16 @@ class GatewayExecutor:
                 session_id,
                 exc,
             )
-            self._outbox.enqueue(
-                kind=KIND_RESULT,
-                chat_id=chat_id,
-                text="Sorry, I ran into an issue while fulfilling your request. Please try again.",
-            )
+            if not self._drive_reported_failure:
+                self._outbox.enqueue(
+                    kind=KIND_RESULT,
+                    chat_id=chat_id,
+                    text=(
+                        "Sorry, I ran into an issue while fulfilling your request. "
+                        "Please try again."
+                    ),
+                    event_id=f"telegram.drive.error:{update_id}",
+                )
         finally:
             try:
                 if bind_thread is not None:
@@ -761,7 +796,13 @@ class GatewayExecutor:
                     prompt_lines.append(f"{role_lbl}: {msg['content']}")
 
             try:
-                notes = recall_recent(self._settings, text, limit=3, factory=self._factory)
+                notes = recall_recent(
+                    self._settings,
+                    text,
+                    limit=3,
+                    factory=self._factory,
+                    owner_user_id=owner,
+                )
                 if notes:
                     rendered = "\n".join(f"- {n['title']}: {n['snippet'][:200]}" for n in notes)
                     prompt_lines.append(f"\nRelevant Memories:\n{rendered}")

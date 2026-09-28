@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     tools_require_approval: bool = True
     tools_max_iters: int = 8
     tools_fs_roots: str = ""
+    # Autonomy mode gates which risk levels run without a human approval
+    # (services/permissions.py AutonomyMode + plan_permission):
+    #   build        — ask per tools_require_approval (previous behaviour)
+    #   plan         — read-only; write/execute refused outright
+    #   auto         — low/medium risk unattended, high/critical still ask
+    #   unrestricted — skip approvals (default-deny scopes still refused)
+    # Default is build: a mode that widens autonomy must be opted into.
+    autonomy_mode: str = "build"
     # Cloud (Heroku): dynos have no Docker daemon, so the sandbox backend is
     # replaced by an in-process subprocess jail (services/sandbox.py).
     # HEROKU_JAIL=true routes shell + execute-risk plugins through the jail

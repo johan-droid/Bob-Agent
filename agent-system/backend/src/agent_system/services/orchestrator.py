@@ -324,6 +324,7 @@ class Supervisor:
         input_json: dict[str, Any] | None = None,
         depends_on: list[str] | None = None,
         agent_type: str | None = None,
+        owner_user_id: str | None = None,
     ) -> str:
         depends_on = depends_on or []
         with session_scope(factory) as db:
@@ -334,6 +335,13 @@ class Supervisor:
                 if db.get(Task, dep) is None:
                     raise ValueError(f"unknown dependency: {dep}")
             task_id = ids.new_task_id()
+            # Owner must be inherited from the session: memory recall and
+            # approval grants treat owner_user_id=None as "no filter", so a
+            # task created for an owned session without it would read across
+            # users and make another user's approvals consumable.
+            if owner_user_id is None:
+                session_row = db.get(Session, session_id)
+                owner_user_id = getattr(session_row, "owner_user_id", None)
             db.add(
                 Task(
                     id=task_id,
@@ -344,6 +352,7 @@ class Supervisor:
                     depends_on_json=depends_on,
                     agent_type=agent_type or task_type,
                     state=TaskState.PENDING.value,
+                    owner_user_id=owner_user_id,
                 )
             )
             self._bus.emit(
@@ -593,6 +602,11 @@ class Orchestrator:
                 "factory": factory,
                 "bus": self._bus,
                 "settings": self._settings,
+                # Per-user isolation for capabilities that touch user-owned
+                # data (credentials, memory, approvals). Previously absent,
+                # so ssh_execute fell back to a shared "operator" vault
+                # account and every tool-originated approval was ownerless.
+                "owner_user_id": task.owner_user_id,
             }
             result = handler(input_snapshot, context)
             self._verify_and_finish(

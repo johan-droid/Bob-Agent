@@ -706,7 +706,10 @@ class TestRepeatedToolCall:
         assert result.iterations == 4
         assert [name for name, _ in ran] == ["act"] * 4
         assert result.protocols == {"bob_fenced": 4}
-        assert result.output == ""  # protocol stripped even on budget exhaustion
+        # Protocol stripped, and never a blank reply: the caller must always get
+        # something renderable, so a pure-tool-call turn yields a notice.
+        assert "```tool:" not in result.output
+        assert "Stopped after 4 tool iterations" in result.output
 
     def test_multi_call_turns_also_bounded(self) -> None:
         ran: list[tuple[str, dict[str, Any]]] = []

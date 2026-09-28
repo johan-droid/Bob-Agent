@@ -31,25 +31,58 @@ SEARCH_URL = "https://html.duckduckgo.com/html/?q="
 USER_AGENT = "BobAgent/0.1 (+local research capability)"
 
 
-def _http_get(url: str, timeout: float = 20.0) -> str:
-    import ipaddress
+def _assert_fetchable(url: str) -> None:
+    """SSRF guard: refuse loopback/private/link-local/reserved targets and
+    non-standard ports. Every outbound research request must pass this
+    before a socket is opened.
 
-    import httpx
+    Resolves the hostname and checks *every* returned address: checking the
+    host string alone let any attacker-controlled name (or ``127.0.0.1.nip.io``,
+    or DNS rebinding) reach internal services. Resolution failure is treated as
+    blocked — an unresolvable host is never a legitimate fetch target.
+    """
+    import ipaddress
+    import socket
 
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    # SSRF guard: block metadata + loopback + private nets + non-http ports.
+    if not host:
+        raise ToolError("refusing fetch target with no host")
     blocked_hosts = {"localhost", "metadata.google.internal"}
-    try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise ToolError(f"refusing blocked fetch target: {host}")
-    except ValueError:
-        pass
     if host in blocked_hosts or host.endswith(".internal") or host == "169.254.169.254":
         raise ToolError(f"refusing blocked fetch target: {host}")
     if parsed.port is not None and parsed.port not in (80, 443):
         raise ToolError("refusing non-standard port for research fetch")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError as exc:
+        raise ToolError(f"refusing unresolvable fetch target: {host} ({exc})") from exc
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:  # pragma: no cover - getaddrinfo always returns IPs
+            raise ToolError(f"refusing unresolvable fetch target: {host}") from None
+        # 100.64.0.0/10 (CGNAT, e.g. Alibaba metadata at 100.100.100.200) is not
+        # covered by is_private in the stdlib, hence the explicit extra check.
+        cgnat = ip in ipaddress.ip_network("100.64.0.0/10")
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+            or cgnat
+        ):
+            raise ToolError(f"refusing blocked fetch target: {host} -> {addr}")
+
+
+def _http_get(url: str, timeout: float = 20.0) -> str:
+    import httpx
+
+    _assert_fetchable(url)
+    parsed = urlparse(url)
     try:
         with httpx.Client(
             timeout=timeout,
@@ -192,7 +225,9 @@ def _research_citations(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
         raise ToolError("research_citations: 'urls' must be a non-empty list")
     from agent_system.agents.browser_research import ResearchAgent
 
-    report = ResearchAgent().research([_require_http(str(u)) for u in urls])
+    report = ResearchAgent().research(
+        [_require_http(str(u)) for u in urls], guard=_assert_fetchable
+    )
     citations = report.get("citations", []) if isinstance(report, dict) else []
     errors = report.get("errors", {}) if isinstance(report, dict) else {}
     return {
@@ -208,12 +243,15 @@ def _source_metadata(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]: 
     url = _require_http(str(args.get("url") or ""))
     import httpx
 
+    # Same SSRF guard as _http_get: this path was previously an open probe
+    # against link-local/RFC1918 targets with redirects followed blindly.
+    _assert_fetchable(url)
     try:
         with httpx.Client(
-            timeout=20.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}
+            timeout=20.0, follow_redirects=False, headers={"User-Agent": USER_AGENT}
         ) as client:
             response = client.head(url)
-            if response.status_code >= 400:
+            if response.status_code >= 400 or response.is_redirect:
                 response = client.get(url)
     except Exception as exc:
         raise ToolError(f"metadata request failed: {scrub(str(exc))[:300]}") from exc
@@ -433,7 +471,7 @@ def _web_fetch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     try:
         from agent_system.agents.browser_research import ResearchAgent
 
-        report = ResearchAgent().research([url])
+        report = ResearchAgent().research([url], guard=_assert_fetchable)
     except ToolError:
         raise
     except Exception as exc:

@@ -73,7 +73,14 @@ def _ssh_execute(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         raise ToolError("ssh_execute: 'command' is required")
     # The vault is scoped to the owning user; SSHService decrypts the key
     # internally and never hands it back to the caller or the model.
-    user_id = str(getattr(ctx, "owner_user_id", None) or "operator")
+    # Fail closed: without a known owner we must NOT fall back to a shared
+    # account, or one user's agent run would read another user's SSH key.
+    user_id = str(getattr(ctx, "owner_user_id", None) or "").strip()
+    if not user_id:
+        raise ToolError(
+            "ssh_execute cannot resolve the owning user for credential lookup; "
+            "refusing to guess a vault account"
+        )
     try:
         result = execute_ssh_command(
             connection,

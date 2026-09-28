@@ -314,15 +314,32 @@ All commands run from `agent-system/backend/`.
 | `uv run mypy src` | `Success: no issues found in 96 source files` |
 | `make qa-sandbox-image` | image built (`agent-system/qa-sandbox:latest`) |
 | `uv run pytest -q tests/unit/test_qa_agent.py::TestDockerSandboxIntegration` | **1 passed** (real container execution) |
-| `uv run pytest -q` | **605 passed, 0 failed, 9 skipped** |
+| `uv run pytest -q` (at time of writing) | **605 passed, 0 failed, 9 skipped** — SUPERSEDED, see below |
 | `uv run alembic upgrade head` (fresh SQLite) | up to `e6f7a8b9c0d1` |
 | `uv run alembic check` (fresh SQLite) | `No new upgrade operations detected.` |
 
-The suite is now **fully green**: the formerly-failing
-`test_real_docker_sandbox_runs_untrusted_test` executes inside a real container. Its long-standing
-"requires a Docker daemon" label was wrong — the daemon was available and the fault was the
-unbuilt image (B19). The 9 skips are honest: 5 Redis-backed worker tests, 3 optional-extra
-tests (memory/telemetry), and 1 by-design read-tier assertion.
+**Superseded 2026-09-28, then resolved the same day.** The suite is now green:
+`pytest tests/unit tests/contract tests/security` reports **0 failed, 1241 passed,
+6 skipped** in ~3.5 min with no network access. The 7 failures that existed when this note
+was written were environmental (a hardcoded LAN SSH host, a Docker dependency, an `/bin/sh`
+fork-limit bug); fixing them surfaced two real production bugs - the sandbox
+`RLIMIT_NPROC` and SSH host verification failing open. See
+`docs/implementation/KNOWN_ISSUES.md` for the full record:
+
+- `test_ssh_service.py` (3) — hardcoded LAN host `192.168.1.50`; the test needs a box that
+  does not exist in CI. Mock paramiko.
+- `test_subprocess_jail.py` (2) — wall-clock race on a 1s timeout, and one test requires a
+  live Docker daemon while living in `unit/`.
+- (The former `test_planning_api.py` failures are FIXED: the suite made live OpenRouter and
+  Telegram calls with the developer's real credentials, so those tests were green only when
+  the network failed. `tests/conftest.py` now strips credentials and forces
+  `PLANNER_USE_LLM=false`.)
+
+Two claims in this section are factually wrong and should not be trusted elsewhere in this
+document: there is **no Redis and no RQ worker** in this repository (no `redis`/`rq`
+dependency, no `agent_system/worker` module — the `Procfile` declares only `web` and
+`release`), so "5 Redis-backed worker tests" cannot be true. There is also no `web/`
+Next.js dashboard in this repository.
 
 New/rebuilt test files added by this reconciliation:
 

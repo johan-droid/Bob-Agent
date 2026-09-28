@@ -22,6 +22,7 @@ from agent_system.api.deps import (
     enforce_task_visible,
     get_authenticator,
     get_principal,
+    require_role,
 )
 from agent_system.config import get_settings
 from agent_system.domain import ids
@@ -869,6 +870,20 @@ def decide_approval(
         raise HTTPException(
             status_code=403, detail=f"approval '{approval_id}' belongs to a different owner"
         )
+    # Role gate: a caller must not be able to approve their own pending
+    # capability. `approval.decide` is granted to MEMBER, so without this a
+    # member creates `POST /approvals {"scope":"file:write"}` and then approves
+    # it, which is exactly the human-in-the-loop this gate exists to provide.
+    # Only OWNER/ADMIN may decide.
+    require_role(principal, "owner", "admin")
+    role = getattr(principal, "role", None)
+    # Clamp grant durability to the decider's authority. `policy` is
+    # client-supplied, so an otherwise-valid approver could mint a permanent
+    # `ALLOW_ALWAYS` grant for a reusable scope. OWNER may choose the policy;
+    # ADMIN is downgraded to single-use.
+    policy = body.policy
+    if str(getattr(role, "value", role)) == "admin" and policy == Policy.ALLOW_ALWAYS:
+        policy = Policy.ALLOW_SESSION
     if current.decision is not Decision.PENDING:
         # Redelivery: the first decision sticks — report it without emitting
         # a second decision event for the same logical decision.
@@ -877,7 +892,7 @@ def decide_approval(
         record = gate.decide(
             approval_id,
             approve=body.approve,
-            policy=body.policy,
+            policy=policy,
             reason=body.reason,
             decided_by_user_id=(principal.user_id if principal is not None else None),
         )

@@ -55,8 +55,37 @@ _SECRET_VALUE_PATTERNS = (
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+    # Unterminated PEM: a user pasting a key into Telegram can lose the END
+    # line (truncation, splitting the paste), and the block-matched pattern
+    # above needs both delimiters — so a half-pasted private key reached the
+    # update ledger and backups in the clear. Match from BEGIN to end of input.
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/= \n]*)",
+    ),
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}"),
 )
+
+# ``KEY = value`` / ``"key": "value"`` assignments whose key looks secret-ish.
+# The value patterns above only catch known prefixes (sk-, ghp_, JWT, ...), so
+# an opaque high-entropy secret assigned to a named key -- the shape used by
+# .env files and config modules -- passed straight through. Key matching reuses
+# services.secrets.is_secret_key so there is one marker list, not two.
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?P<key>[A-Za-z0-9_.\- ]{0,40}?[A-Za-z0-9_.\-])"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?P<quote>[\"']?)"
+    r"(?P<value>[^\s\"',;]{4,})"
+    r"(?P=quote)"
+)
+
+
+def _redact_secret_assignment(match: re.Match[str]) -> str:
+    from agent_system.services.secrets import is_secret_key
+
+    if not is_secret_key(match.group("key")):
+        return match.group(0)
+    quote = match.group("quote")
+    return f"{match.group('key')}{match.group('sep')}{quote}[REDACTED]{quote}"
 
 
 def scrub_text(text: str) -> str:
@@ -64,6 +93,10 @@ def scrub_text(text: str) -> str:
     cleaned = text
     for pattern in _SECRET_VALUE_PATTERNS:
         cleaned = pattern.sub("[REDACTED]", cleaned)
+    try:
+        cleaned = _SECRET_ASSIGNMENT.sub(_redact_secret_assignment, cleaned)
+    except Exception:
+        pass  # redaction must never raise
     return cleaned
 
 
@@ -304,6 +337,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         links: list[str] | None = None,
         write_note: bool = True,
+        owner_user_id: str | None = None,
     ) -> MemoryRecord:
         content = scrub_text(content)
         memory_id = ids.new_memory_id()
@@ -326,6 +360,7 @@ class MemoryStore:
                     source=source,
                     task_id=task_id,
                     session_id=session_id,
+                    owner_user_id=owner_user_id,
                     tags=tags if tags is not None else [layer.value.lower(), source],
                     links=links or [],
                 ),

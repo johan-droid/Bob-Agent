@@ -35,6 +35,30 @@ capability request
 | `execute` | approval | scope-bound; sandboxed regardless |
 | `destructive` | **deny** | not approvable by anyone, at any setting |
 
+### Autonomy modes
+
+`AUTONOMY_MODE` (default `build`) decides which risk levels run **without a human**. It is
+not a second authorization path — it only changes what `plan_permission` auto-approves, and
+it never widens the table above:
+
+| mode | read (LOW) | write (MEDIUM) | execute (HIGH) | destructive / `DANGEROUS_SCOPES` |
+| --- | --- | --- | --- | --- |
+| `build` | auto | **ask** | **ask** | **deny** |
+| `plan` | auto | **deny** | **deny** | **deny** |
+| `auto` | auto | auto | **ask** | **deny** |
+| `unrestricted` | auto | auto | auto | **deny** |
+
+Because `CAPABILITY_RISK_TO_RISK` maps read→LOW, write→MEDIUM, execute→HIGH and
+destructive→CRITICAL, `auto` covers exactly reads and plain writes. `shell` and
+`run_tests` are `execute` and therefore still ask. `plan` **refuses** write/execute rather
+than deferring, because a read-only mode that merely asked would still let the model propose
+edits. An unrecognised value falls back to `build`, so a typo cannot widen autonomy.
+
+> **Threat-model note:** `unrestricted` removes the human from the loop for every
+> non-default-deny capability. It is admin automation, not a default, and the destructive /
+> `DANGEROUS_SCOPES` refusals above still apply in that mode. There is no `/mode` Telegram
+> command yet, so the mode is set by environment only.
+
 ### Policies
 
 `ALLOW_ONCE` (consumed on first use), `ALLOW_SESSION` (session-scoped), `ALLOW_WORKSPACE`
@@ -139,6 +163,32 @@ Interactive browser capabilities refuse payment/credential subjects outright
 (`browser:transact` plus a reserved-pattern deny list). OpenConnector and MCP are
 execute-tier with per-action scopes (`openconnector:<action>`, `mcp:<server>:<tool>`);
 credentials stay in the connector runtime, never in this process.
+
+Research fetching is guarded by `_assert_fetchable`
+(`services/tools/builtin/research.py`): it resolves the hostname and refuses every
+resulting address that is loopback, private, link-local, reserved, multicast, unspecified
+or CGNAT (`100.64.0.0/10`, which `ipaddress.is_private` does not cover — Alibaba metadata
+at `100.100.100.200`). Non-standard ports and unresolvable hosts are refused too. Checking
+the host *string* alone was not enough: `127.0.0.1.nip.io` and DNS rebinding both reached
+internal services before the resolver check was added. `web_fetch` and
+`research_citations` now pass the guard into `ResearchAgent`, which also re-validates each
+redirect hop (`follow_redirects=False`) since a public URL that 302s to
+`169.254.169.254` is the standard bypass.
+
+`file_search` enforces the same jail and denylist as `file_read` (it re-resolves every
+walked path, because `rglob` follows symlinks out of the allowed roots) and scrubs its
+output. The sandbox allowlist matches `argv[0]` exactly and refuses interpreter eval flags,
+since a metachar blacklist let `python3 -c "import os"` through; its remaining ceiling is
+documented in `sandbox.py` (a config-injection flag such as `git -c alias.x=!cmd` is not a
+boundary). Vault key derivation refuses a default/empty secret. Inbound Telegram updates are
+redacted before they are persisted, so a pasted SSH key never reaches the update ledger or a
+backup. Approval decisions require OWNER/ADMIN and an ADMIN cannot mint `ALLOW_ALWAYS`.
+`get_artifact` enforces ownership, and `autopilot_reset` requires OWNER/ADMIN (`kill` stays
+open — it is a fail-safe brake).
+
+**Still open (see `KNOWN_ISSUES.md`):** browser tools have no SSRF guard at all (real
+Chromium reaches loopback and RFC1918 and follows redirects); PBKDF2 in
+`services/credentials.py` uses a hard-coded, non-per-install salt.
 
 ## Plugins
 

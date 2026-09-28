@@ -41,10 +41,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_system.services.permissions import (
+    AUTO_APPROVED_RISK,
     ApprovalRecord,
+    AutonomyMode,
     CapabilityRisk,
+    Risk,
     classify_risk,
     require_capability,
+    resolve_autonomy_mode,
 )
 from agent_system.services.policy import (
     PolicyContext,
@@ -112,6 +116,37 @@ def plan_permission(tool: Tool, args: dict[str, Any], settings: Any = None) -> P
             default_deny=True,
             reason="scope is in DANGEROUS_SCOPES (default-deny)",
         )
+    mode = resolve_autonomy_mode(settings)
+    level = classify_risk(tier, scope)
+
+    # PLAN refuses anything that could change the world. Refused, not deferred:
+    # a read-only mode that merely asked would still let the model propose edits.
+    if mode is AutonomyMode.PLAN and level is not Risk.LOW:
+        return PermissionPlan(
+            scope=scope,
+            tier=tier,
+            requires_approval=True,
+            default_deny=True,
+            reason=f"PLAN mode is read-only; {tier.value} capability refused",
+        )
+    # AUTO approves low/medium unattended. HIGH/CRITICAL still asks a human —
+    # autonomy is not a licence to force-push or drop a database.
+    if mode is AutonomyMode.AUTO and level in AUTO_APPROVED_RISK:
+        return PermissionPlan(
+            scope=scope,
+            tier=tier,
+            requires_approval=False,
+            default_deny=False,
+            reason=f"AUTO mode: {level.value} risk approved without a human",
+        )
+    if mode is AutonomyMode.UNRESTRICTED:
+        return PermissionPlan(
+            scope=scope,
+            tier=tier,
+            requires_approval=False,
+            default_deny=False,
+            reason="UNRESTRICTED mode: approval skipped (default-deny scopes still refused)",
+        )
     required = tool.permission_required(settings)
     return PermissionPlan(
         scope=scope,
@@ -146,6 +181,30 @@ def authorize_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> Approv
         action=f"{tool.name} {plan.scope}",
         capability_risk=plan.tier,
     )
+
+
+def result_succeeded(result: Any) -> bool:
+    """Did this capability actually succeed?
+
+    Presence of an ``"error"`` key was the only signal, so ``shell`` returning
+    ``{"exit_code": 1}`` and ``run_tests`` returning ``{"ok": False}`` were
+    both reported to the model and the event bus as successes. Those are
+    reported as ``tool.completed ok=True`` and the task could then be
+    verified as SUCCEEDED on the strength of a failing command.
+
+    Checks the explicit contract signals only; unknown shapes pass through so
+    a tool that legitimately reports ``ok`` as data is not mislabelled.
+    """
+    if not isinstance(result, dict):
+        return True
+    if result.get("error") is not None:
+        return False
+    if result.get("ok") is False:
+        return False
+    exit_code = result.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+        return False
+    return True
 
 
 def _invoke_handler(tool: Tool, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:

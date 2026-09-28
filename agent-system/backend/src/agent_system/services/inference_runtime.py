@@ -1147,8 +1147,9 @@ def _call_once(
     agent_run_id: str | None,
     agent_type: str,
     stream: bool,
-    on_token: Any | None,
+    on_token: Any | None = None,
     timeout: float | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> Any:
     """One adapter call through the router (streaming when supported).
 
@@ -1162,6 +1163,11 @@ def _call_once(
         "agent_run_id": agent_run_id,
         "agent_type": agent_type,
     }
+    # ``tools`` MUST be set before the streaming early return: native tool
+    # calling has to reach the provider on BOTH paths, and streaming is the
+    # default for the primary model (ollama_streaming=true).
+    if tools:
+        kwargs["tools"] = tools
     if stream and hasattr(router, "invoke_streaming"):
         return router.invoke_streaming(factory, model_id, prompt, on_token=on_token, **kwargs)
     # ``timeout`` is a per-call override owned by ModelRouter.invoke (it bounds
@@ -1197,6 +1203,7 @@ def invoke(
     selection: ModelSelection | None = None,
     checkpoint_payload: dict[str, Any] | None = None,
     reserve: bool = False,
+    tools: list[dict[str, Any]] | None = None,
 ) -> RuntimeInvocation:
     """Run one inference call under the Ollama Cloud-first policy.
 
@@ -1262,6 +1269,7 @@ def invoke(
             stream=use_stream,
             on_token=on_token,
             timeout=timeout,
+            tools=tools,
         )
         last_result = result
         if bool(getattr(result, "ok", False)) and str(getattr(result, "output", "") or "").strip():
@@ -1398,6 +1406,7 @@ def invoke(
             stream=use_stream and provider == PRIMARY_PROVIDER,
             on_token=on_token,
             timeout=timeout,
+            tools=tools,
         )
         if bool(getattr(result, "ok", False)) and str(getattr(result, "output", "") or "").strip():
             health.report_success(provider, model_id)
