@@ -221,22 +221,49 @@ def default_catalog() -> CapabilityCatalog:
             latency_class="fast",
             cost_class="free",
         ),
+        # OpenRouter free tier. Verified live 2026-09-28: every id below is in
+        # the account's live /v1/models listing AND returned a real tool call
+        # to a get_weather probe over /v1/chat/completions. Ids that answered
+        # 404 "No endpoints found" were dropped — a retired id is a hard
+        # MODEL_NOT_FOUND, and the emergency layer has nothing else to fall
+        # back to when a provider's only candidate is dead. tests/live/
+        # test_providers_live.py re-checks this list on demand.
         ModelCapability(
             provider="openrouter",
-            model_id="meta-llama/llama-3.3-70b-instruct:free",
-            context_limit=131072,
+            model_id="nvidia/nemotron-3.5-lightning:free",
+            context_limit=1000000,
             tool_calling=True,
+            structured_output=True,
             coding=2,
-            latency_class="standard",
+            latency_class="fast",
             cost_class="free",
         ),
         ModelCapability(
             provider="openrouter",
-            model_id="deepseek/deepseek-chat-v3-0324:free",
-            context_limit=163840,
+            model_id="nvidia/nemotron-3-super-120b-a12b:free",
+            context_limit=262144,
             tool_calling=True,
+            structured_output=True,
             reasoning=True,
             coding=3,
+            latency_class="fast",
+            cost_class="free",
+        ),
+        ModelCapability(
+            provider="openrouter",
+            model_id="qwen/qwen3.8-27b:free",
+            context_limit=262144,
+            tool_calling=True,
+            coding=2,
+            latency_class="fast",
+            cost_class="free",
+        ),  # also providers.PROVIDERS["openrouter"].default_model
+        ModelCapability(
+            provider="openrouter",
+            model_id="google/gemma-4-31b-it:free",
+            context_limit=262144,
+            tool_calling=True,
+            coding=2,
             latency_class="standard",
             cost_class="free",
         ),

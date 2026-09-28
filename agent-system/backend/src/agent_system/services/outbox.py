@@ -196,6 +196,9 @@ class Outbox:
         is_edit = row.kind == KIND_PROGRESS_EDIT and row.edit_message_id is not None
         is_typing = row.kind == KIND_TYPING
         try:
+            from agent_system.services.telegram_presenter import escape_markdown_v2
+
+            text = escape_markdown_v2(row.text or "")
             payload: dict[str, Any]
             if is_typing:
                 payload = {
@@ -207,13 +210,15 @@ class Outbox:
                 payload = {
                     "chat_id": int(row.chat_id),
                     "message_id": int(row.edit_message_id or 0),
-                    "text": row.text,
+                    "text": text,
+                    "parse_mode": "MarkdownV2",
                 }
                 endpoint = TELEGRAM_EDIT_API.format(token=token)
             else:
                 payload = {
                     "chat_id": int(row.chat_id),
-                    "text": row.text,
+                    "text": text,
+                    "parse_mode": "MarkdownV2",
                 }
                 if row.reply_markup_json:
                     payload["reply_markup"] = row.reply_markup_json

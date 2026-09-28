@@ -573,7 +573,7 @@ class ModelRouter:
         # a billable/unpriced model (or a configured Ollama Cloud role model)
         # must never resolve to provider="unknown" and fail with "no adapter
         # registered". Pricing stays a cost fact, routing an ownership fact.
-        provider = self._resolve_provider(model_id)
+        provider = kwargs.pop("provider", None) or self._resolve_provider(model_id)
         call_id = ids.new_model_call_id()
         invoke_started = time.monotonic()
 
@@ -727,7 +727,7 @@ class ModelRouter:
         import time
 
         prompt, skills_used, soul_used = self._compose_prompt(prompt, skills, agent_type)
-        provider = self._resolve_provider(model_id)
+        provider = kwargs.pop("provider", None) or self._resolve_provider(model_id)
         call_id = ids.new_model_call_id()
         self._emit_requested(
             factory,

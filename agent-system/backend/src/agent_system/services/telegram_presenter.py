@@ -42,8 +42,9 @@ def build_task_ack(goal: str, req_type: str = "TOOL_TASK") -> str:
     any planner, model, or tool had run. Real progress is reported from real
     event-bus signals (see the tool.started / tool.completed handlers).
 
-    NOTE: Bob sends Telegram messages with NO parse_mode (formatting-injection
-    safe), so keep these plain text + emoji only — never Markdown/HTML markup.
+    NOTE: Bob sends Telegram messages with MarkdownV2 parse_mode for rich
+    formatting. The sanitize_telegram_message function strips internal IDs
+    and technical noise before delivery.
     """
     lower = (goal or "").lower()
     if req_type == "RESEARCH_TASK" or "search" in lower or "research" in lower or "find" in lower:
@@ -82,6 +83,40 @@ def sanitize_telegram_message(text: str) -> str:
     lines = [line.strip() for line in cleaned.split("\n")]
     result = "\n".join(line for line in lines if line)
     return result or text
+
+
+def escape_markdown_v2(text: str) -> str:
+    """Escape MarkdownV2 special characters to prevent formatting injection.
+
+    Escapes characters that Telegram MarkdownV2 uses for formatting, except
+    those inside code spans (backticks) and code blocks (triple backticks).
+    """
+    if not text:
+        return ""
+    result = []
+    in_code_block = False
+    in_code_span = False
+    i = 0
+    while i < len(text):
+        if text[i : i + 3] == "```":
+            in_code_block = not in_code_block
+            result.append("```")
+            i += 3
+            continue
+        if text[i] == "`":
+            in_code_span = not in_code_span
+            result.append("`")
+            i += 1
+            continue
+        if not in_code_block and not in_code_span:
+            ch = text[i]
+            if ch in r"_*[]()~`>#+-=|{}.!":
+                result.append("\\" + ch)
+                i += 1
+                continue
+        result.append(text[i])
+        i += 1
+    return "".join(result)
 
 
 def load_chat_history(factory: Any, chat_id: int | str, limit: int = 10) -> list[dict[str, str]]:
@@ -200,6 +235,11 @@ class TelegramProgressPresenter:
         self._bus.subscribe("model.started", self._on_event)
         self._bus.subscribe("model.token", self._on_event)
         self._bus.subscribe("task.failed", self._on_event)
+        self._bus.subscribe("task.started", self._on_event)
+        self._bus.subscribe("task.completed", self._on_event)
+        self._bus.subscribe("qa.started", self._on_event)
+        self._bus.subscribe("qa.completed", self._on_event)
+        self._bus.subscribe("qa.failed", self._on_event)
         # Ollama Cloud-first runtime: the one model decision for this task,
         # and a one-off notice when the emergency layer engages.
         self._bus.subscribe("inference.model_selected", self._on_event)
@@ -238,18 +278,28 @@ class TelegramProgressPresenter:
 
         if event.type == "inference.model_selected":
             label = str(event.payload.get("label") or "").strip()
-            text = f"{label} — getting started..." if label else "🧠 Thinking..."
+            text = f"{label} — getting started..." if label else "Thinking..."
         elif event.type == "tool.started":
             tool_name = str(event.payload.get("tool") or "")
             text = map_tool_to_progress(tool_name)
         elif event.type == "model.started":
-            text = "🧠 Thinking..."
+            text = "Thinking..."
         elif event.type == "model.token":
-            text = "✍️ Writing the reply..."
+            text = "Writing the reply..."
         elif event.type == "tool.completed":
-            text = "✅ Tool done — crunching the results..."
+            text = "Tool done — crunching the results..."
+        elif event.type == "task.started":
+            text = "Task started — working on it..."
+        elif event.type == "task.completed":
+            text = "Task complete!"
         elif event.type == "task.failed":
-            text = "😅 Sorry, I hit a snag — please try again."
+            text = "Sorry, I hit a snag — please try again."
+        elif event.type == "qa.started":
+            text = "Verifying results..."
+        elif event.type == "qa.completed":
+            text = "Verification passed"
+        elif event.type == "qa.failed":
+            text = "Verification failed — will try to fix..."
 
         if not text or text == self._last_text:
             return

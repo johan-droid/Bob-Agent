@@ -847,6 +847,13 @@ def _emergency_candidates(
     A provider is skipped when it is not configured, is the failing primary,
     is marked unavailable, or has no catalogued model that satisfies the
     required capabilities — an incompatible model is never substituted.
+
+    Each provider contributes its best catalogued model PLUS the provider's
+    own declared default (``ProviderSpec.default_model``, trusted the same
+    way the primary provider is) when it differs. One model per provider is a
+    single point of failure: catalogued ids are curated by hand and providers
+    retire free models, and a retired id answers 404 with nothing left to
+    try. Two independent sources means one stale list cannot end the chain.
     """
     if not getattr(settings, "emergency_fallback_enabled", True):
         return []
@@ -872,6 +879,10 @@ def _emergency_candidates(
             continue
         best = min(compatible, key=lambda c: _role_score(c, ModelRole.GENERAL))
         out.append((provider, best.model_id))
+        spec = provider_spec(provider)
+        declared = getattr(spec, "default_model", "") if spec is not None else ""
+        if declared and declared != best.model_id and health.is_available(provider, declared):
+            out.append((provider, declared))
     return out
 
 
@@ -1150,11 +1161,12 @@ def _call_once(
     on_token: Any | None = None,
     timeout: float | None = None,
     tools: list[dict[str, Any]] | None = None,
+    provider: str | None = None,
 ) -> Any:
     """One adapter call through the router (streaming when supported).
 
     Token events are status-only for Telegram (the presenter maps them to
-    "✍️ Writing the reply..."), so a retry after a partial stream is safe:
+    "Writing the reply..."), so a retry after a partial stream is safe:
     the user-visible answer is still the single final ``task.completed``.
     """
     kwargs: dict[str, Any] = {
@@ -1163,16 +1175,12 @@ def _call_once(
         "agent_run_id": agent_run_id,
         "agent_type": agent_type,
     }
-    # ``tools`` MUST be set before the streaming early return: native tool
-    # calling has to reach the provider on BOTH paths, and streaming is the
-    # default for the primary model (ollama_streaming=true).
+    if provider is not None:
+        kwargs["provider"] = provider
     if tools:
         kwargs["tools"] = tools
     if stream and hasattr(router, "invoke_streaming"):
         return router.invoke_streaming(factory, model_id, prompt, on_token=on_token, **kwargs)
-    # ``timeout`` is a per-call override owned by ModelRouter.invoke (it bounds
-    # one adapter call); it is not a streaming parameter, so it is only sent on
-    # the non-streaming path.
     if timeout is not None:
         kwargs["timeout"] = float(timeout)
     return router.invoke(factory, model_id, prompt, **kwargs)
@@ -1254,7 +1262,13 @@ def invoke(
     history: list[dict[str, Any]] = []
     last_result: Any = None
     last_kind: ErrorKind | None = None
-    primary_attempts = attempts if selection.is_primary else 1
+    # The SELECTED model always gets the configured retry budget, including
+    # when it is not Ollama Cloud: when the Ollama Cloud key is missing the
+    # operator's own DEFAULT_PROVIDER becomes the effective primary, and a
+    # single ReadTimeout there used to skip the retry loop entirely and go
+    # straight to the emergency layer. Chain candidates still get one shot
+    # each (the loop below), so the retry budget is spent in one place only.
+    primary_attempts = attempts
 
     for attempt_no in range(1, primary_attempts + 1):
         result = _call_once(
@@ -1270,6 +1284,7 @@ def invoke(
             on_token=on_token,
             timeout=timeout,
             tools=tools,
+            provider=selection.provider,
         )
         last_result = result
         if bool(getattr(result, "ok", False)) and str(getattr(result, "output", "") or "").strip():
@@ -1336,7 +1351,7 @@ def invoke(
     # model) continues on another COMPATIBLE Ollama Cloud model first (§10);
     # an outright outage goes straight to the emergency layer (§6/§7). Either
     # way the task keeps its ids, tool state and memory — only the model moves.
-    chain = _continue_chain(selection, last_kind)
+    chain = _continue_chain(selection, last_kind, health=health)
     if not chain:
         return RuntimeInvocation(
             result=last_result,
@@ -1407,6 +1422,7 @@ def invoke(
             on_token=on_token,
             timeout=timeout,
             tools=tools,
+            provider=provider,
         )
         if bool(getattr(result, "ok", False)) and str(getattr(result, "output", "") or "").strip():
             health.report_success(provider, model_id)
@@ -1461,7 +1477,7 @@ def invoke(
 
 
 def _continue_chain(
-    selection: ModelSelection, last_kind: ErrorKind | None
+    selection: ModelSelection, last_kind: ErrorKind | None, health: Any | None = None
 ) -> list[tuple[str, str]]:
     """Where to continue after the locked model exhausted its retries.
 
@@ -1469,14 +1485,16 @@ def _continue_chain(
     compatible Ollama Cloud alternate FIRST; every other failure leaves
     Ollama Cloud for the emergency layer. Candidates come from the
     selection's own chain, so an incompatible model can never appear here.
+
+    Health filtering: models already marked UNAVAILABLE by a previous failure
+    in this session are skipped, so dead models are not retried.
     """
+    health = health or INFERENCE_HEALTH
     primary = (selection.provider, selection.model_id)
-    others = [c for c in selection.candidates if c != primary]
+    others = [c for c in selection.candidates if c != primary and health.is_available(c[0], c[1])]
     if last_kind in (
         ErrorKind.MODEL_NOT_FOUND,
         ErrorKind.TOOL_UNSUPPORTED,
-        # A model outside the plan (402) is just as unselectable as a missing
-        # one: prefer another OLLAMA CLOUD model before any external provider.
         ErrorKind.QUOTA_EXHAUSTED,
     ):
         ollama = [c for c in others if c[0] == PRIMARY_PROVIDER]

@@ -189,8 +189,8 @@ def _router(adapters: dict[str, Any], settings: Settings) -> ModelRouter:
     index: dict[str, str] = {model: "ollama_cloud" for model in OLLAMA_MODELS}
     index["openai/gpt-oss-20b"] = "groq"
     index["gemini-3.6-flash"] = "gemini"
-    index["meta-llama/llama-3.3-70b-instruct:free"] = "openrouter"
-    index["deepseek/deepseek-chat-v3-0324:free"] = "openrouter"
+    index["nvidia/nemotron-3-super-120b-a12b:free"] = "openrouter"
+    index["google/gemma-4-31b-it:free"] = "openrouter"
     router.register_provider_index(index)
     for provider, adapter in adapters.items():
         router.register_adapter(provider, adapter)
@@ -583,6 +583,33 @@ def test_only_compatible_emergency_providers_are_selected(factory: Any) -> None:
         assert model == "openai/gpt-oss-20b"
 
 
+def test_retired_emergency_model_rolls_to_the_next_candidate(factory: Any) -> None:
+    """One 404 must not end the chain — a provider contributes two candidates.
+
+    Catalogued ids are curated by hand and providers retire free models; a
+    retired id answers 404 and used to be the provider's *only* candidate.
+    The provider's own declared default is the second one.
+    """
+    settings = _settings(ollama_retry_attempts=1)
+    ollama = ScriptedAdapter(default_outcome={"error": "402 Payment Required"})
+    openrouter = ScriptedAdapter(
+        {
+            "nvidia/nemotron-3.5-lightning:free": [{"error": "404 model not found"}],
+            "qwen/qwen3.8-27b:free": [{"output": "served by the provider default"}],
+        }
+    )
+    router = _router({"ollama_cloud": ollama, "openrouter": openrouter}, settings)
+
+    invocation = _invoke(router, factory, settings)
+
+    assert invocation.ok
+    assert invocation.output == "served by the provider default"
+    assert openrouter.calls == [
+        "nvidia/nemotron-3.5-lightning:free",
+        "qwen/qwen3.8-27b:free",
+    ]
+
+
 def test_checkpoint_never_stores_secrets(factory: Any) -> None:
     payload = build_checkpoint_payload(
         active_provider="ollama_cloud",
@@ -907,6 +934,26 @@ def test_ollama_cloud_is_the_default_primary() -> None:
 def test_missing_ollama_credential_keeps_the_deployment_running() -> None:
     settings = _settings(ollama_cloud_api_key=None, default_provider="groq")
     assert effective_primary(settings) == ("groq", "ollama_cloud_unconfigured")
+
+
+def test_configured_primary_retries_a_timeout_without_ollama_cloud(factory: Any) -> None:
+    """A timeout on the effective primary is retried, not skipped.
+
+    Without an Ollama Cloud key the operator's own provider is the primary,
+    so it must get the same bounded retry as Ollama Cloud — one ReadTimeout
+    used to skip the retry loop and drop straight into the emergency layer.
+    """
+    settings = _settings(
+        ollama_cloud_api_key=None, default_provider="groq", ollama_retry_attempts=3
+    )
+    groq = ScriptedAdapter({"openai/gpt-oss-20b": [{"error": "ReadTimeout"}, {"output": "ok"}]})
+    router = _router({"groq": groq}, settings)
+
+    invocation = _invoke(router, factory, settings, text="hello")
+
+    assert invocation.ok
+    assert invocation.output == "ok"
+    assert groq.calls == ["openai/gpt-oss-20b", "openai/gpt-oss-20b"]
 
 
 def test_describe_selection_is_compact_and_credential_free() -> None:
