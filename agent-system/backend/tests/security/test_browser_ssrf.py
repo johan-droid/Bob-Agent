@@ -32,10 +32,14 @@ class _Route:
 
 class _WebSocketRoute:
     def __init__(self) -> None:
-        self.aborted = False
+        self.closed = False
+        self.code: int | None = None
+        self.reason: str | None = None
 
-    def abort(self) -> None:
-        self.aborted = True
+    def close(self, code: int | None = None, reason: str | None = None) -> None:
+        self.closed = True
+        self.code = code
+        self.reason = reason
 
 
 class _Context:
@@ -107,7 +111,8 @@ def test_context_blocks_all_websockets() -> None:
     assert context.websocket_guard is not None
     route = _WebSocketRoute()
     context.websocket_guard(route)
-    assert route.aborted
+    assert route.closed
+    assert route.code == 1008
 
 
 @pytest.mark.parametrize("proxy_url", ["", "https://proxy.example", "http://user@proxy.example"])
@@ -291,9 +296,7 @@ def test_live_browser_allows_approved_public_navigation(
 
     def custom_validate(url: str) -> ValidatedURL:
         validated_urls.append(url)
-        return ValidatedURL(
-            url, "public.example", 443, (ipaddress.ip_address("93.184.216.34"),)
-        )
+        return ValidatedURL(url, "public.example", 443, (ipaddress.ip_address("93.184.216.34"),))
 
     monkeypatch.setattr(browser_mod, "validate_url", custom_validate)
     browser_mod._install_request_guard(context)
@@ -304,3 +307,109 @@ def test_live_browser_allows_approved_public_navigation(
     assert "Public OK" in page.content()
     assert any("public.example" in u for u in validated_urls)
     browser.close()
+
+
+def test_context_request_guard_reuses_host_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _Context()
+    call_count = 0
+
+    def mock_validate(url: str) -> ValidatedURL:
+        nonlocal call_count
+        call_count += 1
+        return ValidatedURL(url, "public.example", 443, (ipaddress.ip_address("93.184.216.34"),))
+
+    monkeypatch.setattr(browser_mod, "validate_url", mock_validate)
+    browser_mod._install_request_guard(context)
+    assert context.http_guard is not None
+
+    route1 = _Route("https://public.example/page.html")
+    context.http_guard(route1)
+    assert route1.continued and not route1.aborted
+    assert call_count == 1
+
+    route2 = _Route("https://public.example/style.css")
+    context.http_guard(route2)
+    assert route2.continued and not route2.aborted
+    assert call_count == 1
+
+
+def test_live_browser_blocks_websockets_without_hanging(live_playwright: Any) -> None:
+    browser = live_playwright.chromium.launch(headless=True)
+    context = browser.new_context(service_workers="block")
+    browser_mod._install_request_guard(context)
+    page = context.new_page()
+    page.set_content("<html><body><h1>WS Test</h1></body></html>")
+    result = page.evaluate("""
+        new Promise((resolve) => {
+            try {
+                const ws = new WebSocket("ws://127.0.0.1:9999");
+                ws.onclose = (event) => resolve({status: "closed", code: event.code});
+                ws.onerror = () => resolve({status: "error"});
+                setTimeout(() => resolve({status: "timeout"}), 1500);
+            } catch (e) {
+                resolve({status: "exception", error: e.message});
+            }
+        })
+    """)
+    assert result["status"] in {"closed", "error"}
+    if result["status"] == "closed":
+        assert result.get("code") == 1008
+    assert result["status"] != "timeout"
+    browser.close()
+
+
+def test_research_safe_request_blocks_private_targets() -> None:
+    from agent_system.services.tools.builtin import research as research_mod
+
+    for bad_url in (
+        "http://127.0.0.1:8000/secret",
+        "http://localhost:8080/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/",
+        "http://[::1]/",
+    ):
+        with pytest.raises(ToolError, match="unsafe fetch target"):
+            research_mod._safe_request(bad_url)
+
+
+def test_research_agent_fetch_applies_guard_and_pins_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_system.agents.browser_research import ResearchAgent
+
+    agent = ResearchAgent()
+    guarded_urls: list[str] = []
+
+    def mock_guard(url: str) -> ValidatedURL:
+        guarded_urls.append(url)
+        if "169.254" in url or "127.0.0.1" in url:
+            raise ValueError(f"blocked SSRF target: {url}")
+        return ValidatedURL(url, "public.example", 443, (ipaddress.ip_address("93.184.216.34"),))
+
+    with pytest.raises(ValueError, match="blocked SSRF target"):
+        agent.fetch("http://127.0.0.1:8000/info", guard=mock_guard)
+
+    class MockRedirectClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> MockRedirectClient:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def get(self, url: str) -> Any:
+            resp = SimpleNamespace()
+            resp.is_redirect = True
+            resp.headers = {"location": "http://169.254.169.254/latest/meta-data/"}
+            resp.url = url
+            resp.text = ""
+            return resp
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", MockRedirectClient)
+
+    with pytest.raises(ValueError, match="blocked SSRF target"):
+        agent.fetch("https://public.example/redirect", guard=mock_guard)

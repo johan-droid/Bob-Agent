@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpcore
+import httpx
 
 
 class URLSecurityError(ValueError):
@@ -75,15 +76,34 @@ class PinnedBackend(httpcore.SyncBackend):
         local_address: str | None = None,
         socket_options: Any = None,
     ) -> httpcore.NetworkStream:
-        dest_ip = self._pinned_ip if host == self._pinned_host else host
+        if host != self._pinned_host:
+            raise URLSecurityError(
+                f"PinnedBackend host mismatch: requested {host!r} "
+                f"but pinned to {self._pinned_host!r}"
+            )
         return super().connect_tcp(
-            dest_ip,
+            self._pinned_ip,
             port,
             timeout=timeout,
             local_address=local_address,
             socket_options=socket_options,
         )
 
+
+def create_pinned_transport(validated: ValidatedURL, address_index: int = 0) -> httpx.HTTPTransport:
+    """Create an httpx.HTTPTransport connecting strictly to the validated pinned IP address."""
+    if not validated.addresses:
+        raise URLSecurityError(f"No validated IP addresses available for {validated.hostname}")
+    if address_index < 0 or address_index >= len(validated.addresses):
+        raise URLSecurityError(
+            f"Address index {address_index} out of range for {validated.hostname}"
+        )
+    pinned_ip = str(validated.addresses[address_index])
+    backend = PinnedBackend(validated.hostname, pinned_ip)
+    pool = httpcore.ConnectionPool(network_backend=backend)
+    transport = httpx.HTTPTransport()
+    transport._pool = pool
+    return transport
 
 
 def _normalise_hostname(hostname: str) -> str:
@@ -252,6 +272,7 @@ __all__ = [
     "Resolver",
     "URLSecurityError",
     "ValidatedURL",
+    "create_pinned_transport",
     "is_prohibited_ip",
     "validate_url",
 ]

@@ -27,9 +27,9 @@ from agent_system.services.tool_errors import ToolError
 from agent_system.services.tools.paths import scrub
 from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry, _str_param
 from agent_system.services.tools.url_security import (
-    PinnedBackend,
     URLSecurityError,
     ValidatedURL,
+    create_pinned_transport,
     validate_url,
 )
 
@@ -59,34 +59,44 @@ def _safe_request(
 ) -> tuple[httpx.Response, str]:
     current_url = url
     hops = 0
+    current_method = method
     while True:
         validated = _assert_fetchable(current_url)
-        pinned_ip = str(validated.addresses[0])
-        pool = httpcore.ConnectionPool(
-            network_backend=PinnedBackend(validated.hostname, pinned_ip)
-        )
-        transport = httpx.HTTPTransport()
-        transport._pool = pool
-        with httpx.Client(
-            transport=transport,
-            timeout=timeout,
-            follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            req_func = client.head if method == "HEAD" and hops == 0 else client.get
-            response = req_func(current_url)
-            if response.is_redirect:
-                hops += 1
-                if hops > max_hops:
-                    raise ToolError("refusing redirect: maximum redirect limit exceeded")
-                loc = response.headers.get("location")
-                if not loc:
-                    return response, current_url
-                nxt = str(httpx.URL(current_url).join(loc))
-                current_url = nxt
+        last_exc: Exception | None = None
+        response: httpx.Response | None = None
+        for addr_idx in range(len(validated.addresses)):
+            transport = create_pinned_transport(validated, address_index=addr_idx)
+            try:
+                with httpx.Client(
+                    transport=transport,
+                    timeout=timeout,
+                    follow_redirects=False,
+                    headers={"User-Agent": USER_AGENT},
+                ) as client:
+                    req_func = client.head if current_method == "HEAD" else client.get
+                    response = req_func(current_url)
+                    break
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpcore.ConnectError) as exc:
+                last_exc = exc
                 continue
-            return response, current_url
-    raise ToolError("fetch failed: unexpected loop termination")
+        if response is None:
+            if last_exc is not None:
+                raise ToolError(
+                    f"connection failed for {current_url}: {scrub(str(last_exc))[:300]}"
+                ) from last_exc
+            raise ToolError(f"connection failed for {current_url}: no valid address reached")
+
+        if response.is_redirect:
+            hops += 1
+            if hops > max_hops:
+                raise ToolError("refusing redirect: maximum redirect limit exceeded")
+            loc = response.headers.get("location")
+            if not loc:
+                return response, current_url
+            nxt = str(httpx.URL(current_url).join(loc))
+            current_url = nxt
+            continue
+        return response, current_url
 
 
 def _http_get(url: str, timeout: float = 20.0) -> str:
@@ -235,7 +245,7 @@ def _source_metadata(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]: 
     url = _require_http(str(args.get("url") or ""))
     try:
         response, final_url = _safe_request(url, method="HEAD", timeout=20.0, max_hops=5)
-        if response.status_code in {405, 501}:
+        if response.status_code >= 400 or response.is_redirect:
             response, final_url = _safe_request(url, method="GET", timeout=20.0, max_hops=5)
     except Exception as exc:
         if isinstance(exc, ToolError):

@@ -188,3 +188,96 @@ def test_proxy_failure_causes_browser_network_failure() -> None:
             assert "ERR_PROXY_CONNECTION_FAILED" in str(exc)
         assert failed, "Browser did not fail closed when proxy was unavailable"
         browser.close()
+
+
+def test_proxy_enforces_authentication_when_configured() -> None:
+    async def run_auth_test() -> None:
+        proxy = OutboundProxy(auth_token="secret123")
+        await proxy.start(host="127.0.0.1", port=0)
+        port = proxy.port
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"CONNECT public.example:443 HTTP/1.1\r\nHost: public.example:443\r\n\r\n")
+        await writer.drain()
+        resp = await reader.read(1024)
+        assert b"407 Proxy Authentication Required" in resp
+        writer.close()
+        await writer.wait_closed()
+
+        reader2, writer2 = await asyncio.open_connection("127.0.0.1", port)
+        writer2.write(
+            b"CONNECT public.example:443 HTTP/1.1\r\n"
+            b"Host: public.example:443\r\n"
+            b"Proxy-Authorization: Bearer wrong\r\n\r\n"
+        )
+        await writer2.drain()
+        resp2 = await reader2.read(1024)
+        assert b"407 Proxy Authentication Required" in resp2
+        writer2.close()
+        await writer2.wait_closed()
+
+        await proxy.close()
+
+    asyncio.run(run_auth_test())
+
+
+def test_proxy_rejects_disallowed_methods() -> None:
+    async def run_method_test() -> None:
+        proxy = OutboundProxy()
+        await proxy.start(host="127.0.0.1", port=0)
+        port = proxy.port
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"POST http://public.example/ HTTP/1.1\r\nHost: public.example\r\n\r\n")
+        await writer.drain()
+        resp = await reader.read(1024)
+        assert b"405 Method Not Allowed" in resp
+        writer.close()
+        await writer.wait_closed()
+
+        await proxy.close()
+
+    asyncio.run(run_method_test())
+
+
+def test_live_docker_isolated_network_blocks_direct_egress() -> None:
+    """Docker-gated: proves an internal: true network blocks outbound internet egress."""
+    try:
+        import docker
+
+        client = docker.from_env()
+        client.ping()
+    except Exception:
+        pytest.skip("Docker daemon unavailable")
+
+    net_name = f"test-isolated-net-{id(client)}"
+    try:
+        net = client.networks.create(net_name, internal=True)
+    except Exception:
+        pytest.skip("Cannot create Docker network")
+
+    try:
+        client.containers.run(
+            "agent-system/qa-sandbox:latest",
+            [
+                "python",
+                "-c",
+                "import socket; socket.setdefaulttimeout(3); "
+                "socket.create_connection(('1.1.1.1', 53))",
+            ],
+            network=net_name,
+            remove=True,
+        )
+        pytest.fail("Direct egress unexpectedly succeeded on internal Docker network!")
+    except Exception as exc:
+        assert (
+            "timeout" in str(exc).lower()
+            or "unreachable" in str(exc).lower()
+            or "network" in str(exc).lower()
+            or "exit code" in str(exc).lower()
+        )
+    finally:
+        try:
+            net.remove()
+        except Exception:
+            pass

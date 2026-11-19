@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
 
-from agent_system.services.tools.url_security import ValidatedURL, validate_url
+from agent_system.services.tools.url_security import URLSecurityError, ValidatedURL, validate_url
 
 _MAX_HEADER_BYTES: Final = 32 * 1024
 _MAX_BODY_BYTES: Final = 8 * 1024 * 1024
@@ -25,6 +27,18 @@ _PROXY_TIMEOUT: Final = 20.0
 
 class ProxyError(ValueError):
     """An invalid or unsafe proxy request."""
+
+
+class ProxyAuthError(ProxyError):
+    """Proxy authentication failed or missing."""
+
+
+class ProxyMethodNotAllowedError(ProxyError):
+    """HTTP method is not allowed by the proxy policy."""
+
+
+class ProxyUpstreamError(ProxyError):
+    """Failed to reach upstream destination."""
 
 
 @dataclass(frozen=True)
@@ -38,7 +52,8 @@ class _Request:
 class OutboundProxy:
     """Fail-closed HTTP proxy that pins every browser destination connection."""
 
-    def __init__(self, *, timeout: float = _PROXY_TIMEOUT) -> None:
+    def __init__(self, *, auth_token: str | None = None, timeout: float = _PROXY_TIMEOUT) -> None:
+        self._auth_token = auth_token
         self._timeout = timeout
         self._server: asyncio.AbstractServer | None = None
 
@@ -71,18 +86,73 @@ class OutboundProxy:
     ) -> None:
         try:
             request = await self._read_request(client_reader)
+            self._check_auth(request)
             if request.method == "CONNECT":
                 await self._handle_connect(request, client_reader, client_writer)
-            else:
+            elif request.method in {"GET", "HEAD"}:
                 await self._handle_http(request, client_reader, client_writer)
+            else:
+                raise ProxyMethodNotAllowedError(f"method {request.method} not allowed")
+        except ProxyAuthError:
+            await self._send_response(
+                client_writer,
+                b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                b'Proxy-Authenticate: Basic realm="Bob-Browser-Proxy"\r\n'
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+        except ProxyMethodNotAllowedError:
+            await self._send_response(
+                client_writer,
+                b"HTTP/1.1 405 Method Not Allowed\r\n"
+                b"Allow: GET, HEAD, CONNECT\r\n"
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+        except URLSecurityError:
+            await self._send_response(
+                client_writer,
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+        except (TimeoutError, ProxyUpstreamError, OSError):
+            await self._send_response(
+                client_writer,
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
         except Exception:
-            await self._send_error(client_writer)
+            await self._send_response(
+                client_writer,
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
         finally:
             client_writer.close()
             try:
                 await client_writer.wait_closed()
             except OSError:
                 pass
+
+    def _check_auth(self, request: _Request) -> None:
+        if not self._auth_token:
+            return
+        auth_headers = [v for name, v in request.headers if name.lower() == "proxy-authorization"]
+        if not auth_headers:
+            raise ProxyAuthError("missing Proxy-Authorization")
+        header_val = auth_headers[0].strip()
+        if header_val.startswith("Bearer "):
+            token = header_val[7:].strip()
+            if token != self._auth_token:
+                raise ProxyAuthError("invalid bearer token")
+            return
+        if header_val.startswith("Basic "):
+            raw = header_val[6:].strip()
+            try:
+                decoded = base64.b64decode(raw).decode("utf-8")
+                parts = decoded.split(":", 1)
+                secret = parts[1] if len(parts) == 2 else parts[0]
+                if secret != self._auth_token:
+                    raise ProxyAuthError("invalid credentials")
+                return
+            except Exception as exc:
+                raise ProxyAuthError("malformed basic auth") from exc
+        raise ProxyAuthError("unsupported auth scheme")
 
     async def _handle_connect(
         self,
@@ -132,7 +202,9 @@ class OutboundProxy:
                 )
             except OSError as exc:
                 last_error = exc
-        raise ProxyError("no validated destination address could be reached") from last_error
+        raise ProxyUpstreamError(
+            "no validated destination address could be reached"
+        ) from last_error
 
     async def _read_request(self, reader: asyncio.StreamReader) -> _Request:
         try:
@@ -200,11 +272,11 @@ class OutboundProxy:
         except OSError:
             pass
 
-    async def _send_error(self, writer: asyncio.StreamWriter) -> None:
+    async def _send_response(self, writer: asyncio.StreamWriter, response: bytes) -> None:
         if writer.is_closing():
             return
         # Do not reflect target URLs, credentials, query strings or resolver errors.
-        writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        writer.write(response)
         try:
             await writer.drain()
         except OSError:
@@ -260,8 +332,8 @@ async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
         await writer.drain()
 
 
-async def _run_proxy(host: str, port: int) -> None:
-    proxy = OutboundProxy()
+async def _run_proxy(host: str, port: int, token: str | None = None) -> None:
+    proxy = OutboundProxy(auth_token=token)
     await proxy.start(host, port)
     await proxy.serve_forever()
 
@@ -270,9 +342,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bob Agent pinned-destination browser proxy")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("BROWSER_PROXY_TOKEN"),
+        help="Optional proxy authentication token",
+    )
     args = parser.parse_args()
-    asyncio.run(_run_proxy(args.host, args.port))
+    asyncio.run(_run_proxy(args.host, args.port, token=args.token))
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     main()
+
+__all__ = [
+    "OutboundProxy",
+    "ProxyAuthError",
+    "ProxyError",
+    "ProxyMethodNotAllowedError",
+    "ProxyUpstreamError",
+    "main",
+]

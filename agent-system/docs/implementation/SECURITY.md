@@ -175,15 +175,17 @@ Layer 2: Playwright Browser Interception (builtin/browser.py)
   → service_workers="block"
   → context.route("**/*") intercepts all top-level navigations, redirects, popups, iframes,
     JS fetch/XHR, and subresources (images, scripts, styles)
-  → WebSocket blocking for unsafe destinations; fail-closed abort("blockedbyclient")
-  → --proxy-bypass-list=<-loopback> and --disable-quic prevent proxy bypasses
+  → fast static checks + short-TTL session host cache prevents serialized blocking DNS
+  → WebSockets closed cleanly with code 1008 (Policy Violation) to avoid hanging
+  → --proxy-bypass-list=<-loopback>, --disable-quic, and WebRTC UDP egress disabled
 
-Layer 3: Pinned Outbound Proxy & Network Egress Isolation (browser_proxy.py & docker-compose.yml)
+Layer 3: Pinned Outbound Proxy & Egress Boundary (browser_proxy.py & docker-compose.yml)
   → dedicated forward proxy resolves target and connects directly to pre-validated literal IP
   → TLS SNI and Host headers preserved; certificate verification enforced
-  → prevents DNS rebinding (TOCTOU between validation and TCP connection)
-  → Chromium runs in isolated Docker container (internal: true, no host routing, non-root pwuser)
-  → Chromium egress restricted exclusively to browser-proxy; proxy failure fails closed
+  → prevents DNS rebinding (zero TOCTOU window between validation and TCP connection)
+  → restricts methods to GET, HEAD, and CONNECT; supports optional Proxy-Authorization
+  → packaged as dedicated container (docker/browser-proxy.Dockerfile) in docker-compose.yml
+  → if proxy is unavailable, browser network access fails closed (ERR_PROXY_CONNECTION_FAILED)
 ```
 
 ### Layer 1: Centralized URL and IP security validator
@@ -212,50 +214,61 @@ browser and research tools:
   wire, protecting main document navigations, server redirects, popups, child frames/iframes,
   and dynamic JavaScript requests (`fetch`, `XMLHttpRequest`).
 - Unsafe requests are aborted with `blockedbyclient`.
+- Fast static checks combined with a 60-second session host cache eliminate serialized blocking
+  DNS calls on the main thread for page subresources.
+- WebSockets are intercepted via `context.route_web_socket("**/*")` and closed cleanly with
+  code `1008` (Policy Violation), preventing client-side connection hangs.
 - Browser args include `--proxy-bypass-list=<-loopback>` so Chromium cannot bypass the proxy
-  for localhost, and `--disable-quic` to prevent UDP-based proxy evasion.
+  for localhost, `--disable-quic` to prevent UDP-based proxy evasion, and
+  `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` to eliminate WebRTC UDP leaks.
 - Security sandboxing remains fully enabled (no `--no-sandbox`).
 
-### Layer 3: Pinned outbound proxy & container egress isolation
+### Layer 3: Pinned outbound proxy & egress boundary
 
-`services/browser_proxy.py` provides an outbound HTTP/HTTPS forward proxy:
+`services/browser_proxy.py` provides a dedicated outbound HTTP/HTTPS forward proxy:
 - **Address Pinning & DNS Rebinding Protection:** The proxy performs DNS resolution, checks
-  returned IPs via `is_prohibited_ip()`, and opens the TCP connection to the validated literal
-  IP (`_open_pinned()`). The original hostname is retained in the HTTP `Host` header and TLS
-  SNI extension, preserving end-to-end TLS certificate verification while eliminating time-of-check
-  to time-of-use (TOCTOU) DNS rebinding attacks.
-- **Network Egress Isolation (`docker-compose.yml`):**
-  - The `browser` container runs on `browser-isolated` with `internal: true`. It has no direct
-    outbound internet gateway and no direct DNS access.
-  - The only allowed egress is to `browser-proxy` on port 8080 (dual-homed to both
-    `browser-isolated` and `agent-network`).
-  - Container runs as non-root `pwuser`, drops all capabilities (`cap_drop: [ALL]`), and does
-    not mount the Docker socket.
-  - If `browser-proxy` is unavailable, browser network access fails closed (`ERR_PROXY_CONNECTION_FAILED`).
+  returned IPs via `is_prohibited_ip()`, and opens the upstream TCP connection directly to the
+  validated literal IP (`_open_pinned()`). The original hostname is retained in the HTTP `Host`
+  header and TLS SNI extension, preserving end-to-end TLS certificate verification while eliminating
+  time-of-check to time-of-use (TOCTOU) DNS rebinding attacks.
+- **Method & Protocol Controls:** The plain HTTP proxy allows only `GET` and `HEAD` methods (relaying
+  unsafe mutating methods is rejected with `405 Method Not Allowed`). HTTPS traffic is handled via
+  `CONNECT` after target validation.
+- **Authentication:** Supports optional `Proxy-Authorization` (Bearer token or Basic auth) via
+  `BROWSER_PROXY_TOKEN`.
+- **Fail-Closed Availability:** If `BROWSER_PROXY_URL` is unset, browser session initialization
+  refuses to start. If the proxy is stopped or unreachable, Chromium navigations fail closed with
+  `ERR_PROXY_CONNECTION_FAILED`.
+- **Deployment Packaging:** Built via `backend/docker/browser-proxy.Dockerfile` and run as a
+  service in `docker-compose.yml`.
 
 ### Research tools hardening
 
 `services/tools/builtin/research.py` and `agents/browser_research.py` reuse `url_security.py`:
 - All URLs (`research_fetch`, `research_extract`, `research_citations`, `_source_metadata`,
   and `compare_sources`) are validated before network execution.
-- HTTP requests are executed via `httpx` using a custom `PinnedBackend` socket factory, ensuring
-  the connection dials the validated literal IP while validating TLS certificates against the
-  original hostname.
+- HTTP requests are executed via `httpx` using `create_pinned_transport()`, ensuring the TCP
+  socket connects strictly to the validated literal IP while validating TLS certificates against
+  the original hostname.
+- `PinnedBackend` raises `URLSecurityError` on host mismatch instead of failing open.
 - Redirects are handled manually (`follow_redirects=False`) up to a maximum of 5 hops. Every
   redirect target (including relative redirects) is resolved and re-validated against all
   SSRF rules before the hop is made.
+- Multi-address fallback: when a hostname resolves to multiple safe addresses (e.g. dual-stack),
+  `_safe_request` attempts subsequent safe addresses on connection failure.
 
 ### Security test commands
 
 Run the dedicated SSRF, egress isolation, and URL security test suites:
 ```bash
 cd agent-system/backend
-pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py
+uv run pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py
 ```
 
 Run the full security test suite:
 ```bash
-pytest tests/security/
+cd agent-system/backend
+uv run pytest tests/security/
 ```
 
 Interactive browser capabilities refuse payment/credential subjects outright

@@ -3,10 +3,15 @@
 import socket
 from typing import Any
 
+import httpcore
+import httpx
 import pytest
 
 from agent_system.services.tools.url_security import (
+    PinnedBackend,
     URLSecurityError,
+    ValidatedURL,
+    create_pinned_transport,
     is_prohibited_ip,
     validate_url,
 )
@@ -272,3 +277,49 @@ def test_is_prohibited_ip_direct() -> None:
     assert not is_prohibited_ip(ipaddress.ip_address(PUBLIC))
     assert not is_prohibited_ip(ipaddress.ip_address(PUBLIC_V6))
 
+
+def test_pinned_backend_dials_pinned_ip_and_raises_on_host_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PinnedBackend("safe.example", "93.184.216.34")
+    dialed_args: list[Any] = []
+
+    def mock_super_connect(
+        self: Any,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> Any:
+        dialed_args.append((host, port))
+        return "stream"
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", mock_super_connect)
+
+    res = backend.connect_tcp("safe.example", 443)
+    assert res is not None
+    assert dialed_args == [("93.184.216.34", 443)]
+
+    with pytest.raises(URLSecurityError, match="host mismatch"):
+        backend.connect_tcp("evil.example", 443)
+
+
+def test_create_pinned_transport_builds_transport_or_raises() -> None:
+    import ipaddress
+
+    valid = ValidatedURL(
+        "https://safe.example/",
+        "safe.example",
+        443,
+        (ipaddress.ip_address("93.184.216.34"),),
+    )
+    transport = create_pinned_transport(valid)
+    assert isinstance(transport, httpx.HTTPTransport)
+
+    no_addrs = ValidatedURL("https://safe.example/", "safe.example", 443, ())
+    with pytest.raises(URLSecurityError, match="No validated IP addresses"):
+        create_pinned_transport(no_addrs)
+
+    with pytest.raises(URLSecurityError, match="out of range"):
+        create_pinned_transport(valid, address_index=5)

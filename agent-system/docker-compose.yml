@@ -4,52 +4,12 @@ services:
   browser-proxy:
     build:
       context: ./backend
-      dockerfile: docker/qa-sandbox.Dockerfile
-    command: ["python", "-m", "agent_system.services.browser_proxy", "--host", "0.0.0.0", "--port", "8080"]
-    networks:
-      - browser-isolated
-      - public-egress
-    restart: unless-stopped
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    user: "1000:1000"
-
-  # Dedicated, egress-isolated Chromium container.
-  # Placed on an internal-only network with NO default gateway and NO direct internet access.
-  # All outbound traffic MUST transit browser-proxy.
-  browser:
-    image: mcr.microsoft.com/playwright:v1.48.0-noble
-    command: ["/bin/sh", "-c", "sleep infinity"]
-    environment:
-      HTTP_PROXY: "http://browser-proxy:8080"
-      HTTPS_PROXY: "http://browser-proxy:8080"
-      ALL_PROXY: "http://browser-proxy:8080"
-      NO_PROXY: ""
-    networks:
-      - browser-isolated
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    user: "pwuser"
-    restart: unless-stopped
-
-  # Backend orchestrator.
-  backend:
-    build:
-      context: ./backend
-      dockerfile: docker/qa-sandbox.Dockerfile
-    command: ["python", "-m", "uvicorn", "agent_system.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      BROWSER_PROXY_URL: "http://browser-proxy:8080"
-      TOOLS_SHELL_MODE: "sandbox"
-    networks:
-      - browser-isolated
-      - public-egress
+      dockerfile: docker/browser-proxy.Dockerfile
     ports:
-      - "8000:8000"
+      - "8080:8080"
+    environment:
+      BROWSER_PROXY_PORT: 8080
+      BROWSER_PROXY_TOKEN: "${BROWSER_PROXY_TOKEN:-}"
     restart: unless-stopped
 
   # Optional: OpenConnector connector gateway (1,000+ SaaS providers via
@@ -60,6 +20,8 @@ services:
   openconnector:
     # Pinned by digest (update intentionally, not via :latest):
     # ghcr.io/oomol-lab/open-connector:latest @ sha256:PIN_ME
+    # Replace PIN_ME with the reviewed digest, e.g.:
+    # image: ghcr.io/oomol-lab/open-connector:v1.2.3@sha256:<64-hex>
     image: ghcr.io/oomol-lab/open-connector:latest
     ports:
       - "3000:3000"
@@ -69,17 +31,6 @@ services:
       OOMOL_CONNECT_ADMIN_TOKEN: "${OOMOL_CONNECT_ADMIN_TOKEN:-}"
     volumes:
       - openconnector_data:/app/data
-    networks:
-      - public-egress
 
 volumes:
   openconnector_data:
-
-networks:
-  # internal: true disables default gateway, blocking direct outbound connections,
-  # direct external DNS queries, and UDP/QUIC egress bypasses.
-  browser-isolated:
-    driver: bridge
-    internal: true
-  public-egress:
-    driver: bridge

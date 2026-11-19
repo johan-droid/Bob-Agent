@@ -14,11 +14,10 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
-import httpcore
 import httpx
 
 from agent_system.domain.events import utcnow
-from agent_system.services.tools.url_security import PinnedBackend, ValidatedURL
+from agent_system.services.tools.url_security import ValidatedURL, create_pinned_transport
 
 
 @dataclass
@@ -84,17 +83,8 @@ class ResearchAgent:
         while True:
             validated = guard(current_url) if guard is not None else None
             transport: httpx.HTTPTransport | None = None
-            if isinstance(validated, ValidatedURL) and validated.addresses:
-                try:
-                    pool = httpcore.ConnectionPool(
-                        network_backend=PinnedBackend(
-                            validated.hostname, str(validated.addresses[0])
-                        )
-                    )
-                    transport = httpx.HTTPTransport()
-                    transport._pool = pool
-                except Exception:
-                    pass
+            if isinstance(validated, ValidatedURL):
+                transport = create_pinned_transport(validated)
             with httpx.Client(
                 transport=transport, timeout=self._timeout, follow_redirects=False
             ) as client:

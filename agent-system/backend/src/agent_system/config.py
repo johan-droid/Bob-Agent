@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # Empty is intentionally fail-closed: browser tools cannot launch without
     # the security boundary supplied by the deployment.
     browser_proxy_url: str = ""
+    # Optional shared secret required by the browser proxy (Proxy-Authorization).
+    browser_proxy_token: str = ""
 
     # Memory (Obsidian vault). Outcomes auto-persist; recall_top_k notes
     # are injected into LLM task prompts. Embedding backend: "hash" (zero

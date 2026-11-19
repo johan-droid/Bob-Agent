@@ -93,13 +93,25 @@ class BrowserSessions:
             playwright = _import_playwright()
             headless = bool(getattr(ctx.settings, "browser_headless", True))
             proxy_url = _required_proxy_url(ctx.settings)
+            proxy_token = str(getattr(ctx.settings, "browser_proxy_token", "") or "").strip()
+            proxy_config: dict[str, str] = {"server": proxy_url}
+            if proxy_token:
+                proxy_config["username"] = "bob"
+                proxy_config["password"] = proxy_token
+
             # Chromium receives no user data directory and therefore no personal
             # profile. QUIC is disabled because it can bypass an HTTP CONNECT
-            # proxy over UDP; the compose network is the independent backstop.
+            # proxy over UDP; WebRTC non-proxied UDP is disabled to prevent
+            # proxy evasion and local IP leakage; loopback bypass is disabled.
             browser = playwright.chromium.launch(
                 headless=headless,
-                proxy={"server": proxy_url},
-                args=["--disable-quic", "--proxy-bypass-list=<-loopback>"],
+                proxy=proxy_config,
+                args=[
+                    "--disable-quic",
+                    "--proxy-bypass-list=<-loopback>",
+                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                ],
             )
             try:
                 # Context-level routes apply to every page, popup, iframe and
@@ -194,6 +206,12 @@ def _safe_close(session: dict[str, Any]) -> None:
 def _required_proxy_url(settings: Any) -> str:
     """Return the deployment-provided proxy endpoint or fail before Chromium starts."""
     proxy_url = str(getattr(settings, "browser_proxy_url", "") or "").strip()
+    if not proxy_url:
+        raise ToolError(
+            "BROWSER_PROXY_URL is not configured; browser egress proxy is required "
+            "for secure operation. Set BROWSER_PROXY_URL in environment or .env. "
+            "See docs/OPERATIONS.md."
+        )
     try:
         parsed = urlsplit(proxy_url)
     except ValueError as exc:
@@ -219,14 +237,60 @@ def _required_proxy_url(settings: Any) -> str:
 
 def _install_request_guard(context: Any) -> None:
     """Install fail-closed guards before a context can open a network page."""
+    import time as _time
+
+    validated_host_cache: dict[str, float] = {}
 
     def guard(route: Any) -> None:
         request_url = str(route.request.url)
+        # Safe browser-internal schemes
+        if request_url.startswith(("data:", "about:")):
+            if hasattr(route, "fallback"):
+                route.fallback()
+            else:
+                route.continue_()
+            return
+
         try:
+            parsed = urlsplit(request_url)
+            scheme = parsed.scheme.lower()
+            if scheme not in {"http", "https"}:
+                route.abort("blockedbyclient")
+                return
+            if parsed.username or parsed.password:
+                route.abort("blockedbyclient")
+                return
+            host = (parsed.hostname or "").rstrip(".").lower()
+            if not host:
+                route.abort("blockedbyclient")
+                return
+            if (
+                host in {"localhost", "metadata.google.internal"}
+                or host.endswith(".localhost")
+                or host.endswith(".internal")
+            ):
+                route.abort("blockedbyclient")
+                return
+            port = parsed.port or (443 if scheme == "https" else 80)
+            if port not in {80, 443}:
+                route.abort("blockedbyclient")
+                return
+
+            now = _time.monotonic()
+            cached_time = validated_host_cache.get(host)
+            if cached_time is not None and (now - cached_time) < 60.0:
+                if hasattr(route, "fallback"):
+                    route.fallback()
+                else:
+                    route.continue_()
+                return
+
             validate_url(request_url)
+            validated_host_cache[host] = now
         except Exception:
             route.abort("blockedbyclient")
             return
+
         if hasattr(route, "fallback"):
             route.fallback()
         else:
@@ -235,14 +299,19 @@ def _install_request_guard(context: Any) -> None:
     context.route("**/*", guard)
 
     # WebSocket handshakes are not HTTP document requests and are not covered by
-    # ``route``. This product has no browser-WebSocket use case, so block the
-    # whole protocol instead of creating a second, weaker URL policy.
+    # ``route``. This product has no browser-WebSocket use case, so close all
+    # WebSockets cleanly with Policy Violation (1008) instead of hanging.
     route_web_socket = getattr(context, "route_web_socket", None)
     if not callable(route_web_socket):
         raise ToolError("installed Playwright lacks required WebSocket interception support")
 
     def guard_web_socket(web_socket_route: Any) -> None:
-        web_socket_route.abort()
+        if hasattr(web_socket_route, "close"):
+            web_socket_route.close(
+                code=1008, reason="Policy Violation: WebSockets disabled by SSRF guard"
+            )
+        elif hasattr(web_socket_route, "abort"):
+            web_socket_route.abort()
 
     route_web_socket("**/*", guard_web_socket)
 
