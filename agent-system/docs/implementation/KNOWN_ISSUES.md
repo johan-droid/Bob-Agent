@@ -87,10 +87,21 @@ Every finding below is closed with a regression test in
    (`_redact_update`); the in-memory copy used to process the message is untouched. The
    `scrub_text` PEM pattern also gained an *unterminated* case — a user pasting a key and
    losing the `END` line leaked the whole block.
-6. **Browser tools have no SSRF guard** (STILL OPEN, by design of scope). Real Chromium in
-   `services/tools/builtin/browser.py` reaches loopback and RFC1918 hosts and follows
-   redirects. `_assert_fetchable` exists in the research builtin and is not called here.
-   Needs Playwright `page.route()` interception on every request, not just the top-level URL.
+6. **Browser tools have no SSRF guard** (FIXED AND VERIFIED). Real Chromium in
+   `services/tools/builtin/browser.py` reached loopback and RFC1918 hosts and followed
+   redirects. Fully remediated with three independent defense layers: (1) shared URL and IP
+   validator in `services/tools/url_security.py` (HTTP/HTTPS only, ports 80/443 only, dual-stack
+   A/AAAA DNS resolution, blocking RFC 1918, loopback, link-local, CGNAT, metadata endpoints
+   such as 169.254.169.254 and 100.100.100.200, IPv6-mapped addresses, and unusual numeric formats);
+   (2) Playwright BrowserContext request interception (`context.route("**/*")`) with
+   `service_workers="block"`, protecting navigations, redirects, popups, iframes, fetch/XHR,
+   and subresources; (3) dedicated outbound pinned proxy (`services/browser_proxy.py`) that pins
+   connections to validated literal IPs to defeat DNS rebinding while preserving TLS SNI/Host,
+   coupled with container network egress isolation (`docker-compose.yml` with `internal: true`,
+   dropping all capabilities, non-root user, fail-closed on proxy unavailability). Research tools
+   (`research.py` and `browser_research.py`) also hardened with URL validation, per-hop redirect
+   re-validation (5 hop limit), and IP-pinned HTTP transport.
+   Regression test: `pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py` (129 passed).
 7. **Some endpoints lacked ownership checks** (FIXED where real). `get_artifact` now applies
    `enforce_owner_row`. `autopilot_reset` (which re-arms autonomy against shared state) now
    requires OWNER/ADMIN; `autopilot_kill` is deliberately left open because it is a

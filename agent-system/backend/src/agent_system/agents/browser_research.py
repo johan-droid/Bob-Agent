@@ -14,9 +14,11 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
+import httpcore
 import httpx
 
 from agent_system.domain.events import utcnow
+from agent_system.services.tools.url_security import PinnedBackend, ValidatedURL
 
 
 @dataclass
@@ -64,7 +66,7 @@ class ResearchAgent:
     def __init__(self, timeout: float = 20.0) -> None:
         self._timeout = timeout
 
-    def fetch(self, url: str, *, guard: Callable[[str], None] | None = None) -> Citation:
+    def fetch(self, url: str, *, guard: Callable[[str], Any] | None = None) -> Citation:
         """Fetch one URL and extract a citation.
 
         ``guard`` is an optional SSRF validator applied to the initial URL and
@@ -75,26 +77,42 @@ class ResearchAgent:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError(f"blocked non-http scheme: {parsed.scheme}")
-        if guard is not None:
-            guard(url)
-        # follow_redirects=False and re-validated per hop: a public URL that
-        # 302s to 169.254.169.254 is the standard SSRF bypass.
-        with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-            resp = client.get(url)
-            for _ in range(5):
+        current_url = url
+        hops = 0
+        final_url = url
+        body = ""
+        while True:
+            validated = guard(current_url) if guard is not None else None
+            transport: httpx.HTTPTransport | None = None
+            if isinstance(validated, ValidatedURL) and validated.addresses:
+                try:
+                    pool = httpcore.ConnectionPool(
+                        network_backend=PinnedBackend(
+                            validated.hostname, str(validated.addresses[0])
+                        )
+                    )
+                    transport = httpx.HTTPTransport()
+                    transport._pool = pool
+                except Exception:
+                    pass
+            with httpx.Client(
+                transport=transport, timeout=self._timeout, follow_redirects=False
+            ) as client:
+                resp = client.get(current_url)
                 if resp.is_redirect:
+                    hops += 1
+                    if hops > 5:
+                        raise ValueError("too many redirects")
                     nxt = resp.headers.get("location")
                     if not nxt:
+                        final_url, body = str(resp.url), resp.text
                         break
-                    nxt = str(httpx.URL(url).join(nxt))
-                    if guard is not None:
-                        guard(nxt)
-                    url = nxt
-                    resp = client.get(url)
+                    nxt = str(httpx.URL(current_url).join(nxt))
+                    current_url = nxt
                     continue
+                resp.raise_for_status()
+                final_url, body = str(resp.url), resp.text
                 break
-            resp.raise_for_status()
-            final_url, body = str(resp.url), resp.text
         extractor = _TextExtractor()
         extractor.feed(body)
         snippet = extractor.text()[:500]
@@ -106,7 +124,7 @@ class ResearchAgent:
         )
 
     def research(
-        self, urls: list[str], *, guard: Callable[[str], None] | None = None
+        self, urls: list[str], *, guard: Callable[[str], Any] | None = None
     ) -> dict[str, Any]:
         citations: list[Citation] = []
         errors: dict[str, str] = {}

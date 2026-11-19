@@ -67,6 +67,7 @@ packages = ["src/agent_system"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "src"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:agent_system.*"]
 
