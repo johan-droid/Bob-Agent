@@ -247,8 +247,9 @@ def test_live_docker_isolated_network_blocks_direct_egress() -> None:
 
         client = docker.from_env()
         client.ping()
+        client.images.get("agent-system/qa-sandbox:latest")
     except Exception:
-        pytest.skip("Docker daemon unavailable")
+        pytest.skip("Docker daemon or agent-system/qa-sandbox:latest unavailable")
 
     net_name = f"test-isolated-net-{id(client)}"
     try:
