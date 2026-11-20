@@ -97,6 +97,10 @@ jobs:
         working-directory: agent-system/backend
         run: uv sync --group dev
 
+      - name: Install Playwright browser
+        working-directory: agent-system/backend
+        run: uv run playwright install --with-deps chromium
+
       - name: security suite
         working-directory: agent-system/backend
         run: uv run pytest -q tests/security

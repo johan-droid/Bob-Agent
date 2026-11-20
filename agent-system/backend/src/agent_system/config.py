@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     # Pluggable tools (folder drop, same discovery pattern as SkillManager).
     # Relative paths resolve against the backend working directory.
     tools_plugin_dir: str = "tools_plugins"
+    # Browser traffic is allowed only through this explicit outbound proxy.
+    # Empty is intentionally fail-closed: browser tools cannot launch without
+    # the security boundary supplied by the deployment.
+    browser_proxy_url: str = ""
+    # Optional shared secret required by the browser proxy (Proxy-Authorization).
+    browser_proxy_token: str = ""
 
     # Memory (Obsidian vault). Outcomes auto-persist; recall_top_k notes
     # are injected into LLM task prompts. Embedding backend: "hash" (zero

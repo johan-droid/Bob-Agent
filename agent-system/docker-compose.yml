@@ -1,4 +1,23 @@
 services:
+  # Outbound validation proxy for all browser traffic.
+  # Pinned destination IP dialing, DNS rebinding prevention, and default-deny.
+  browser-proxy:
+    build:
+      context: ./backend
+      dockerfile: docker/browser-proxy.Dockerfile
+    ports:
+      # Bind strictly to loopback so proxy is not exposed on public interfaces
+      - "127.0.0.1:8080:8080"
+    environment:
+      BROWSER_PROXY_PORT: 8080
+      BROWSER_PROXY_TOKEN: "${BROWSER_PROXY_TOKEN:?BROWSER_PROXY_TOKEN must be set in environment or .env.local}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "1000:1000"
+    restart: unless-stopped
+
   # Optional: OpenConnector connector gateway (1,000+ SaaS providers via
   # Actions + MCP). Set OPENCONNECTOR_BASE_URL=http://localhost:3000 in
   # .env.local to expose it to the agent. Generate secrets first:
@@ -7,9 +26,7 @@ services:
   openconnector:
     # Pinned by digest (update intentionally, not via :latest):
     # ghcr.io/oomol-lab/open-connector:latest @ sha256:PIN_ME
-    # Replace PIN_ME with the reviewed digest, e.g.:
-    # image: ghcr.io/oomol-lab/open-connector:v1.2.3@sha256:<64-hex>
-    image: ghcr.io/oomol-lab/open-connector:latest
+    image: ghcr.io/oomol-lab/open-connector:v1.0.0@sha256:d8bb63a3286b245a4980bbd4a22ad83f8b8a3cbbe446be0689b9d315ce92a341
     ports:
       - "3000:3000"
     environment:

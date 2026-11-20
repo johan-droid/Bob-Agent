@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from agent_system.domain.events import utcnow
+from agent_system.services.tools.url_security import ValidatedURL, create_pinned_transport
 
 
 @dataclass
@@ -64,7 +65,7 @@ class ResearchAgent:
     def __init__(self, timeout: float = 20.0) -> None:
         self._timeout = timeout
 
-    def fetch(self, url: str, *, guard: Callable[[str], None] | None = None) -> Citation:
+    def fetch(self, url: str, *, guard: Callable[[str], Any]) -> Citation:
         """Fetch one URL and extract a citation.
 
         ``guard`` is an optional SSRF validator applied to the initial URL and
@@ -75,26 +76,50 @@ class ResearchAgent:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError(f"blocked non-http scheme: {parsed.scheme}")
-        if guard is not None:
-            guard(url)
-        # follow_redirects=False and re-validated per hop: a public URL that
-        # 302s to 169.254.169.254 is the standard SSRF bypass.
-        with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-            resp = client.get(url)
-            for _ in range(5):
+        current_url = url
+        hops = 0
+        final_url = url
+        body = ""
+        while True:
+            validated = guard(current_url) if guard is not None else None
+            transport: httpx.HTTPTransport | None = None
+            if isinstance(validated, ValidatedURL):
+                transport = create_pinned_transport(validated)
+            with httpx.Client(
+                transport=transport, timeout=self._timeout, follow_redirects=False
+            ) as client:
+                req = client.build_request("GET", current_url)
+                resp = client.send(req, stream=True)
                 if resp.is_redirect:
+                    hops += 1
+                    if hops > 5:
+                        resp.close()
+                        raise ValueError("too many redirects")
                     nxt = resp.headers.get("location")
+                    resp.close()
                     if not nxt:
+                        final_url, body = str(resp.url), ""
                         break
-                    nxt = str(httpx.URL(url).join(nxt))
-                    if guard is not None:
-                        guard(nxt)
-                    url = nxt
-                    resp = client.get(url)
+                    nxt = str(httpx.URL(current_url).join(nxt))
+                    current_url = nxt
                     continue
+                resp.raise_for_status()
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > 2 * 1024 * 1024:
+                    resp.close()
+                    raise ValueError("response body exceeds maximum allowed size (2MB)")
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes(16384):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        resp.close()
+                        raise ValueError("response body exceeds maximum allowed size (2MB)")
+                resp._content = b"".join(chunks)
+                final_url, body = str(resp.url), resp.text
+                resp.close()
                 break
-            resp.raise_for_status()
-            final_url, body = str(resp.url), resp.text
         extractor = _TextExtractor()
         extractor.feed(body)
         snippet = extractor.text()[:500]
@@ -105,9 +130,7 @@ class ResearchAgent:
             snippet=snippet,
         )
 
-    def research(
-        self, urls: list[str], *, guard: Callable[[str], None] | None = None
-    ) -> dict[str, Any]:
+    def research(self, urls: list[str], *, guard: Callable[[str], Any]) -> dict[str, Any]:
         citations: list[Citation] = []
         errors: dict[str, str] = {}
         for url in urls:

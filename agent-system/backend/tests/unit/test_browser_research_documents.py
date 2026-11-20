@@ -45,7 +45,7 @@ def http_server() -> dict[str, str]:
 class TestResearch:
     def test_fetch_extracts_title_text(self, http_server: dict[str, str]) -> None:
         agent = ResearchAgent()
-        citation = agent.fetch(f"{http_server['base']}/page")
+        citation = agent.fetch(f"{http_server['base']}/page", guard=lambda u: None)
         assert citation.title == "Test Page"
         assert "Citation content here." in citation.snippet
         assert "evil()" not in citation.snippet  # script content skipped
@@ -53,7 +53,10 @@ class TestResearch:
 
     def test_research_aggregates_and_reports_errors(self, http_server: dict[str, str]) -> None:
         agent = ResearchAgent()
-        out = agent.research([f"{http_server['base']}/ok", "http://127.0.0.1:1/unreachable"])
+        out = agent.research(
+            [f"{http_server['base']}/ok", "http://127.0.0.1:1/unreachable"],
+            guard=lambda u: None,
+        )
         assert len(out["citations"]) == 1
         assert "unreachable" in out["errors"] or len(out["errors"]) == 1
         assert "[Test Page]" in out["extract"]
@@ -61,7 +64,7 @@ class TestResearch:
     def test_blocks_non_http_scheme(self) -> None:
         agent = ResearchAgent()
         with pytest.raises(ValueError, match="blocked"):
-            agent.fetch("file:///etc/passwd")
+            agent.fetch("file:///etc/passwd", guard=lambda u: None)
 
 
 class TestDocuments:

@@ -382,6 +382,30 @@ sudo zypper install -y python312 nodejs npm git curl docker docker-compose
   `OOMOL_CONNECT_ADMIN_TOKEN` before first boot:
   `openssl rand -base64 32` for each.
 
+## Browser Security Proxy
+
+Bob Agent's interactive browser tool requires an explicit outbound proxy to enforce Layer 3
+SSRF protection and address pinning (preventing DNS rebinding attacks).
+
+### Configuration
+
+- `BROWSER_PROXY_URL`: Full HTTP URL of the proxy (e.g. `http://127.0.0.1:8080`).
+  If unset, browser session creation fails closed.
+- `BROWSER_PROXY_TOKEN`: Optional shared secret required by the proxy.
+
+### Running the Proxy
+
+Option 1 — Standalone daemon:
+```bash
+cd backend
+uv run python -m agent_system.services.browser_proxy --host 0.0.0.0 --port 8080
+```
+
+Option 2 — Docker Compose:
+```bash
+docker compose up -d browser-proxy
+```
+
 ## Observability (optional profile)
 
 > **CONFIGURATION REQUIRED — artifacts not yet in repo.** The compose

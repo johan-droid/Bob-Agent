@@ -157,23 +157,129 @@ structured error to the model instead of reaching the capability.
   those boundaries.
 - `Settings` refuses to start with default dev secrets when `AGENT_ENV=production`.
 
-## Browser and network
+## Browser, research tools, and network SSRF defense
+
+Browser navigation and research fetch capabilities are protected by a mandatory three-layer
+defense-in-depth architecture to prevent Server-Side Request Forgery (SSRF) to localhost,
+RFC1918 private subnets, link-local addresses, cloud metadata endpoints, CGNAT ranges, and
+internal services.
+
+```text
+Layer 1: URL & IP Validation (url_security.py)
+  → scheme HTTP/HTTPS, ports 80/443 only, credentials rejected
+  → A & AAAA DNS resolution; fail-closed on any prohibited IP or resolution error
+  → blocks RFC 1918, loopback, link-local, CGNAT, metadata (169.254.169.254, 100.100.100.200), IPv6 private/mapped
+
+Layer 2: Playwright Browser Interception (builtin/browser.py)
+  → isolated BrowserContext per session (no personal profile reuse; sandbox preserved)
+  → service_workers="block"
+  → context.route("**/*") intercepts all top-level navigations, client-side redirects (JS/meta refresh),
+    popups, iframes, JS fetch/XHR, and subresources (images, scripts, styles)
+  → fast static checks + short-TTL session host cache prevents serialized blocking DNS
+  → WebSockets closed cleanly with code 1008 (Policy Violation) to avoid hanging
+  → --proxy-bypass-list=<-loopback>, --disable-quic, and WebRTC UDP egress disabled
+
+Layer 3: Pinned Outbound Proxy (browser_proxy.py & docker-compose.yml)
+  → dedicated forward proxy resolves target and connects directly to pre-validated literal IP
+  → TLS SNI and Host headers preserved; certificate verification enforced
+  → prevents DNS rebinding (zero TOCTOU window between validation and TCP connection)
+  → enforces server-side HTTP 3xx redirect safety (Chromium routes all redirect hops through proxy)
+  → restricts methods to GET, HEAD, and CONNECT; supports Proxy-Authorization
+  → packaged as hardened container bound to loopback (127.0.0.1:8080:8080, cap_drop: ALL, non-root)
+  → if proxy is unavailable, browser network access fails closed (ERR_PROXY_CONNECTION_FAILED)
+```
+
+### Layer 1: Centralized URL and IP security validator
+
+`services/tools/url_security.py` is the single authoritative validation module used by both
+browser and research tools:
+- **Allowed schemes & ports:** Only `http` and `https` on standard ports `80` and `443`.
+- **Credentials:** Rejects any embedded credentials (`user:pass@host`).
+- **IP Range Enforcement:** Blocks loopback (`127.0.0.0/8`, `::1`), private IPv4 (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), unique local
+  IPv6 (`fc00::/7`), reserved/multicast/broadcast, and Carrier-Grade NAT (`100.64.0.0/10`).
+- **Cloud Metadata:** Blocks known metadata endpoints (AWS, GCP, Azure, Oracle, DigitalOcean
+  `169.254.169.254`, Alibaba `100.100.100.200`, and hostnames like `metadata.google.internal`).
+- **IPv6 Representations:** Blocks IPv4-mapped IPv6 (`::ffff:x.x.x.x`), IPv4-compatible IPv6,
+  NAT64 (`64:ff9b::/96`), and 6to4 (`2002::/16`) mapping to prohibited addresses.
+- **Dual-Stack DNS Resolution:** Resolves both IPv4 (`A`) and IPv6 (`AAAA`) DNS records. If
+  *any* resolved address is prohibited, or if DNS resolution fails, the host is rejected.
+- **Normalization:** Normalizes hostnames, trailing dots, IDNs, and unusual integer/hex/octal
+  numeric representations.
+
+### Layer 2: Playwright request interception
+
+`services/tools/builtin/browser.py` enforces runtime request interception within Playwright:
+- Every session uses an isolated `BrowserContext` with `service_workers="block"`.
+- Context-level routing (`context.route("**/*")`) monitors initial requests before they hit the
+  wire, protecting main document navigations, client-side redirects (JS/meta refresh), popups,
+  child frames/iframes, and dynamic JavaScript requests (`fetch`, `XMLHttpRequest`).
+  *(Note on Playwright redirect semantics: In Playwright 1.65+, server-side HTTP 3xx redirect hops
+  are followed internally by Chromium's network service and do not trigger `context.route` handlers;
+  server redirect protection is strictly enforced by Layer 3, where Chromium sends all hops through
+  the outbound pinned proxy).*
+- Unsafe requests are aborted with `blockedbyclient`.
+- Fast static checks combined with a 60-second session host cache eliminate serialized blocking
+  DNS calls on the main thread for page subresources.
+- WebSockets are intercepted via `context.route_web_socket("**/*")` and closed cleanly with
+  code `1008` (Policy Violation), preventing client-side connection hangs.
+- Browser args include `--proxy-bypass-list=<-loopback>` so Chromium cannot bypass the proxy
+  for localhost, `--disable-quic` to prevent UDP-based proxy evasion, and
+  `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` to eliminate WebRTC UDP leaks.
+- Security sandboxing remains fully enabled (no `--no-sandbox`).
+
+### Layer 3: Pinned outbound proxy & loopback binding
+
+`services/browser_proxy.py` provides a dedicated outbound HTTP/HTTPS forward proxy:
+- **Address Pinning & DNS Rebinding Protection:** The proxy performs DNS resolution, checks
+  returned IPs via `is_prohibited_ip()`, and opens the upstream TCP connection directly to the
+  validated literal IP (`_open_pinned()`). The original hostname is retained in the HTTP `Host`
+  header and TLS SNI extension, preserving end-to-end TLS certificate verification while eliminating
+  time-of-check to time-of-use (TOCTOU) DNS rebinding attacks.
+- **Method & Protocol Controls:** The plain HTTP proxy allows only `GET` and `HEAD` methods (relaying
+  unsafe mutating methods is rejected with `405 Method Not Allowed`). HTTPS traffic is handled via
+  `CONNECT` after target validation.
+- **Authentication & Loopback Binding:** Supports `Proxy-Authorization` (Bearer token or Basic auth)
+  via `BROWSER_PROXY_TOKEN`. In `docker-compose.yml`, the port is bound strictly to loopback
+  (`127.0.0.1:8080:8080`) with `cap_drop: ALL`, `no-new-privileges:true`, and non-root user `1000:1000`.
+- **Fail-Closed Availability:** If `BROWSER_PROXY_URL` is unset, browser session initialization
+  refuses to start. If the proxy is stopped or unreachable, Chromium navigations fail closed with
+  `ERR_PROXY_CONNECTION_FAILED`.
+- **Deployment Packaging:** Built via hardened `backend/docker/browser-proxy.Dockerfile` running as non-root `1000:1000`.
+
+### Research tools hardening
+
+`services/tools/builtin/research.py` and `agents/browser_research.py` reuse `url_security.py`:
+- All URLs (`research_fetch`, `research_extract`, `research_citations`, `_source_metadata`,
+  and `compare_sources`) are validated before network execution.
+- HTTP requests are executed via `httpx` using `create_pinned_transport()`, ensuring the TCP
+  socket connects strictly to the validated literal IP while validating TLS certificates against
+  the original hostname.
+- `PinnedBackend` raises `URLSecurityError` on host mismatch instead of failing open.
+- Redirects are handled manually (`follow_redirects=False`) up to a maximum of 5 hops. Every
+  redirect target (including relative redirects) is resolved and re-validated against all
+  SSRF rules before the hop is made.
+- Multi-address fallback: when a hostname resolves to multiple safe addresses (e.g. dual-stack),
+  `_safe_request` attempts subsequent safe addresses on connection failure.
+
+### Security test commands
+
+Run the dedicated SSRF, egress isolation, and URL security test suites:
+```bash
+cd agent-system/backend
+uv run pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py
+```
+
+Run the full security test suite:
+```bash
+cd agent-system/backend
+uv run pytest tests/security/
+```
 
 Interactive browser capabilities refuse payment/credential subjects outright
 (`browser:transact` plus a reserved-pattern deny list). OpenConnector and MCP are
 execute-tier with per-action scopes (`openconnector:<action>`, `mcp:<server>:<tool>`);
 credentials stay in the connector runtime, never in this process.
-
-Research fetching is guarded by `_assert_fetchable`
-(`services/tools/builtin/research.py`): it resolves the hostname and refuses every
-resulting address that is loopback, private, link-local, reserved, multicast, unspecified
-or CGNAT (`100.64.0.0/10`, which `ipaddress.is_private` does not cover — Alibaba metadata
-at `100.100.100.200`). Non-standard ports and unresolvable hosts are refused too. Checking
-the host *string* alone was not enough: `127.0.0.1.nip.io` and DNS rebinding both reached
-internal services before the resolver check was added. `web_fetch` and
-`research_citations` now pass the guard into `ResearchAgent`, which also re-validates each
-redirect hop (`follow_redirects=False`) since a public URL that 302s to
-`169.254.169.254` is the standard bypass.
 
 `file_search` enforces the same jail and denylist as `file_read` (it re-resolves every
 walked path, because `rglob` follows symlinks out of the allowed roots) and scrubs its
@@ -186,9 +292,9 @@ backup. Approval decisions require OWNER/ADMIN and an ADMIN cannot mint `ALLOW_A
 `get_artifact` enforces ownership, and `autopilot_reset` requires OWNER/ADMIN (`kill` stays
 open — it is a fail-safe brake).
 
-**Still open (see `KNOWN_ISSUES.md`):** browser tools have no SSRF guard at all (real
-Chromium reaches loopback and RFC1918 and follows redirects); PBKDF2 in
-`services/credentials.py` uses a hard-coded, non-per-install salt.
+**Still open (see `KNOWN_ISSUES.md`):** PBKDF2 in `services/credentials.py` uses a
+hard-coded, non-per-install salt (browser SSRF vulnerability fully resolved across 3
+independent defense layers).
 
 ## Plugins
 

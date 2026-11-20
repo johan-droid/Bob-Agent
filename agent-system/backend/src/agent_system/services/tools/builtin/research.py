@@ -17,94 +17,124 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlparse
+
+import httpcore
+import httpx
 
 from agent_system.services.tool_errors import ToolError
 from agent_system.services.tools.paths import scrub
 from agent_system.services.tools.registry import Tool, ToolContext, ToolRegistry, _str_param
+from agent_system.services.tools.url_security import (
+    URLSecurityError,
+    ValidatedURL,
+    create_pinned_transport,
+    validate_url,
+)
 
 GROUP = "research"
 MAX_RESULTS = 20
 MAX_TEXT_CHARS = 12000
+_MAX_RESEARCH_BODY_BYTES: Final = 2 * 1024 * 1024
 SEARCH_URL = "https://html.duckduckgo.com/html/?q="
 USER_AGENT = "BobAgent/0.1 (+local research capability)"
 
 
-def _assert_fetchable(url: str) -> None:
-    """SSRF guard: refuse loopback/private/link-local/reserved targets and
-    non-standard ports. Every outbound research request must pass this
-    before a socket is opened.
-
-    Resolves the hostname and checks *every* returned address: checking the
-    host string alone let any attacker-controlled name (or ``127.0.0.1.nip.io``,
-    or DNS rebinding) reach internal services. Resolution failure is treated as
-    blocked — an unresolvable host is never a legitimate fetch target.
+def _assert_fetchable(url: str) -> ValidatedURL:
+    """SSRF guard: refuse loopback/private/link-local/reserved targets,
+    cloud metadata endpoints, non-standard ports, and invalid schemes.
+    Reuses the centralized URL security validator.
     """
-    import ipaddress
-    import socket
-
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if not host:
-        raise ToolError("refusing fetch target with no host")
-    blocked_hosts = {"localhost", "metadata.google.internal"}
-    if host in blocked_hosts or host.endswith(".internal") or host == "169.254.169.254":
-        raise ToolError(f"refusing blocked fetch target: {host}")
-    if parsed.port is not None and parsed.port not in (80, 443):
-        raise ToolError("refusing non-standard port for research fetch")
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
-    except OSError as exc:
-        raise ToolError(f"refusing unresolvable fetch target: {host} ({exc})") from exc
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:  # pragma: no cover - getaddrinfo always returns IPs
-            raise ToolError(f"refusing unresolvable fetch target: {host}") from None
-        # 100.64.0.0/10 (CGNAT, e.g. Alibaba metadata at 100.100.100.200) is not
-        # covered by is_private in the stdlib, hence the explicit extra check.
-        cgnat = ip in ipaddress.ip_network("100.64.0.0/10")
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-            or cgnat
-        ):
-            raise ToolError(f"refusing blocked fetch target: {host} -> {addr}")
+        return validate_url(url)
+    except URLSecurityError as exc:
+        raise ToolError(f"refusing unsafe fetch target: {exc}") from exc
+
+
+def _safe_request(
+    url: str,
+    method: str = "GET",
+    timeout: float = 20.0,
+    max_hops: int = 5,
+) -> tuple[httpx.Response, str]:
+    current_url = url
+    hops = 0
+    current_method = method
+    while True:
+        validated = _assert_fetchable(current_url)
+        last_exc: Exception | None = None
+        response: httpx.Response | None = None
+        for addr_idx in range(len(validated.addresses)):
+            transport = create_pinned_transport(validated, address_index=addr_idx)
+            try:
+                with httpx.Client(
+                    transport=transport,
+                    timeout=timeout,
+                    follow_redirects=False,
+                    headers={"User-Agent": USER_AGENT},
+                ) as client:
+                    if current_method == "HEAD":
+                        response = client.head(current_url)
+                    else:
+                        req = client.build_request("GET", current_url)
+                        resp = client.send(req, stream=True)
+                        if resp.is_redirect:
+                            resp.read()
+                            response = resp
+                        else:
+                            resp.raise_for_status()
+                            cl = resp.headers.get("content-length")
+                            if cl and cl.isdigit() and int(cl) > _MAX_RESEARCH_BODY_BYTES:
+                                resp.close()
+                                raise ToolError("response body exceeds maximum allowed size (2MB)")
+                            chunks: list[bytes] = []
+                            total = 0
+                            for chunk in resp.iter_bytes(16384):
+                                chunks.append(chunk)
+                                total += len(chunk)
+                                if total > _MAX_RESEARCH_BODY_BYTES:
+                                    resp.close()
+                                    raise ToolError(
+                                        "response body exceeds maximum allowed size (2MB)"
+                                    )
+                            resp._content = b"".join(chunks)
+                            resp.close()
+                            response = resp
+                    break
+            except ToolError:
+                raise
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpcore.ConnectError) as exc:
+                last_exc = exc
+                continue
+        if response is None:
+            if last_exc is not None:
+                raise ToolError(
+                    f"connection failed for {current_url}: {scrub(str(last_exc))[:300]}"
+                ) from last_exc
+            raise ToolError(f"connection failed for {current_url}: no valid address reached")
+
+        if response.is_redirect:
+            hops += 1
+            if hops > max_hops:
+                raise ToolError("refusing redirect: maximum redirect limit exceeded")
+            loc = response.headers.get("location")
+            if not loc:
+                return response, current_url
+            nxt = str(httpx.URL(current_url).join(loc))
+            current_url = nxt
+            continue
+        return response, current_url
 
 
 def _http_get(url: str, timeout: float = 20.0) -> str:
-    import httpx
-
-    _assert_fetchable(url)
-    parsed = urlparse(url)
     try:
-        with httpx.Client(
-            timeout=timeout,
-            follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            response = client.get(url)
-            # Same-origin redirects only, max 2 hops, re-validated.
-            hops = 0
-            while response.is_redirect and hops < 2:
-                loc = response.headers.get("location", "")
-                if not loc.startswith(("http://", "https://")):
-                    raise ToolError("refusing non-http redirect")
-                if urlparse(loc).hostname != parsed.hostname:
-                    raise ToolError("refusing cross-origin redirect")
-                response = client.get(loc)
-                hops += 1
-            response.raise_for_status()
-            text = response.text
-            if len(text) > MAX_TEXT_CHARS * 4:
-                text = text[: MAX_TEXT_CHARS * 4]
-            return text
+        response, _ = _safe_request(url, method="GET", timeout=timeout, max_hops=5)
+        response.raise_for_status()
+        text = response.text
+        if len(text) > MAX_TEXT_CHARS * 4:
+            text = text[: MAX_TEXT_CHARS * 4]
+        return text
     except Exception as exc:
         if isinstance(exc, ToolError):
             raise
@@ -241,23 +271,17 @@ def _research_citations(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
 
 def _source_metadata(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:  # noqa: ARG001
     url = _require_http(str(args.get("url") or ""))
-    import httpx
-
-    # Same SSRF guard as _http_get: this path was previously an open probe
-    # against link-local/RFC1918 targets with redirects followed blindly.
-    _assert_fetchable(url)
     try:
-        with httpx.Client(
-            timeout=20.0, follow_redirects=False, headers={"User-Agent": USER_AGENT}
-        ) as client:
-            response = client.head(url)
-            if response.status_code >= 400 or response.is_redirect:
-                response = client.get(url)
+        response, final_url = _safe_request(url, method="HEAD", timeout=20.0, max_hops=5)
+        if response.status_code >= 400 or response.is_redirect:
+            response, final_url = _safe_request(url, method="GET", timeout=20.0, max_hops=5)
     except Exception as exc:
+        if isinstance(exc, ToolError):
+            raise
         raise ToolError(f"metadata request failed: {scrub(str(exc))[:300]}") from exc
-    parsed = urlparse(url)
+    parsed = urlparse(final_url)
     return {
-        "url": url,
+        "url": final_url,
         "scheme": parsed.scheme,
         "host": parsed.netloc,
         "path": parsed.path,
