@@ -188,21 +188,21 @@ class ProviderHealthTracker:
             rem_req = lowered.get("x-ratelimit-remaining-requests")
             if rem_req is not None:
                 try:
-                    st.requests_remaining = int(rem_req)  # type: ignore[arg-type]
+                    st.requests_remaining = int(rem_req)
                 except (ValueError, TypeError):
                     pass
 
             rem_tok = lowered.get("x-ratelimit-remaining-tokens")
             if rem_tok is not None:
                 try:
-                    st.tokens_remaining = int(rem_tok)  # type: ignore[arg-type]
+                    st.tokens_remaining = int(rem_tok)
                 except (ValueError, TypeError):
                     pass
 
             retry_after = lowered.get("retry-after")
             if retry_after is not None:
                 try:
-                    secs = float(retry_after)  # type: ignore[arg-type]
+                    secs = float(retry_after)
                     st.retry_after = time.monotonic() + max(1.0, secs)
                     st.health = ProviderHealth.RATE_LIMITED
                 except (ValueError, TypeError):

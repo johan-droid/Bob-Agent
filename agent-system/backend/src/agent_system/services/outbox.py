@@ -143,7 +143,8 @@ class Outbox:
                 .limit(max_rows)
             )
             try:
-                if getattr(db, "bind", None) is not None and db.bind.dialect.name == "postgresql":
+                bind = db.bind
+                if bind is not None and bind.dialect.name == "postgresql":
                     q = q.with_for_update(skip_locked=True)
             except Exception:
                 pass

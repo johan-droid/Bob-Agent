@@ -1070,7 +1070,7 @@ def select_model(
         (PRIMARY_PROVIDER, cap.model_id)
         for cap in sorted(requires, key=lambda c: _role_score(c, role))
     ]
-    candidates: list[tuple[str, str]] = [(PRIMARY_PROVIDER, model_id), *alternates]
+    candidates = [(PRIMARY_PROVIDER, model_id), *alternates]
     candidates.extend(
         _emergency_candidates(
             settings,
@@ -1523,7 +1523,7 @@ def _delay_for(
             delay = max(delay, min(cooldown, cap))
     except Exception:
         pass
-    return delay
+    return float(delay)
 
 
 def _maybe_checkpoint(

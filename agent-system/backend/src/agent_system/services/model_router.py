@@ -478,7 +478,10 @@ class ModelRouter:
         try:
             from agent_system.services.providers import is_offline_provider  # noqa: PLC0415
         except Exception:
-            is_offline_provider = lambda p: str(p or "").strip().lower() in {"echo", "none", ""}  # noqa: E731
+
+            def is_offline_provider(provider: str | None) -> bool:  # noqa: F811
+                return str(provider or "").strip().lower() in {"echo", "none", ""}
+
         if is_offline_provider(provider):
             return [primary]
         try:
@@ -615,7 +618,7 @@ class ModelRouter:
         else:
             chain = [(model_id, provider, self._adapters.get(provider))]
         per_call_timeout = kwargs.pop("timeout", None)
-        last_record: Any = None
+        last_record: InvocationResult | None = None
         for attempt_no, (cand_model, cand_provider, cand_adapter) in enumerate(chain):
             cand_breaker = self._breaker_for(cand_provider) if cand_provider != "unknown" else None
             cand_call_id = call_id if attempt_no == 0 else ids.new_model_call_id()
@@ -698,7 +701,9 @@ class ModelRouter:
             # Empty output counts as failure for selection (an LLM that says
             # nothing is useless); the attempt stays recorded in the ledger.
             if ok and (output or "").strip():
+                assert last_record is not None
                 return last_record
+        assert last_record is not None
         return last_record
 
     def invoke_streaming(

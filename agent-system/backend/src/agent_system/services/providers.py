@@ -733,10 +733,13 @@ class OpenAICompatibleAdapter:
 
     def buildRequest(self, request: Any) -> dict[str, Any]:
         """Pure transform of a normalized request into the native payload."""
+        _Req: Any = None
         try:
-            from agent_system.services.llm_contract import NormalizedLLMRequest as _Req
+            from agent_system.services.llm_contract import NormalizedLLMRequest
+
+            _Req = NormalizedLLMRequest
         except ImportError:
-            _Req = None  # type: ignore[assignment]
+            pass
         if _Req is not None and isinstance(request, _Req):
             messages = [dict(m) for m in request.messages]
             kwargs: dict[str, Any] = {

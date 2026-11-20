@@ -584,6 +584,7 @@ class PermissionGate:
             record.decision = Decision.EXPIRED
             self._persist(record)
             return record
+        new_reason: str | None
         if is_dangerous_scope(record.scope) or policy is Policy.DENY:
             # Cannot approve a default-deny scope, nor approve with DENY.
             new_decision = Decision.DENIED
