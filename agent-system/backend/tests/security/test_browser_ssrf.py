@@ -189,45 +189,142 @@ def test_live_browser_blocks_localhost_navigation(live_playwright: Any) -> None:
 
 
 def test_live_browser_blocks_redirect_to_localhost(live_playwright: Any) -> None:
-    browser = live_playwright.chromium.launch(headless=True)
-    context = browser.new_context(service_workers="block")
+    """Proves end-to-end that Chromium redirects to localhost are blocked by the outbound proxy."""
+    import asyncio
+    import threading
+    import time
 
-    # Set up route for public.example to issue a 302 redirect to localhost
-    def handle_redirect(route: Any) -> None:
-        route.fulfill(status=302, headers={"Location": "http://127.0.0.1:8000/internal"})
+    from agent_system.services.browser_proxy import OutboundProxy
 
-    context.route("https://public.example/*", handle_redirect)
-    browser_mod._install_request_guard(context)
-    page = context.new_page()
+    proxy = OutboundProxy(auth_token="testtoken")
+    loop = asyncio.new_event_loop()
 
-    aborted = False
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(proxy.start(host="127.0.0.1", port=0))
+        loop.run_forever()
+
+    t = threading.Thread(target=run_loop, daemon=True)
+    t.start()
+
+    time.sleep(0.3)
+    proxy_port = proxy.port
+
     try:
-        page.goto("https://public.example/redirect", timeout=3000)
-    except Exception as exc:
-        aborted = True
-        assert "ERR_BLOCKED_BY_CLIENT" in str(exc)
-    assert aborted, "Redirect to localhost was not blocked"
-    browser.close()
+        browser = live_playwright.chromium.launch(
+            headless=True,
+            proxy={
+                "server": f"http://127.0.0.1:{proxy_port}",
+                "username": "bob",
+                "password": "testtoken",
+            },
+            args=["--disable-quic", "--proxy-bypass-list=<-loopback>"],
+        )
+        context = browser.new_context()
+
+        def handle_redirect(route: Any) -> None:
+            route.fulfill(status=302, headers={"Location": "http://127.0.0.1:8000/internal"})
+
+        context.route("https://mock-public.example/redirect", handle_redirect)
+        page = context.new_page()
+
+        resp = page.goto("https://mock-public.example/redirect", timeout=5000)
+        assert resp is not None
+        assert resp.status == 403, (
+            "Outbound proxy must reject loopback redirect target with 403 Forbidden"
+        )
+        browser.close()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
 
 
 def test_live_browser_blocks_redirect_to_private_ip(live_playwright: Any) -> None:
+    """Proves end-to-end that Chromium redirects to RFC 1918 targets are blocked by proxy."""
+    import asyncio
+    import threading
+    import time
+
+    from agent_system.services.browser_proxy import OutboundProxy
+
+    proxy = OutboundProxy(auth_token="testtoken")
+    loop = asyncio.new_event_loop()
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(proxy.start(host="127.0.0.1", port=0))
+        loop.run_forever()
+
+    t = threading.Thread(target=run_loop, daemon=True)
+    t.start()
+
+    time.sleep(0.3)
+    proxy_port = proxy.port
+
+    try:
+        browser = live_playwright.chromium.launch(
+            headless=True,
+            proxy={
+                "server": f"http://127.0.0.1:{proxy_port}",
+                "username": "bob",
+                "password": "testtoken",
+            },
+            args=["--disable-quic", "--proxy-bypass-list=<-loopback>"],
+        )
+        context = browser.new_context()
+
+        def handle_redirect(route: Any) -> None:
+            route.fulfill(status=302, headers={"Location": "http://10.0.0.1/admin"})
+
+        context.route("https://mock-public.example/redirect-private", handle_redirect)
+        page = context.new_page()
+
+        resp = page.goto("https://mock-public.example/redirect-private", timeout=5000)
+        assert resp is not None
+        assert resp.status == 403, (
+            "Outbound proxy must reject RFC 1918 redirect target with 403 Forbidden"
+        )
+        browser.close()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_live_browser_blocks_client_side_redirect(
+    live_playwright: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Layer 2 test: verifies request guard blocks client-side JS redirects to loopback."""
     browser = live_playwright.chromium.launch(headless=True)
     context = browser.new_context(service_workers="block")
 
-    def handle_redirect(route: Any) -> None:
-        route.fulfill(status=302, headers={"Location": "http://10.0.0.1/admin"})
+    redirect_served = False
 
-    context.route("https://public.example/*", handle_redirect)
+    def handle_page(route: Any) -> None:
+        nonlocal redirect_served
+        redirect_served = True
+        html = "<html><body><script>window.location.href='http://127.0.0.1/internal';</script></body></html>"
+        route.fulfill(status=200, body=html, headers={"content-type": "text/html"})
+
+    context.route("https://public.example/*", handle_page)
+
+    validated_urls: list[str] = []
+
+    def selective_validate(url: str) -> ValidatedURL:
+        validated_urls.append(url)
+        if "127.0.0.1" in url or "localhost" in url:
+            raise URLSecurityError("blocked loopback target")
+        return ValidatedURL(url, "public.example", 443, (ipaddress.ip_address("93.184.216.34"),))
+
+    monkeypatch.setattr(browser_mod, "validate_url", selective_validate)
     browser_mod._install_request_guard(context)
     page = context.new_page()
 
-    aborted = False
-    try:
-        page.goto("https://public.example/redirect-private", timeout=3000)
-    except Exception as exc:
-        aborted = True
-        assert "ERR_BLOCKED_BY_CLIENT" in str(exc)
-    assert aborted, "Redirect to private IP was not blocked"
+    page.goto("https://public.example/redirect", timeout=3000)
+    page.wait_for_timeout(500)
+
+    assert redirect_served, "Redirect page was never served"
+    assert any("127.0.0.1" in u for u in validated_urls), (
+        "Loopback redirect target was not validated and guarded"
+    )
+    assert page.url != "http://127.0.0.1/internal"
     browser.close()
 
 
@@ -334,28 +431,55 @@ def test_context_request_guard_reuses_host_cache(monkeypatch: pytest.MonkeyPatch
 
 
 def test_live_browser_blocks_websockets_without_hanging(live_playwright: Any) -> None:
-    browser = live_playwright.chromium.launch(headless=True)
-    context = browser.new_context(service_workers="block")
-    browser_mod._install_request_guard(context)
-    page = context.new_page()
-    page.set_content("<html><body><h1>WS Test</h1></body></html>")
-    result = page.evaluate("""
-        new Promise((resolve) => {
-            try {
-                const ws = new WebSocket("ws://127.0.0.1:9999");
-                ws.onclose = (event) => resolve({status: "closed", code: event.code});
-                ws.onerror = () => resolve({status: "error"});
-                setTimeout(() => resolve({status: "timeout"}), 1500);
-            } catch (e) {
-                resolve({status: "exception", error: e.message});
-            }
-        })
-    """)
-    assert result["status"] in {"closed", "error"}
-    if result["status"] == "closed":
+    import socket
+    import threading
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+
+    def accept_loop() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+                conn.close()
+            except Exception:
+                break
+
+    t = threading.Thread(target=accept_loop, daemon=True)
+    t.start()
+
+    try:
+        browser = live_playwright.chromium.launch(headless=True)
+        context = browser.new_context(service_workers="block")
+        browser_mod._install_request_guard(context)
+        page = context.new_page()
+        page.set_content("<html><body><h1>WS Test</h1></body></html>")
+        result = page.evaluate(f"""
+            new Promise((resolve) => {{
+                try {{
+                    const ws = new WebSocket("ws://127.0.0.1:{port}");
+                    ws.onclose = (event) => resolve({{
+                        status: "closed",
+                        code: event.code,
+                        reason: event.reason
+                    }});
+                    ws.onerror = () => resolve({{status: "error"}});
+                    setTimeout(() => resolve({{status: "timeout"}}), 1500);
+                }} catch (e) {{
+                    resolve({{status: "exception", error: e.message}});
+                }}
+            }})
+        """)
+        assert result["status"] == "closed"
         assert result.get("code") == 1008
-    assert result["status"] != "timeout"
-    browser.close()
+        assert "Policy Violation" in result.get("reason", "")
+        assert result["status"] != "timeout"
+        browser.close()
+    finally:
+        srv.close()
 
 
 def test_research_safe_request_blocks_private_targets() -> None:
@@ -399,13 +523,15 @@ def test_research_agent_fetch_applies_guard_and_pins_transport(
         def __exit__(self, *args: Any) -> None:
             pass
 
-        def get(self, url: str) -> Any:
-            resp = SimpleNamespace()
-            resp.is_redirect = True
-            resp.headers = {"location": "http://169.254.169.254/latest/meta-data/"}
-            resp.url = url
-            resp.text = ""
-            return resp
+        def build_request(self, method: str, url: str) -> Any:
+            return httpx.Request(method, url)
+
+        def send(self, request: Any, stream: bool = False) -> Any:
+            return httpx.Response(
+                302,
+                headers={"location": "http://169.254.169.254/latest/meta-data/"},
+                request=request,
+            )
 
     import httpx
 

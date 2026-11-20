@@ -65,7 +65,7 @@ class ResearchAgent:
     def __init__(self, timeout: float = 20.0) -> None:
         self._timeout = timeout
 
-    def fetch(self, url: str, *, guard: Callable[[str], Any] | None = None) -> Citation:
+    def fetch(self, url: str, *, guard: Callable[[str], Any]) -> Citation:
         """Fetch one URL and extract a citation.
 
         ``guard`` is an optional SSRF validator applied to the initial URL and
@@ -88,20 +88,37 @@ class ResearchAgent:
             with httpx.Client(
                 transport=transport, timeout=self._timeout, follow_redirects=False
             ) as client:
-                resp = client.get(current_url)
+                req = client.build_request("GET", current_url)
+                resp = client.send(req, stream=True)
                 if resp.is_redirect:
                     hops += 1
                     if hops > 5:
+                        resp.close()
                         raise ValueError("too many redirects")
                     nxt = resp.headers.get("location")
+                    resp.close()
                     if not nxt:
-                        final_url, body = str(resp.url), resp.text
+                        final_url, body = str(resp.url), ""
                         break
                     nxt = str(httpx.URL(current_url).join(nxt))
                     current_url = nxt
                     continue
                 resp.raise_for_status()
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > 2 * 1024 * 1024:
+                    resp.close()
+                    raise ValueError("response body exceeds maximum allowed size (2MB)")
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes(16384):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        resp.close()
+                        raise ValueError("response body exceeds maximum allowed size (2MB)")
+                resp._content = b"".join(chunks)
                 final_url, body = str(resp.url), resp.text
+                resp.close()
                 break
         extractor = _TextExtractor()
         extractor.feed(body)
@@ -113,9 +130,7 @@ class ResearchAgent:
             snippet=snippet,
         )
 
-    def research(
-        self, urls: list[str], *, guard: Callable[[str], Any] | None = None
-    ) -> dict[str, Any]:
+    def research(self, urls: list[str], *, guard: Callable[[str], Any]) -> dict[str, Any]:
         citations: list[Citation] = []
         errors: dict[str, str] = {}
         for url in urls:

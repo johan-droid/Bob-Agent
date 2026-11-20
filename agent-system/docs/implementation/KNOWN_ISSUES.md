@@ -94,15 +94,17 @@ Every finding below is closed with a regression test in
    A/AAAA DNS resolution, blocking RFC 1918, loopback, link-local, CGNAT, metadata endpoints
    such as 169.254.169.254 and 100.100.100.200, IPv6-mapped addresses, and unusual numeric formats);
    (2) Playwright BrowserContext request interception (`context.route("**/*")`) with
-   `service_workers="block"`, protecting navigations, redirects, popups, iframes, fetch/XHR,
-   subresources (with a 60-second host cache preventing blocking DNS), and WebSockets closed
-   cleanly with code 1008; (3) dedicated outbound pinned proxy (`services/browser_proxy.py`)
-   that pins connections to validated literal IPs to defeat DNS rebinding while preserving TLS
-   SNI/Host, restricting methods to GET/HEAD/CONNECT, supporting Proxy-Authorization, and failing
-   closed on proxy unavailability. Research tools (`research.py` and `browser_research.py`)
-   also hardened with URL validation, per-hop redirect re-validation (5 hop limit), and IP-pinned
-   HTTP transport with fail-closed host checks.
-   Regression test: `uv run pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py` (138 passed).
+   `service_workers="block"`, protecting navigations, client-side redirects (JS/meta refresh),
+   popups, iframes, fetch/XHR, subresources (with a 60-second host cache preventing blocking DNS),
+   and WebSockets closed cleanly with code 1008; (3) dedicated outbound pinned proxy
+   (`services/browser_proxy.py`) that pins connections to validated literal IPs to defeat DNS
+   rebinding while preserving TLS SNI/Host, enforces server-side HTTP 3xx redirect safety,
+   restricts plain HTTP methods to GET/HEAD, binds strictly to loopback (127.0.0.1:8080:8080)
+   with non-root hardening, supports Proxy-Authorization, and fails closed on proxy unavailability.
+   Research tools (`research.py` and `browser_research.py`) also hardened with URL validation,
+   per-hop redirect re-validation (5 hop limit), bounded response streaming (2MB cap), and
+   IP-pinned HTTP transport with fail-closed host checks.
+   Regression test: `uv run pytest tests/unit/test_url_security.py tests/security/test_browser_ssrf.py tests/security/test_browser_egress.py` (139 passed).
 7. **Some endpoints lacked ownership checks** (FIXED where real). `get_artifact` now applies
    `enforce_owner_row`. `autopilot_reset` (which re-arms autonomy against shared state) now
    requires OWNER/ADMIN; `autopilot_kill` is deliberately left open because it is a

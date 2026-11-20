@@ -173,18 +173,19 @@ Layer 1: URL & IP Validation (url_security.py)
 Layer 2: Playwright Browser Interception (builtin/browser.py)
   → isolated BrowserContext per session (no personal profile reuse; sandbox preserved)
   → service_workers="block"
-  → context.route("**/*") intercepts all top-level navigations, redirects, popups, iframes,
-    JS fetch/XHR, and subresources (images, scripts, styles)
+  → context.route("**/*") intercepts all top-level navigations, client-side redirects (JS/meta refresh),
+    popups, iframes, JS fetch/XHR, and subresources (images, scripts, styles)
   → fast static checks + short-TTL session host cache prevents serialized blocking DNS
   → WebSockets closed cleanly with code 1008 (Policy Violation) to avoid hanging
   → --proxy-bypass-list=<-loopback>, --disable-quic, and WebRTC UDP egress disabled
 
-Layer 3: Pinned Outbound Proxy & Egress Boundary (browser_proxy.py & docker-compose.yml)
+Layer 3: Pinned Outbound Proxy (browser_proxy.py & docker-compose.yml)
   → dedicated forward proxy resolves target and connects directly to pre-validated literal IP
   → TLS SNI and Host headers preserved; certificate verification enforced
   → prevents DNS rebinding (zero TOCTOU window between validation and TCP connection)
-  → restricts methods to GET, HEAD, and CONNECT; supports optional Proxy-Authorization
-  → packaged as dedicated container (docker/browser-proxy.Dockerfile) in docker-compose.yml
+  → enforces server-side HTTP 3xx redirect safety (Chromium routes all redirect hops through proxy)
+  → restricts methods to GET, HEAD, and CONNECT; supports Proxy-Authorization
+  → packaged as hardened container bound to loopback (127.0.0.1:8080:8080, cap_drop: ALL, non-root)
   → if proxy is unavailable, browser network access fails closed (ERR_PROXY_CONNECTION_FAILED)
 ```
 
@@ -210,9 +211,13 @@ browser and research tools:
 
 `services/tools/builtin/browser.py` enforces runtime request interception within Playwright:
 - Every session uses an isolated `BrowserContext` with `service_workers="block"`.
-- Context-level routing (`context.route("**/*")`) monitors every request before it hits the
-  wire, protecting main document navigations, server redirects, popups, child frames/iframes,
-  and dynamic JavaScript requests (`fetch`, `XMLHttpRequest`).
+- Context-level routing (`context.route("**/*")`) monitors initial requests before they hit the
+  wire, protecting main document navigations, client-side redirects (JS/meta refresh), popups,
+  child frames/iframes, and dynamic JavaScript requests (`fetch`, `XMLHttpRequest`).
+  *(Note on Playwright redirect semantics: In Playwright 1.65+, server-side HTTP 3xx redirect hops
+  are followed internally by Chromium's network service and do not trigger `context.route` handlers;
+  server redirect protection is strictly enforced by Layer 3, where Chromium sends all hops through
+  the outbound pinned proxy).*
 - Unsafe requests are aborted with `blockedbyclient`.
 - Fast static checks combined with a 60-second session host cache eliminate serialized blocking
   DNS calls on the main thread for page subresources.
@@ -223,7 +228,7 @@ browser and research tools:
   `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` to eliminate WebRTC UDP leaks.
 - Security sandboxing remains fully enabled (no `--no-sandbox`).
 
-### Layer 3: Pinned outbound proxy & egress boundary
+### Layer 3: Pinned outbound proxy & loopback binding
 
 `services/browser_proxy.py` provides a dedicated outbound HTTP/HTTPS forward proxy:
 - **Address Pinning & DNS Rebinding Protection:** The proxy performs DNS resolution, checks
@@ -234,13 +239,13 @@ browser and research tools:
 - **Method & Protocol Controls:** The plain HTTP proxy allows only `GET` and `HEAD` methods (relaying
   unsafe mutating methods is rejected with `405 Method Not Allowed`). HTTPS traffic is handled via
   `CONNECT` after target validation.
-- **Authentication:** Supports optional `Proxy-Authorization` (Bearer token or Basic auth) via
-  `BROWSER_PROXY_TOKEN`.
+- **Authentication & Loopback Binding:** Supports `Proxy-Authorization` (Bearer token or Basic auth)
+  via `BROWSER_PROXY_TOKEN`. In `docker-compose.yml`, the port is bound strictly to loopback
+  (`127.0.0.1:8080:8080`) with `cap_drop: ALL`, `no-new-privileges:true`, and non-root user `1000:1000`.
 - **Fail-Closed Availability:** If `BROWSER_PROXY_URL` is unset, browser session initialization
   refuses to start. If the proxy is stopped or unreachable, Chromium navigations fail closed with
   `ERR_PROXY_CONNECTION_FAILED`.
-- **Deployment Packaging:** Built via `backend/docker/browser-proxy.Dockerfile` and run as a
-  service in `docker-compose.yml`.
+- **Deployment Packaging:** Built via hardened `backend/docker/browser-proxy.Dockerfile` running as non-root `1000:1000`.
 
 ### Research tools hardening
 

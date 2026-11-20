@@ -52,8 +52,17 @@ class _Request:
 class OutboundProxy:
     """Fail-closed HTTP proxy that pins every browser destination connection."""
 
-    def __init__(self, *, auth_token: str | None = None, timeout: float = _PROXY_TIMEOUT) -> None:
+    def __init__(
+        self,
+        *,
+        auth_token: str | None = None,
+        require_token: bool = False,
+        timeout: float = _PROXY_TIMEOUT,
+    ) -> None:
+        if require_token and not auth_token:
+            raise ValueError("Proxy authentication token is required when require_token=True")
         self._auth_token = auth_token
+        self._require_token = require_token
         self._timeout = timeout
         self._server: asyncio.AbstractServer | None = None
 
@@ -332,23 +341,44 @@ async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
         await writer.drain()
 
 
-async def _run_proxy(host: str, port: int, token: str | None = None) -> None:
-    proxy = OutboundProxy(auth_token=token)
+async def _run_proxy(
+    host: str, port: int, token: str | None = None, require_token: bool = False
+) -> None:
+    proxy = OutboundProxy(auth_token=token, require_token=require_token)
     await proxy.start(host, port)
     await proxy.serve_forever()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bob Agent pinned-destination browser proxy")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    default_host = os.environ.get("BROWSER_PROXY_HOST", "127.0.0.1")
+    default_port = int(os.environ.get("BROWSER_PROXY_PORT", "8080"))
+    default_token = os.environ.get("BROWSER_PROXY_TOKEN")
+    default_require = os.environ.get("BROWSER_PROXY_REQUIRE_TOKEN", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+    parser.add_argument("--host", default=default_host)
+    parser.add_argument("--port", type=int, default=default_port)
     parser.add_argument(
         "--token",
-        default=os.environ.get("BROWSER_PROXY_TOKEN"),
-        help="Optional proxy authentication token",
+        default=default_token,
+        help="Proxy authentication token (required in production)",
+    )
+    parser.add_argument(
+        "--require-token",
+        action="store_true",
+        default=default_require,
+        help="Require proxy authentication token on startup",
     )
     args = parser.parse_args()
-    asyncio.run(_run_proxy(args.host, args.port, token=args.token))
+    if args.require_token and not args.token:
+        parser.error("Proxy authentication token is required (--token or BROWSER_PROXY_TOKEN).")
+    asyncio.run(
+        _run_proxy(args.host, args.port, token=args.token, require_token=args.require_token)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point

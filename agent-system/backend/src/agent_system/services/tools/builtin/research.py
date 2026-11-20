@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlparse
 
 import httpcore
@@ -36,6 +36,7 @@ from agent_system.services.tools.url_security import (
 GROUP = "research"
 MAX_RESULTS = 20
 MAX_TEXT_CHARS = 12000
+_MAX_RESEARCH_BODY_BYTES: Final = 2 * 1024 * 1024
 SEARCH_URL = "https://html.duckduckgo.com/html/?q="
 USER_AGENT = "BobAgent/0.1 (+local research capability)"
 
@@ -73,9 +74,36 @@ def _safe_request(
                     follow_redirects=False,
                     headers={"User-Agent": USER_AGENT},
                 ) as client:
-                    req_func = client.head if current_method == "HEAD" else client.get
-                    response = req_func(current_url)
+                    if current_method == "HEAD":
+                        response = client.head(current_url)
+                    else:
+                        req = client.build_request("GET", current_url)
+                        resp = client.send(req, stream=True)
+                        if resp.is_redirect:
+                            resp.read()
+                            response = resp
+                        else:
+                            resp.raise_for_status()
+                            cl = resp.headers.get("content-length")
+                            if cl and cl.isdigit() and int(cl) > _MAX_RESEARCH_BODY_BYTES:
+                                resp.close()
+                                raise ToolError("response body exceeds maximum allowed size (2MB)")
+                            chunks: list[bytes] = []
+                            total = 0
+                            for chunk in resp.iter_bytes(16384):
+                                chunks.append(chunk)
+                                total += len(chunk)
+                                if total > _MAX_RESEARCH_BODY_BYTES:
+                                    resp.close()
+                                    raise ToolError(
+                                        "response body exceeds maximum allowed size (2MB)"
+                                    )
+                            resp._content = b"".join(chunks)
+                            resp.close()
+                            response = resp
                     break
+            except ToolError:
+                raise
             except (httpx.ConnectError, httpx.ConnectTimeout, httpcore.ConnectError) as exc:
                 last_exc = exc
                 continue
