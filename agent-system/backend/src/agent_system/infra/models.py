@@ -657,6 +657,7 @@ class A2AProcessedEnvelope(Base):
 
     envelope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     delegation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = _ts()
 
 
 # ---------------------------------------------------------------------------
@@ -711,4 +712,3 @@ class InferenceCheckpoint(Base):
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts(index=True)
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = _ts()

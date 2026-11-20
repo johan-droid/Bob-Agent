@@ -54,25 +54,29 @@ def classify_error(exc_or_msg: Any, status_code: int | None = None) -> tuple[Fai
     :mod:`llm_contract` classifier so the router, health tracker and
     fallback ledger share one taxonomy; legacy member names are preserved.
     """
+    _classify: Any = None
+    _provider_error_code: Any = None
     try:
         from agent_system.services.llm_contract import ProviderErrorCode
-        from agent_system.services.llm_contract import classify_provider_error as _classify
+        from agent_system.services.llm_contract import classify_provider_error as _classify_fn
+
+        _classify = _classify_fn
+        _provider_error_code = ProviderErrorCode
     except ImportError:
-        _classify = None  # type: ignore[assignment]
-        ProviderErrorCode = None  # type: ignore[assignment]
-    if _classify is not None:
+        pass
+    if _classify is not None and _provider_error_code is not None:
         err = _classify(exc_or_msg, status_code=status_code)
         # Legacy member names preserved for existing callers/tests:
         # AUTH_FAILURE (== AUTHENTICATION), NOT_FOUND (invalid model),
         # RATE_LIMIT (== RATE_LIMITED), NETWORK_ERROR (== NETWORK).
         mapping = {
-            ProviderErrorCode.AUTHENTICATION: (FailureCategory.AUTH_FAILURE, False),
-            ProviderErrorCode.INVALID_REQUEST: (FailureCategory.INVALID_REQUEST, False),
-            ProviderErrorCode.INVALID_MODEL: (FailureCategory.NOT_FOUND, False),
-            ProviderErrorCode.MODEL_UNAVAILABLE: (FailureCategory.NOT_FOUND, False),
-            ProviderErrorCode.RATE_LIMITED: (FailureCategory.RATE_LIMIT, True),
-            ProviderErrorCode.QUOTA_EXHAUSTED: (FailureCategory.RATE_LIMIT, True),
-            ProviderErrorCode.TIMEOUT: (FailureCategory.TIMEOUT, True),
+            _provider_error_code.AUTHENTICATION: (FailureCategory.AUTH_FAILURE, False),
+            _provider_error_code.INVALID_REQUEST: (FailureCategory.INVALID_REQUEST, False),
+            _provider_error_code.INVALID_MODEL: (FailureCategory.NOT_FOUND, False),
+            _provider_error_code.MODEL_UNAVAILABLE: (FailureCategory.NOT_FOUND, False),
+            _provider_error_code.RATE_LIMITED: (FailureCategory.RATE_LIMIT, True),
+            _provider_error_code.QUOTA_EXHAUSTED: (FailureCategory.RATE_LIMIT, True),
+            _provider_error_code.TIMEOUT: (FailureCategory.TIMEOUT, True),
             ProviderErrorCode.NETWORK: (FailureCategory.NETWORK_ERROR, True),
             ProviderErrorCode.SERVER_ERROR: (FailureCategory.SERVER_ERROR, True),
             ProviderErrorCode.TOOL_UNSUPPORTED: (FailureCategory.TOOL_UNSUPPORTED, False),

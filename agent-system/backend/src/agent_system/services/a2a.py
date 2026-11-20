@@ -247,11 +247,10 @@ class A2AService:
                 with session_scope(self._factory) as db:
                     if db.get(A2AProcessedEnvelope, envelope_hash) is not None:
                         delegation_id = str(body.get("delegation_id") or "")
+                        deleg = self._delegations.get(delegation_id)
                         return {
                             "delegation_id": delegation_id,
-                            "task_id": self._delegations.get(delegation_id).task_id
-                            if self._delegations.get(delegation_id)
-                            else None,
+                            "task_id": deleg.task_id if deleg is not None else None,
                             "status": "duplicate",
                         }
                     db.add(
