@@ -125,6 +125,10 @@ def _fresh_settings(
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{target}")
     monkeypatch.setenv("TASK_RUNNER_RECOVERY_ENABLED", "false")
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+    monkeypatch.setenv(
+        "BOB_MASTER_ENCRYPTION_KEY",
+        "ci-test-master-encryption-key-for-unit-tests-only-32bytes",
+    )
     clear_settings_cache()
     yield
     clear_settings_cache()
