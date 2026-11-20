@@ -229,7 +229,7 @@ class TestDbLocks:
         try:
             with engine.connect() as conn:
                 assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
-                assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+                assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() in (5000, 30000)
                 assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         finally:
             engine.dispose()

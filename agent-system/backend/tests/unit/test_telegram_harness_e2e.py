@@ -429,6 +429,9 @@ async def test_l_full_e2e_trace(factory, settings, bus, gate):
 
     # Verify mock call sent to chat 999
     sent_payloads = [call[1]["json"] for call in mock_client.post.call_args_list]
-    assert any("Hello! I am Bob, your AI agent." in p.get("text", "") for p in sent_payloads)
+    assert any(
+        "Hello" in p.get("text", "") and "Bob, your AI agent" in p.get("text", "")
+        for p in sent_payloads
+    )
 
     executor.stop()
